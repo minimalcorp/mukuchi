@@ -1,0 +1,10 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  color-scheme: light dark;
+}
+
+.container {
+  margin: 0;
+  padding-top: 10vh;
+  text-align: center;
+}

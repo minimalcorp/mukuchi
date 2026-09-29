@@ -1,0 +1,48 @@
+# 開発環境: asr-server の /health 応答(モデル読み込み完了)を待ってから tauri dev を起動する。
+# 起動・停止は Makefile 経由 (make up / make down)。UDS モードで TCP ポートを使わない。
+version: "0.5"
+
+# 全プロセスの出力をまとめて書き出す (make logs で追従)
+log_location: ./.process-compose/all.log
+log_configuration:
+  disable_json: true
+  fields_order: ["process", "message"]
+  flush_each_line: true
+  no_metadata: true
+
+processes:
+  asr:
+    command: uv run --project asr-server mukuchi-asr --port 18765 --model neosophie/Qwen3-ASR-1.7B-JA
+    # 本番と同じレイアウトで dev 用バンドルIDのデータディレクトリを使う (docs/architecture.md)。
+    # MUKUCHI_DEV_DATA は Makefile が export する (process-compose は起動時に YAML 中の ${VAR} を環境変数で展開する)
+    environment:
+      - "HF_HOME=${MUKUCHI_DEV_DATA}/models"
+      - "UV_CACHE_DIR=${MUKUCHI_DEV_DATA}/cache"
+      # モデルは make setup で取得済みの前提。起動時にネットワークへ問い合わせない
+      - "HF_HUB_OFFLINE=1"
+    readiness_probe:
+      http_get:
+        host: 127.0.0.1
+        port: 18765
+        path: /health
+        scheme: http
+      # モデル読み込みに数十秒かかるため余裕を持たせる (最大 約5分)
+      initial_delay_seconds: 5
+      period_seconds: 5
+      timeout_seconds: 10
+      failure_threshold: 60
+    availability:
+      restart: on_failure
+      max_restarts: 3
+    shutdown:
+      signal: 15
+      timeout_seconds: 10
+
+  app:
+    command: npm run tauri:dev
+    depends_on:
+      asr:
+        condition: process_healthy
+    shutdown:
+      signal: 15
+      timeout_seconds: 10

@@ -15,6 +15,7 @@ model: opus
 
 ## 守ること
 
+- 検証で実マイクを使わない (周囲の会話を拾うため。実マイクでの確認はユーザーに依頼する)。ユーザーのアプリ・書類・クリップボードを変更しない
 - macOSのdevShellは `mkShell` を使う。`DEVELOPER_DIR` をホストのXcodeに向けない (Xcode 27でリンクが壊れる既知問題: no-phux/phux#763)。nixpkgsのApple SDKを使う
 - 署名・公証 (`codesign`, `xcrun notarytool`, `stapler`) はホストXcodeのツールを使う。devShell内から使えるかを実際に確認し、使えなければ `/usr/bin/xcrun` の明示パス等で対処する
 - Pythonの依存はNixで管理しない。`asr-server/` の uv (`uv.lock`) に任せる

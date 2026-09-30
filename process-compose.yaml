@@ -40,6 +40,9 @@ processes:
 
   app:
     command: npm run tauri:dev
+    environment:
+      # アプリは ASR サーバーを自分で起動せず、ここに接続する (docs/architecture.md)
+      - "MUKUCHI_ASR_URL=http://127.0.0.1:18765"
     depends_on:
       asr:
         condition: process_healthy

@@ -16,6 +16,7 @@ model: opus
 
 ## 守ること
 
+- 検証で実マイクを使わない (周囲の会話を拾うため。実マイクでの確認はユーザーに依頼する)。ユーザーのアプリ・書類・クリップボードを変更しない
 - 配布はDeveloper ID + 公証のみ。Mac App Store向けの対応はしない
 - 証明書・APIキー・パスワードをリポジトリに置かない。公証の認証情報はリポジトリ外 (例: `~/.config/mukuchi/notary.env` やキーチェーンのnotarytoolプロファイル) から読む
 - entitlementsは必要最小限 (マイク `com.apple.security.device.audio-input` 等)。追加する場合は理由をコメントに残す

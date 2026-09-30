@@ -62,6 +62,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 - `POST /transcribe` — body: 16kHz/mono/16bit PCMのWAV (`Content-Type: audio/wav`)。query: `language` (既定 `Japanese`)、`context` (語彙ヒント、任意) → `200 {"text":"...","elapsed_ms":123}`
   - `elapsed_ms`: サーバーがbodyを受信し終えてから応答するまでの時間 (WAVデコード + 推論待ち + 推論)。ネットワーク転送は含まない
   - エラー: 不正なWAV/形式違い → `400`、body が 5MiB (約120秒分+余裕) を超える → `413`
+- 開発用 (デバッグビルドのみ): `MUKUCHI_DEV_AUDIO_FILE=<wav>` でマイクの代わりにWAVを実時間で流す (その後は無音)。`MUKUCHI_DEV_AUTO_LISTEN=1` でASR準備完了後に自動でONにする
 - 推論は直列実行 (MLXはスレッド束縛のため、読み込み・ウォームアップ・全推論を専用の1スレッドで行う)。無音由来の定型ハルシネーション除外はサーバー側で行う
 - リアルタイムプレビューも同じ `/transcribe` を使う(専用APIは設けない)
 
@@ -98,7 +99,7 @@ type Utterance = {
 
 type UtteranceResult =
   | { kind: "inserted"; id: number; text: string; appName: string }
-  | { kind: "command"; id: number; text: string; key: string }        // key 表示用 例 "Enter"
+  | { kind: "command"; id: number; text: string; key: string }        // key 表示用 例 "Enter" "⇧+Enter" "⌘+Enter" (修飾は ⌃⌥⇧⌘ の順)
   | { kind: "skipped_excluded"; id: number; text: string; appName: string }
   | { kind: "empty"; id: number }                                     // 認識結果が空
   | { kind: "discarded"; id: number }                                 // 短すぎる発話(誤検出) / 発話中にOFF
@@ -138,6 +139,8 @@ type AppInfo = { version: string; build: string };
 ```
 
 #### commands
+
+エラー時は表示用メッセージ(日本語の文字列)で reject する。未実装のcommandは `not_implemented:` で始まる文字列を返す。
 
 | command | 引数 → 戻り値 | 用途 |
 |---|---|---|

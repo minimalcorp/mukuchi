@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
-  "windows": ["main"],
+  "description": "Capability for all mukuchi windows",
+  "windows": ["panel", "settings", "setup"],
   "permissions": ["core:default"]
 }

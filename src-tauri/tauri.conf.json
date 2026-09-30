@@ -12,9 +12,12 @@
   "app": {
     "windows": [
       {
+        "label": "panel",
         "title": "mukuchi",
-        "width": 800,
-        "height": 600
+        "width": 440,
+        "height": 120,
+        "resizable": false,
+        "visible": false
       }
     ],
     "security": {

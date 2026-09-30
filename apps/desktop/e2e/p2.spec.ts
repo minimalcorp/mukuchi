@@ -124,11 +124,18 @@ test("settings: open_settings(category) が開いている設定を切り替え�
 
 test("panel: 初期値の応答より新しい status-changed を優先する", async ({ page }) => {
   // get_status は呼ばれた時点の値 (オフ) を 500ms 遅れて返す
-  await open(page, "window=panel&mock=off&slow=get_status", PANEL);
+  // 応答を返すタイミングを clock で決める (実時間だと遅い CI では購読より先に応答が届き、確認したい順序にならない)
+  await page.clock.install({ time: 0 });
+  await page.clock.pauseAt(1000);
+  // open() は描画を待つが、panel は get_status の応答 (時計を止めているので返らない) か status-changed が届くまで描画しない
+  await page.setViewportSize(PANEL);
+  await page.goto("/?window=panel&mock=off&slow=get_status");
+  await page.waitForFunction(() => "__mukuchiMock" in window);
   await expect.poll(async () => (await calls(page)).some((c) => c.cmd === "get_status")).toBe(true);
   await mock(page, `api.setStatus({ phase: "listening" });`);
   await expect(page.getByText("待機中")).toBeVisible();
-  await page.waitForTimeout(700);
+  await page.clock.runFor(500);
+  await page.waitForTimeout(100);
   // 遅れて届いた古い「オフ」で上書きされない
   await expect(page.getByText("待機中")).toBeVisible();
   await expect(page.getByRole("button", { name: "音声入力をオフ" })).toBeVisible();

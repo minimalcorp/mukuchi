@@ -44,6 +44,9 @@ function modelBytes(page: Page): Promise<number> {
 // ---------- セットアップ: ダウンロード ----------
 
 test("setup: runtime → model → verify と進み、done になってから次へ進める", async ({ page }) => {
+  // モックの進行 (250ms ごと) を clock で進める。実時間だと遅い CI では確認する前に次の段階へ進んでしまう
+  await page.clock.install({ time: 0 });
+  await page.clock.pauseAt(1000);
   await open(page, "window=setup&mock=download-live", SETUP);
   const next = page.getByRole("button", { name: "次へ" });
   // 未開始なら開始する
@@ -52,14 +55,20 @@ test("setup: runtime → model → verify と進み、done になってから次
   await expect(item(page, "runtime")).toContainText("準備しています…");
   await expect(page.getByText("実行環境を準備しています")).toBeVisible();
   await expect(next).toBeDisabled();
-  // model はバイト数、全体も model のみ
+  // model はバイト数、全体も model のみ (runtime は約 1 秒)
+  await page.clock.runFor(1000);
   await expect(item(page, "runtime")).toContainText("完了");
+  await page.clock.runFor(250);
   await expect(item(page, "model")).toContainText(/\d\.\d \/ 2\.4 GB/);
+  // 全体は 1 GB 未満なら MB で出すので、1 GB を超えるまで進める (model は 0.1 GB / 250ms)
+  await page.clock.runFor(2250);
   await expect(page.getByText(/GB \/ 2\.4 GB/)).toBeVisible();
   // verify
-  await expect(item(page, "verify")).toContainText("確認しています…", { timeout: 10_000 });
+  await page.clock.runFor(3750);
+  await expect(item(page, "verify")).toContainText("確認しています…");
   await expect(next).toBeDisabled();
-  await expect(item(page, "verify")).toHaveAttribute("data-state", "done", { timeout: 5000 });
+  await page.clock.runFor(1000);
+  await expect(item(page, "verify")).toHaveAttribute("data-state", "done");
   await expect(next).toBeEnabled();
   await expect(page.getByText("実行環境とモデルの準備ができました")).toBeVisible();
 });

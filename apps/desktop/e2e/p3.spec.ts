@@ -32,6 +32,16 @@ async function mock(page: Page, fn: string) {
   await page.evaluate(`(() => { const api = window.__mukuchiMock; ${fn} })()`);
 }
 
+/**
+ * ページのタイマーを止め、以降は clock.runFor で進めた分だけ発火させる。
+ * 間引き (150ms) や遅い応答 (500ms) を実時間で待つと、遅い CI では検証前に発火してしまうため。
+ * 読み込み中は時間を流す (止めたまま goto すると読み込みが進まないことがある)。open の前に install しておく
+ */
+async function pauseClock(page: Page) {
+  const now = await page.evaluate(() => Date.now());
+  await page.clock.pauseAt(now + 1000);
+}
+
 /** React の値の追跡を通すため、ネイティブの setter で値を入れてから input を送る (ドラッグ中の 1 目盛り) */
 async function slide(page: Page, label: string, value: number) {
   await page.getByRole("slider", { name: label }).evaluate((el, v) => {
@@ -139,41 +149,61 @@ test("settings: 他ウィンドウの変更 (settings-changed) を反映する",
 });
 
 test("settings: 保存の応答待ちに届いた古い settings-changed で操作した値を戻さない", async ({ page }) => {
+  await page.clock.install();
   await open(page, "window=settings&mock=default&category=general&slow=update_settings", SETTINGS);
+  await pauseClock(page);
   const sw = page.getByRole("switch", { name: "ログイン時に起動" });
   await sw.click();
   await expect(sw).not.toBeChecked();
+  await expect.poll(async () => (await calls(page, "update_settings")).length).toBe(1);
   // 応答 (500ms 後) より前に、変更前の値を含む settings-changed が届く (他ウィンドウが別のキーを変えた)
   await mock(page, `api.fire("settings-changed", { ...api.db.settings, launchAtLogin: true });`);
   await page.waitForTimeout(100);
   await expect(sw).not.toBeChecked();
   // 応答が届いた後も変わらない
-  await expect.poll(async () => (await calls(page, "update_settings")).length).toBe(1);
-  await page.waitForTimeout(600);
+  await page.clock.runFor(500);
+  await page.waitForTimeout(100);
   await expect(sw).not.toBeChecked();
+  expect(await calls(page, "update_settings")).toHaveLength(1);
 });
 
 // ---------- スライダー ----------
 
 test("settings: スライダーはドラッグ中に間引き、止まって 150ms 後に 1 回だけ保存する", async ({ page }) => {
+  await page.clock.install();
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
-  for (const v of [61, 64, 68, 72]) await slide(page, "発話検出の感度", v);
+  await pauseClock(page);
+  // 1 目盛りごとに 100ms 空ける (間引きの 150ms 未満なので、ドラッグ中は保存しない)
+  for (const v of [61, 64, 68, 72]) {
+    await slide(page, "発話検出の感度", v);
+    await page.clock.runFor(100);
+  }
   // 表示はすぐ追従する
   await expect(page.getByText("72", { exact: true })).toBeVisible();
   expect(await calls(page, "update_settings")).toHaveLength(0);
+  // 最後の目盛りから 149ms ではまだ保存しない
+  await page.clock.runFor(49);
+  expect(await calls(page, "update_settings")).toHaveLength(0);
+  // 150ms で最後の値を 1 回だけ保存する
+  await page.clock.runFor(1);
   await expect.poll(async () => (await calls(page, "update_settings")).map((c) => c.args)).toEqual([
     { patch: { vadSensitivity: 72 } },
   ]);
+  await page.clock.runFor(1000);
+  expect(await calls(page, "update_settings")).toHaveLength(1);
 });
 
 test("settings: スライダーを離したら待たずに保存する", async ({ page }) => {
+  await page.clock.install();
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
+  await pauseClock(page);
   await slide(page, "話し終わりと判定するまでの無音", 8);
   await page.getByRole("slider", { name: "話し終わりと判定するまでの無音" }).dispatchEvent("pointerup");
-  // 150ms を待たずに保存される
+  // 150ms を待たずに保存される (時計は止めてある)
   expect((await calls(page, "update_settings")).map((c) => c.args)).toEqual([{ patch: { silenceMs: 800 } }]);
   await expect(page.getByText("0.8 秒")).toBeVisible();
-  await page.waitForTimeout(300);
+  // 間引きのタイマーは取り消されていて、150ms 経っても二重に保存しない
+  await page.clock.runFor(300);
   expect(await calls(page, "update_settings")).toHaveLength(1);
 });
 
@@ -186,13 +216,17 @@ test("settings: キーボードでの変更も保存する", async ({ page }) =>
 
 test("settings: トラックの塗り分け位置はオン中は audio-level の threshold、オフ中・操作中は感度から求める", async ({ page }) => {
   // default はオン (threshold 0.55 を流す)
+  await page.clock.install();
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
   const below = page.getByTestId("input-level-meter-below");
   await expect(below).toHaveAttribute("style", /width: 55(\.\d+)?%/);
+  // 操作中の表示は間引き (150ms) で保存されるまでしか出ないので、時計を止めて確認する
+  await pauseClock(page);
   // ドラッグ中は保存前の感度から求めた位置 (感度 100 → -55 dB → 0.1)。レベル 0.3 前後が境目を超えるので青になる
   await slide(page, "発話検出の感度", 100);
   await expect(below).toHaveAttribute("style", /width: 10(\.\d+)?%/);
   await expect(page.getByTestId("input-level-meter")).toHaveAttribute("data-active", "true");
+  await page.clock.resume();
 
   // オフ (perm-denied はオフ): 感度 60 → -45 dB → 0.3。バーは出さない
   await open(page, "window=settings&mock=perm-denied&category=voice", SETTINGS);

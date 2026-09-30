@@ -145,6 +145,9 @@ test("panel anchor: panel-anchor で配置を切り替える", async ({ page }) 
 });
 
 test("panel anchor: 購読後に届いた panel-anchor を遅れて届く get_panel_anchor の応答で上書きしない", async ({ page }) => {
+  // 応答を返すタイミングを clock で決める (実時間だと遅い CI では変更より先に応答が届き、確認したい順序にならない)
+  await page.clock.install({ time: 0 });
+  await page.clock.pauseAt(1000);
   await open(page, "window=panel&mock=idle&anchor=bottom-right&slow=get_panel_anchor");
   await expect(page.getByText("待機中")).toBeVisible();
   await expect
@@ -157,7 +160,8 @@ test("panel anchor: 購読後に届いた panel-anchor を遅れて届く get_pa
   // get_panel_anchor (500ms 遅れ・呼ばれた時点の bottom-right を返す) の応答前にアンカーが変わる
   await mock(page, `api.setAnchor({ horizontal: "left", vertical: "top" });`);
   await expect(page.locator("[data-anchor]")).toHaveAttribute("data-anchor", "top-left");
-  await page.waitForTimeout(700);
+  await page.clock.runFor(500);
+  await page.waitForTimeout(100);
   await expect(page.locator("[data-anchor]")).toHaveAttribute("data-anchor", "top-left");
 });
 

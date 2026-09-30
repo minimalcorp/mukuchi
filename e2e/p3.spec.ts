@@ -182,18 +182,31 @@ test("settings: キーボードでの変更も保存する", async ({ page }) =>
   await expect.poll(async () => (await calls(page, "update_settings")).at(-1)?.args).toEqual({ patch: { vadSensitivity: 61 } });
 });
 
-test("settings: しきい値の縦線はオン中は audio-level の threshold、オフ中・操作中は感度から求める", async ({ page }) => {
+test("settings: トラックの塗り分け位置はオン中は audio-level の threshold、オフ中・操作中は感度から求める", async ({ page }) => {
   // default はオン (threshold 0.55 を流す)
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
-  const line = page.getByTestId("level-threshold");
-  await expect(line).toHaveAttribute("style", /left: 55(\.\d+)?%/);
-  // ドラッグ中は保存前の感度から求めた位置 (感度 100 → -55 dB → 0.1)
+  const below = page.getByTestId("input-level-meter-below");
+  await expect(below).toHaveAttribute("style", /width: 55(\.\d+)?%/);
+  // ドラッグ中は保存前の感度から求めた位置 (感度 100 → -55 dB → 0.1)。レベル 0.3 前後が境目を超えるので青になる
   await slide(page, "発話検出の感度", 100);
-  await expect(line).toHaveAttribute("style", /left: 10(\.\d+)?%/);
+  await expect(below).toHaveAttribute("style", /width: 10(\.\d+)?%/);
+  await expect(page.getByTestId("input-level-meter")).toHaveAttribute("data-active", "true");
 
-  // オフ (perm-denied はオフ): 感度 60 → -45 dB → 0.3
+  // オフ (perm-denied はオフ): 感度 60 → -45 dB → 0.3。バーは出さない
   await open(page, "window=settings&mock=perm-denied&category=voice", SETTINGS);
-  await expect(page.getByTestId("level-threshold")).toHaveAttribute("style", /left: 30(\.\d+)?%/);
+  await expect(page.getByTestId("input-level-meter-below")).toHaveAttribute("style", /width: 30(\.\d+)?%/);
+  await expect(page.getByTestId("input-level-meter")).toHaveAttribute("data-active", "false");
+});
+
+test("panel: メーターはしきい値でトラックを塗り分け、超えた時だけバーを青にする", async ({ page }) => {
+  await open(page, "window=panel&mock=idle", PANEL);
+  const meter = page.getByTestId("level-meter");
+  await expect(page.getByTestId("level-meter-below")).toHaveAttribute("style", /width: 55(\.\d+)?%/);
+  await expect(meter).toHaveAttribute("data-active", "false");
+  await open(page, "window=panel&mock=speaking", PANEL);
+  await expect(page.getByTestId("level-meter")).toHaveAttribute("data-active", "true");
+  await open(page, "window=panel&mock=finalizing", PANEL);
+  await expect(page.getByTestId("level-meter")).toHaveAttribute("data-active", "false");
 });
 
 // ---------- マイク ----------

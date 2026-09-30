@@ -20,6 +20,7 @@ import {
 import { useEffect, useLayoutEffect, useRef, type ReactNode, type Ref } from "react";
 import { commands, runCommand, type AppError, type AppStatus } from "@/lib/ipc";
 import { useAudioLevel } from "@/lib/audio-level";
+import { LevelMeter } from "@/components/app/level-meter";
 import { env } from "@/lib/env";
 import { errorActionView } from "@/lib/error-actions";
 import { usePanelDrag } from "@/lib/panel-drag";
@@ -262,7 +263,7 @@ function ListeningPanel({ isOn, expanded, items }: { isOn: boolean; expanded: bo
           style={{ height: expanded ? ROW_HEIGHT.expanded : ROW_HEIGHT.pill }}
         >
           <ToggleButton isOn={isOn} />
-          <LevelMeter active={isOn} />
+          <PanelLevelMeter active={isOn} />
           <StatusLabel expanded={expanded} items={items} />
         </div>
       </div>
@@ -296,23 +297,15 @@ function ToggleButton({ isOn }: { isOn: boolean }) {
 }
 
 /** 入力レベル。約15Hz で更新されるのでここだけが購読・再描画する */
-function LevelMeter({ active }: { active: boolean }) {
+function PanelLevelMeter({ active }: { active: boolean }) {
   const { level, threshold } = useAudioLevel();
-  const shown = active ? level : 0;
-  const over = active && level >= threshold;
   return (
-    <div className="relative h-1.5 flex-1 rounded-[3px] bg-meter-track" data-testid="level-meter">
-      <div
-        className={cn("h-1.5 rounded-[3px]", over ? "bg-meter-active" : "bg-meter-idle")}
-        style={{ width: `${Math.min(1, Math.max(0, shown)) * 100}%` }}
-      />
-      {/* 発話検出のしきい値 (設定の感度)。超えるとバーが青になる */}
-      <span
-        className="absolute -top-[3px] h-3 w-0.5 rounded-[1px] bg-meter-threshold"
-        style={{ left: `${threshold * 100}%` }}
-        aria-hidden
-      />
-    </div>
+    <LevelMeter
+      testId="level-meter"
+      level={active ? level : 0}
+      threshold={threshold}
+      active={active && level >= threshold}
+    />
   );
 }
 

@@ -7,7 +7,7 @@ import { useSyncExternalStore } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { onEvent, type AudioLevel } from "./ipc";
 
-// received: レベルを一度でも受け取ったか。受信前は感度から求めた位置に縦線を置く
+// received: レベルを一度でも受け取ったか。受信前は感度から求めた位置でトラックを塗り分ける
 export type LevelSnapshot = AudioLevel & { received: boolean };
 
 let current: LevelSnapshot = { level: 0, threshold: 0.55, speech: false, received: false };

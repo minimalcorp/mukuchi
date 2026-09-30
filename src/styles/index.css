@@ -72,7 +72,7 @@
   --color-meter-track-strong: var(--meter-track-strong);
   --color-meter-idle: var(--meter-idle);
   --color-meter-active: var(--meter-active);
-  --color-meter-threshold: var(--meter-threshold);
+  --color-meter-track-over: var(--meter-track-over);
   --color-switch-off: var(--switch-off);
   --color-progress-pending: var(--progress-pending);
 

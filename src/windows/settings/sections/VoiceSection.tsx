@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useAudioLevel } from "@/lib/audio-level";
+import { LevelMeter } from "@/components/app/level-meter";
 import { errorMessage, useDebouncedCommit } from "@/lib/hooks";
 import { commands, subscribeEvents, type AppStatus, type AudioDevice, type RunningApp } from "@/lib/ipc";
 import { Card, FieldError, FieldHeading, type SectionProps } from "./common";
@@ -111,7 +112,7 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
       <div className="flex flex-col gap-2">
         <FieldHeading
           label="発話検出の感度"
-          help="高くすると小さな声も拾います。周囲がうるさい場合は下げてください。入力レベルの縦線が検出のしきい値です"
+          help="高くすると小さな声も拾います。周囲がうるさい場合は下げてください。入力レベルのトラックが薄い青に変わる位置が検出のしきい値です"
           value={sensitivity.value}
         />
         <Slider
@@ -159,23 +160,17 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
 
 /**
  * 入力レベル。オンの間だけ Rust から届く。
- * しきい値の縦線は audio-level の threshold を使い、届く前・オフの間・感度の操作中 (保存前) は感度から求めた位置に置く
+ * トラックの塗り分け位置 (しきい値) は audio-level の threshold を使い、届く前・オフの間・感度の操作中 (保存前) は感度から求めた位置に置く
  */
 function InputLevel({ isOn, sensitivity, editing }: { isOn: boolean; sensitivity: number; editing: boolean }) {
   const { level, threshold, received } = useAudioLevel();
-  const line = isOn && received && !editing ? threshold : thresholdFromSensitivity(sensitivity);
+  const split = isOn && received && !editing ? threshold : thresholdFromSensitivity(sensitivity);
+  const shown = isOn ? level : 0;
   return (
     <div className="-mt-2 flex h-8 items-center gap-2.5 rounded-md bg-surface-muted px-3" data-testid="input-level">
       <AudioLines size={14} className="flex-none text-fg-muted" aria-hidden />
-      <div className="relative h-1 flex-1 rounded-[2px] bg-meter-track-strong">
-        <div className="h-1 rounded-[2px] bg-green-500" style={{ width: `${(isOn ? level : 0) * 100}%` }} />
-        <span
-          data-testid="level-threshold"
-          className="absolute -top-1 h-3 w-0.5 bg-meter-threshold"
-          style={{ left: `${line * 100}%` }}
-          aria-hidden
-        />
-      </div>
+      {/* パネルと同じく、表示中の塗り分け位置を超えたら青にする (感度の操作中も見た目の境目と一致させる) */}
+      <LevelMeter testId="input-level-meter" level={shown} threshold={split} active={isOn && shown >= split} />
       <span className="text-xs text-fg-muted">入力レベル</span>
     </div>
   );

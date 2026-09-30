@@ -93,11 +93,24 @@ Environment `production-release` (Required reviewers で承認制。作成は `.
 
 ### GitHub Actions で作る
 
-1. `version` を上げた変更を main に入れる
+1. `apps/desktop/src-tauri/tauri.conf.json` の `version` (`X.Y.Z` のみ。プレリリースは不可) を上げた変更を main に入れる
 2. Actions > Release > Run workflow (main)
-   - job `Build unsigned .app`: `pnpm install --frozen-lockfile` → `build-macos.sh --build-only` (secret なし)。.app を artifact で渡す
-   - job `Sign and notarize (.dmg)`: `production-release` の承認後、証明書を一時キーチェーンに入れて `build-macos.sh --sign-only` → 資格情報を削除 → `verify-macos.sh`
-3. 下書きの Release (`v<version>`、.dmg と .sha256 付き) を確認してから公開する
+   - job `Build unsigned .app` (secret なし): version を読んでタグ `v<version>` を決め、同じタグ・Release が既にあれば止める (このトークンでは下書きが見えないため公開済みのみ) → Kyoko の有無を確認 → `pnpm install --frozen-lockfile` → `build-macos.sh --build-only`。.app と .dmg テンプレートを artifact で渡す
+   - job `Sign and notarize (.dmg)`: `production-release` の承認後、下書きを含めて同じタグの Release がないことを再確認 → 証明書を一時キーチェーンに入れて `build-macos.sh --sign-only` → 資格情報を削除 → `verify-macos.sh`
+3. 下書きの Release `v<version>` を確認してから公開する。添付は4つ (中身は同じ .dmg):
+   - `mukuchi_<version>_aarch64.dmg` と `.sha256`
+   - `mukuchi_aarch64.dmg` と `.sha256` (LP の固定 URL 用)
+4. 公開時に「Set as the latest release」を有効にする。LP は `https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg` を使い、これは公開済み・非プレリリースの Latest の Release の添付を返す ([Linking to releases](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)、[Get the latest release](https://docs.github.com/en/rest/releases/releases#get-the-latest-release): 下書き・プレリリースは Latest にならない)。公開後 `curl -sIL <URL> | grep -i '^location'` で新しいタグを指すことを確かめる
+
+同じ version で作り直す場合は、下書きの Release を削除してから再実行する (タグは公開時に作られるため下書きだけならタグは残らない)。
+
+#### verify.wav の音声 (Kyoko)
+
+`apps/desktop/scripts/make-verify-wav.sh` は `say -v Kyoko` で検証用音声を作る。GitHub の macOS ランナーに Kyoko が入っているかは公式に記載がなく、追加音声が入っていないという報告がある ([actions/runner-images#12320](https://github.com/actions/runner-images/issues/12320)、not planned で閉じられた)。build job は最初に `say -v '?'` で確かめ、無ければ使える音声の一覧を出して止まる。その場合の代わり (選んでから実装する):
+
+- 手元 (Kyoko あり) で作った `verify.wav` を GitHub の Release 等に置き、build job で sha256 を固定して取得する (合成音声のみで人の声は含まない。Apple の音声の出力を再配布してよいかは要確認)
+- ランナーにある他の日本語音声 (一覧に `ja_JP` があれば) に切り替える。ASR が「確認します。」と認識できるかを確かめる
+- self-hosted runner (Kyoko を入れた Mac) で build job を動かす
 
 ## main の required status checks
 

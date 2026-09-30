@@ -38,10 +38,45 @@ jobs:
     permissions:
       contents: read
     timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # 長いビルドの前に止めるための早期の検査。この job のトークン (contents: read) では下書きの Release が見えないため、
+      # 下書きを含めた確認は sign job でもう一度行う
+      - name: Resolve version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(plutil -extract version raw -o - apps/desktop/src-tauri/tauri.conf.json)"
+          # プレリリース (-beta 等) は公開しても Latest にならず、LP の固定 URL が指さないため受け付けない
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tauri.conf.json の version が X.Y.Z の形でない: '$version'"; exit 1
+          fi
+          tag="v$version"
+          if [ -n "$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" --jq ".[] | select(.ref == \"refs/tags/$tag\") | .ref")" ]; then
+            echo "::error::タグ $tag が既にある。apps/desktop/src-tauri/tauri.conf.json の version を上げる"; exit 1
+          fi
+          if [ -n "$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\") | .tag_name")" ]; then
+            echo "::error::$tag の Release が既にある。version を上げる"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version: $version (tag $tag)"
+      # 初回セットアップの検証用音声 (verify.wav) を scripts/make-verify-wav.sh が say -v Kyoko で作る。
+      # GitHub の macOS ランナーに日本語音声 Kyoko が入っているかは公式に記載がないため、ビルド前に確かめて止める
+      # (無い場合の代わりの方法は docs/release.md)
+      - name: Check Japanese voice (Kyoko)
+        run: |
+          set -euo pipefail
+          if ! /usr/bin/say -v '?' | grep -q '^Kyoko '; then
+            echo "::error::このランナーに音声 Kyoko がない (verify.wav を作れない)。docs/release.md の「verify.wav の音声」を参照"
+            /usr/bin/say -v '?' | awk '{print $1, $2}' | sort -u | head -100
+            exit 1
+          fi
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - name: pnpm install
         run: nix develop -c pnpm install --frozen-lockfile
@@ -71,6 +106,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # 下書きを含めて同じタグの Release がないかを確かめる (下書きは contents: write のトークンでないと見えない)。
+      # 資格情報を読み込む前に行う
+      - name: Check version and existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          conf="$(plutil -extract version raw -o - apps/desktop/src-tauri/tauri.conf.json)"
+          [ -n "$VERSION" ] && [ "$conf" = "$VERSION" ] || { echo "::error::version が build job ('$VERSION') と違う ('$conf')"; exit 1; }
+          tag="v$VERSION"
+          if [ -n "$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" --jq ".[] | select(.ref == \"refs/tags/$tag\") | .ref")" ]; then
+            echo "::error::タグ $tag が既にある。apps/desktop/src-tauri/tauri.conf.json の version を上げる"; exit 1
+          fi
+          if [ -n "$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\") | .tag_name")" ]; then
+            echo "::error::$tag の Release (下書きを含む) が既にある。version を上げるか、不要な下書きを消す"; exit 1
+          fi
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: mukuchi-app-unsigned
@@ -128,19 +180,33 @@ jobs:
       - name: Verify
         run: apps/desktop/scripts/verify-macos.sh
 
-      # 下書きで作る (公開は人が確認してから行う)。タグは公開時に target のコミットに作られる
+      # 下書きで作る (公開は人が確認してから行う)。タグは公開時に target のコミットに作られる。
+      # LP は固定 URL https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg を使うため、
+      # 版付きの名前に加えて同じ中身を mukuchi_aarch64.dmg としても添付する (latest/download は公開済みで
+      # プレリリースでない「Latest」の Release の添付を返す。下書きのうちは古い版を返し続ける)。
+      # 出典: https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          app=apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/mukuchi.app
-          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
-          dmg="apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/mukuchi_${version}_aarch64.dmg"
-          (cd "$(dirname "$dmg")" && shasum -a 256 "$(basename "$dmg")" > "$(basename "$dmg").sha256")
-          if gh release view "v$version" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::error::v$version の Release が既にある。version を上げるか既存の下書きを消す"; exit 1
-          fi
-          gh release create "v$version" -R "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
-            --title "mukuchi $version" --notes "macOS (Apple Silicon) / Developer ID 署名・公証済み" \
-            "$dmg" "$dmg.sha256"
+          bundle=apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle
+          app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$bundle/macos/mukuchi.app/Contents/Info.plist")"
+          [ "$app_version" = "$VERSION" ] || { echo "::error::.app の版 ($app_version) が tauri.conf.json ($VERSION) と違う"; exit 1; }
+          tag="v$VERSION"
+          src="$bundle/dmg/mukuchi_${VERSION}_aarch64.dmg"
+          [ -f "$src" ] || { echo "::error::$src がない"; exit 1; }
+          out="$RUNNER_TEMP/release"
+          rm -rf "$out"; mkdir -p "$out"
+          /bin/cp -p "$src" "$out/mukuchi_${VERSION}_aarch64.dmg"
+          /bin/cp -p "$src" "$out/mukuchi_aarch64.dmg"
+          # .sha256 はそれぞれ自分のファイル名で書く (ダウンロードした名前のまま shasum -c で確かめられるように)
+          for f in "mukuchi_${VERSION}_aarch64.dmg" mukuchi_aarch64.dmg; do
+            (cd "$out" && shasum -a 256 "$f" > "$f.sha256")
+          done
+          cmp "$out/mukuchi_${VERSION}_aarch64.dmg" "$out/mukuchi_aarch64.dmg"
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+            --title "mukuchi $VERSION" --notes "macOS (Apple Silicon) / Developer ID 署名・公証済み" \
+            "$out/mukuchi_${VERSION}_aarch64.dmg" "$out/mukuchi_${VERSION}_aarch64.dmg.sha256" \
+            "$out/mukuchi_aarch64.dmg" "$out/mukuchi_aarch64.dmg.sha256"

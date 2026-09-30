@@ -35,3 +35,6 @@ __pycache__
 
 # 録音データ
 *.wav
+
+# Claude Design handoff (社内デザインシステムを含むため公開しない)
+docs/design/handoff/

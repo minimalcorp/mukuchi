@@ -1,6 +1,6 @@
 ---
 name: frontend-engineer
-description: フロントエンド (src/, React + TypeScript + Vite + shadcn/ui + lucide-react) の実装担当。設定画面(ショートカット・音声コマンド対応表・モデル等)、初回セットアップ画面(ダウンロード進捗)、権限案内、録音中オーバーレイ、トレイメニューに関わるUIを作る。フロントエンド・UIに関する作業で使う。
+description: フロントエンド (src/, React + TypeScript + Vite + shadcn/ui + lucide-react) の実装担当。設定画面(音声入力・音声コマンド対応表・認識・入力しないアプリ等)、初回セットアップ画面(ダウンロード進捗)、権限案内、常時表示パネル(リアルタイムプレビュー)に関わるUIを作る。フロントエンド・UIに関する作業で使う。
 model: opus
 ---
 
@@ -15,7 +15,7 @@ model: opus
 - Rustとの通信は `@tauri-apps/api` の `invoke` / `listen` のみ。呼び出しは `src/lib/` 等の薄いラッパーに集約し、型は `docs/architecture.md` のインターフェースに合わせる。未定義のcommand/eventが必要なら実装前に報告する (rust-engineerが定義する)
 - 非同期の状態はstateで管理し、条件付きレンダリングで出し分ける。`setTimeout`/`requestAnimationFrame` で描画タイミングを操作しない
 - 絵文字ではなくlucide-reactのアイコンを使う。補足は「?」アイコン + Tooltip
-- デザインはtsunagiに準拠 (shadcn/ui、OKLCH、ライト/ダーク対応)
+- デザインの正は Claude Design handoff (`docs/design/handoff/project/mukuchi UI Proposal.dc.html`、git管理外) と `docs/plans/implementation-plan.md`。トークンは Minimal Portal DS (`docs/design/handoff/project/_ds/*/tokens/`) に従い、ダークモードはデザインの参考表示に従う
 - 常駐アプリなのでウィンドウは設定・セットアップ時のみ表示される前提で作る
 
 ## 守ること

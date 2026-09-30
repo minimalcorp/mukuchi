@@ -4,30 +4,41 @@
 
 ```
 mukuchi.app (1プロセス)
- ├─ WebView (React: 設定・セットアップ・オーバーレイ)
+ ├─ WebView ×3 (React): panel(常時表示パネル) / settings(設定) / setup(初回セットアップ)
  │     ↕ Tauri invoke / event
- └─ Rust (録音 cpal → VAD Silero/ort → 発話切り出し → ASRクライアント → 入力)
+ ├─ Rust: 録音 cpal → VAD Silero/ort → 発話切り出し → ASRクライアント → 入力キュー
+ └─ メニューバー (macOS標準メニュー)
        ↕ HTTP 127.0.0.1
 asr-server (別プロセス / Python + mlx-qwen3-asr)
 ```
+
+UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザインシステム: Minimal Portal)。実装計画は [docs/plans/implementation-plan.md](plans/implementation-plan.md)。
 
 ## 決定事項
 
 | 項目 | 決定 | 理由・備考 |
 |---|---|---|
 | 対象OS | macOS (Apple Silicon, aarch64のみ) | MLXがApple Silicon専用 |
-| フレームワーク | Tauri v2 + Rust | 押下/解放の取得、入力送信、常駐の軽さ |
-| フロントエンド | React + TypeScript + Vite。UIはshadcn/ui + lucide-react (tsunagiに準拠) | |
+| フレームワーク | Tauri v2 + Rust | 入力送信・常駐の軽さ |
+| フロントエンド | React + TypeScript + Vite + Tailwind + shadcn/ui + lucide-react。トークンはMinimal Portal DS (HEX→CSS変数)。フォントはIBM Plex Sans JP / Mono を同梱 (オフラインで動くようGoogle Fontsは使わない) | |
+| ダークモード | システム設定に追従。DSにダークトークンがないため、デザインの参考表示(gray 700〜900を面に使用)に従う | |
 | 録音 | Rust (cpal) | WebView経由のgetUserMediaは権限ダイアログ二重表示等の既知問題あり |
 | VAD | Silero VAD (`ort`、arm64は静的リンク)。差し替え可能なtraitの背後に置く | 代替: earshot |
-| ASR | Python + MLX (`mlx-qwen3-asr`)、既定モデル `neosophie/Qwen3-ASR-1.7B-JA` | Rust実装(candle/MLX)は約3倍遅い (spikes/asr-bench)。ASRクライアントは差し替え可能に |
+| ASR | Python + MLX (`mlx-qwen3-asr`)、モデルは `neosophie/Qwen3-ASR-1.7B-JA` 系 | Rust実装(candle/MLX)は約3倍遅い (spikes/asr-bench) |
+| 操作 | 音声入力のON/OFFは **常時表示パネルのボタン** と **メニューバー** のみ。**キーボードショートカットは設けない**。押している間だけ録音するモードも実装しない | 2026-09-30 確定 |
+| 入力単位 | ONの間、発話(VAD区間)ごとに文字起こしし、話し終わったら入力。入力は単一キューで直列化 | 必須要件 |
+| リアルタイムプレビュー | 発話中は約0.8秒ごとに「その時点までの音声」を文字起こしし直してパネルに表示する。入力するのは話し終わり時点の最終結果のみ。ASRが処理中なら途中表示の要求は送らない(最終結果を優先) | 2026-09-30 確定 |
 | 入力方式 | クリップボード + ⌘V、元のクリップボードを復元 | IMEの影響を受けない |
-| 入力単位 | ONの間、発話(VAD区間)ごとに逐次入力。入力は単一キューで直列化 | 必須要件 |
-| 音声コマンド | 「語→キー」対応表(既定: 確定/エンター→Enter)。発話全体が正規化後に完全一致した時のみ。機能ごとON/OFF可 | 表記揺れは別名登録で吸収 |
+| 音声コマンド | 「言い方→キー」対応表(既定: 確定/エンター→Enter、改行→Shift+Enter、送信→⌘+Enter)。発話全体が正規化後に完全一致した時のみ。機能ごとON/OFF可 | 表記揺れは複数の言い方で吸収 |
+| 入力しないアプリ | 登録したアプリが前面にある間は入力しない(パネルに「このアプリには入力しません」) | デザインの任意提案Aを採用 |
+| メニューバー | macOS標準のメニュー(NSMenu)。状態・エラーは文字の行、復旧はメニュー項目で表す。アイコンは状態別のテンプレート画像(エラー時のみ赤点付きの非テンプレート画像) | デザインの進捗バー・色付き表示は標準メニューで再現できないため |
+| 常時表示パネル | フォーカスを奪わないパネル(NSPanel, non-activating。`tauri-nspanel`)。既定は画面下中央(Dockの上16px)、ドラッグで移動し位置を記憶。前面ウィンドウのあるディスプレイに表示 | |
+| Dock | 通常は非表示(Accessory)。設定・セットアップウィンドウ表示中のみ表示(Regular) | |
 | 配布 | Developer ID署名 + 公証の .dmg。Mac App Storeは対象外 | サンドボックスではCGEventPost不可 |
-| 実行環境の導入 | アプリは軽量に保ち、初回起動時のセットアップでuv(同梱)がPython・依存・モデルを導入 | |
-| アンインストール | アプリ内「完全にアンインストール」+ `scripts/uninstall.sh`。「環境のみ削除」も提供 | |
+| 実行環境の導入 | アプリは軽量に保ち、初回セットアップでuv(同梱)がPython・依存・モデルを導入 | |
+| アンインストール | 設定 > ストレージ の「完全にアンインストール」+ `scripts/uninstall.sh`。「実行環境とモデルのみ削除」も提供 | |
 | 開発環境 | Nix flakes devShell + Makefile + process-compose | |
+| 作らない機能 | キーボードショートカット、押している間だけ録音するモード、文字起こし履歴、入力完了時の効果音、「取り消し」音声での破棄 | 2026-09-30 決定 |
 
 ## 識別子・パス
 
@@ -36,7 +47,7 @@ asr-server (別プロセス / Python + mlx-qwen3-asr)
 | バンドルID | `com.minimalcorp.mukuchi` | `com.minimalcorp.mukuchi.dev` |
 | データ | `~/Library/Application Support/<バンドルID>/` | 同左 (devのID) |
 
-データディレクトリ配下: `uv/` `python/`(UV_PYTHON_INSTALL_DIR) `venv/` `cache/`(UV_CACHE_DIR) `models/`(HF_HOME) `logs/`。アプリ外(`~/.cache` 等)に書き込まない。
+データディレクトリ配下: `settings.json` `uv/` `python/`(UV_PYTHON_INSTALL_DIR) `venv/` `cache/`(UV_CACHE_DIR) `models/`(HF_HOME)。ログは `~/Library/Logs/<バンドルID>/`。アプリ外(`~/.cache` 等)に書き込まない。
 
 アンインストール対象: 上記データディレクトリ、`~/Library/{Caches,Logs,WebKit}/<バンドルID>`、`~/Library/Preferences/<バンドルID>.plist`、ログイン項目、TCC (`tccutil reset All <バンドルID>`)、アプリ本体。
 
@@ -46,13 +57,118 @@ asr-server (別プロセス / Python + mlx-qwen3-asr)
 
 ### ASRサーバー HTTP API (asr-server ↔ Rust)
 
-- 待受: `127.0.0.1:<port>`。本番はRustが空きポートを選び `--port` で渡す。開発は `18765` 固定 (tsunagiの8765と衝突させない)
+- 待受: `127.0.0.1:<port>`。本番はRustが空きポートを選び `--port` で渡し、`--exit-on-stdin-eof` 付きで起動する。開発は `18765` 固定でprocess-composeが起動し、アプリは環境変数 `MUKUCHI_ASR_URL` があればそれに接続する(自分では起動しない)
 - `GET /health` → `200 {"status":"ok","model":"<id>"}`。モデル読み込み完了まで応答しない
 - `POST /transcribe` — body: 16kHz/mono/16bit PCMのWAV (`Content-Type: audio/wav`)。query: `language` (既定 `Japanese`)、`context` (語彙ヒント、任意) → `200 {"text":"...","elapsed_ms":123}`
   - `elapsed_ms`: サーバーがbodyを受信し終えてから応答するまでの時間 (WAVデコード + 推論待ち + 推論)。ネットワーク転送は含まない
   - エラー: 不正なWAV/形式違い → `400`、body が 5MiB (約120秒分+余裕) を超える → `413`
 - 推論は直列実行 (MLXはスレッド束縛のため、読み込み・ウォームアップ・全推論を専用の1スレッドで行う)。無音由来の定型ハルシネーション除外はサーバー側で行う
+- リアルタイムプレビューも同じ `/transcribe` を使う(専用APIは設けない)
 
 ### Tauri commands / events (Rust ↔ フロントエンド)
 
-実装時に rust-engineer が定義し、ここへ一覧を追記する。型はRust側を正とし、TypeScript型を生成または手書きで同期する。
+型はRust側を正とし、`src/lib/ipc.ts` にTypeScript型を手書きで同期する。名前はRustがsnake_case、JSONのフィールドはcamelCase (`#[serde(rename_all = "camelCase")]`)。ウィンドウのlabelは `panel` / `settings` / `setup`。
+
+#### 型
+
+```ts
+type Phase = "loading" | "off" | "listening" | "speaking" | "finalizing" | "done" | "error";
+
+type AppStatus = {
+  phase: Phase;
+  // phase=loading: モデル読み込み・ASR起動中。進捗が取れない場合は null (不定表示)
+  loadingProgress: number | null;
+  error: AppError | null;
+};
+
+type AppError = {
+  code: "accessibility_denied" | "microphone_denied" | "microphone_missing"
+      | "asr_stopped" | "runtime_missing" | "insert_failed";
+  message: string;   // 表示用 (日本語)
+  // 復旧操作。メニュー・パネルのボタンに対応
+  action: "open_accessibility" | "open_microphone" | "select_microphone"
+        | "restart_asr" | "start_setup" | null;
+};
+
+type Utterance = {
+  id: number;
+  text: string;
+  stableLength: number;  // 先頭から確定扱いの文字数。以降はプレビューで薄く表示
+};
+
+type UtteranceResult =
+  | { kind: "inserted"; id: number; text: string; appName: string }
+  | { kind: "command"; id: number; text: string; key: string }        // key 表示用 例 "Enter"
+  | { kind: "skipped_excluded"; id: number; text: string; appName: string }
+  | { kind: "empty"; id: number }                                     // 認識結果が空
+  | { kind: "failed"; id: number; text: string; error: AppError };
+
+type Settings = {
+  launchAtLogin: boolean;                 // 既定 true
+  inputDeviceId: string | null;           // null=システム既定
+  vadSensitivity: number;                 // 0..100 既定 60
+  silenceMs: number;                      // 300..3000 既定 800
+  voiceCommandsEnabled: boolean;          // 既定 true
+  voiceCommands: { id: string; phrases: string[]; key: KeyCombo }[];
+  vocabulary: string[];                   // ASR の context に空白区切りで渡す
+  excludedApps: { bundleId: string; name: string }[];
+  panelPosition: { x: number; y: number; displayId: string } | null; // null=既定位置
+  setupCompleted: boolean;
+};
+type KeyCombo = { key: "enter" | "tab" | "escape" | "backspace"; modifiers: ("cmd" | "shift" | "option" | "ctrl")[] };
+
+type Permissions = {
+  microphone: "granted" | "denied" | "not_determined";
+  accessibility: boolean;
+};
+
+type ProvisioningStatus = {
+  stage: "idle" | "runtime" | "model" | "verify" | "done" | "paused" | "error";
+  items: { id: "runtime" | "model" | "verify"; state: "pending" | "active" | "done"; bytesDone: number; bytesTotal: number | null }[];
+  bytesDone: number;
+  bytesTotal: number | null;
+  etaSeconds: number | null;
+  error: string | null;
+};
+
+type StorageUsage = { runtimeBytes: number; modelBytes: number; otherBytes: number };
+type AudioDevice = { id: string; name: string; isDefault: boolean };
+type AppInfo = { version: string; build: string };
+```
+
+#### commands
+
+| command | 引数 → 戻り値 | 用途 |
+|---|---|---|
+| `get_status` | → `AppStatus` | 初期表示 |
+| `set_listening` | `{ on: boolean }` → `()` | パネル・メニューのON/OFF |
+| `get_settings` / `update_settings` | → `Settings` / `{ patch: Partial<Settings> }` → `Settings` | 設定の読み書き(即時保存・即時反映) |
+| `list_input_devices` | → `AudioDevice[]` | マイク選択 |
+| `get_permissions` | → `Permissions` | 権限表示(setupでは1秒ごとに再取得) |
+| `request_microphone` | → `Permissions` | マイク許可ダイアログを出す |
+| `open_system_settings` | `{ pane: "microphone" \| "accessibility" }` → `()` | システム設定を開く |
+| `restart_asr` | → `()` | エラーからの復旧 |
+| `get_provisioning_status` | → `ProvisioningStatus` | |
+| `start_provisioning` / `pause_provisioning` | → `()` | ダウンロード開始・再開 / 一時停止 |
+| `get_storage_usage` | → `StorageUsage` | |
+| `delete_runtime_and_model` | → `()` | 実行環境とモデルのみ削除 |
+| `get_uninstall_targets` | → `{ path: string; bytes: number }[]` | 確認ダイアログの一覧 |
+| `uninstall` | → `()` | 完全にアンインストール(完了後にアプリ終了) |
+| `list_running_apps` | → `{ bundleId: string; name: string }[]` | 入力しないアプリの追加候補 |
+| `open_logs_folder` | → `()` | Finderで開く |
+| `get_app_info` | → `AppInfo` | |
+| `open_settings` | `{ category?: string }` → `()` | エラー復旧から該当カテゴリを開く |
+| `complete_setup` | → `()` | セットアップ完了(setupウィンドウを閉じる) |
+
+#### events (Rust → 全ウィンドウ)
+
+| event | payload | 頻度・備考 |
+|---|---|---|
+| `status-changed` | `AppStatus` | 状態遷移時 |
+| `audio-level` | `{ level: number; threshold: number; speech: boolean }` (0..1) | ON中のみ、約20Hz。levelはRMSを表示用に正規化、thresholdは感度から求めたしきい値の位置 |
+| `utterance-started` | `{ id: number }` | 発話検出 |
+| `utterance-partial` | `Utterance` | リアルタイムプレビュー |
+| `utterance-result` | `UtteranceResult` | 最終結果と入力結果 |
+| `settings-changed` | `Settings` | 他ウィンドウからの変更の反映 |
+| `permissions-changed` | `Permissions` | 権限の変化を検知した時 |
+| `provisioning-progress` | `ProvisioningStatus` | 約4Hz |

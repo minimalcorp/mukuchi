@@ -1,71 +1,153 @@
-# 署名・公証済み .dmg を作り、下書きの GitHub Release に添付する (手動実行)。
-# 手順・secret の作り方は docs/release.md。
+# リリース・デプロイ (手動実行のみ)。desktop (署名・公証済み .dmg を GitHub Release に公開) と web (LP を SST で本番へ) を
+# 1つの workflow で扱い、版 (X.Y.Z) を上げる。手順は docs/release.md。
 #
-# job を2つに分ける (apps/desktop/scripts/build-macos.sh の --build-only / --sign-only):
+# 入力: target (desktop | web)・bump (patch | minor | major)。main からのみ実行できる (prepare の最初の step で止める。
+# Environment の deployment branch policy も main のみ)。
+#
+# 版上げの流れ:
+#   prepare … 開始時の main (github.sha) の上に版上げコミットをローカルで作る (scripts/release-commit.sh)。
+#             作者・日時を固定するため、後の job で同じ入力から作り直すと同じコミット ID になる
+#   desktop … build (secret なし) → sign (production-desktop) → publish-desktop (production-desktop)
+#   web     … deploy-web (production-web) → publish-web (production-web)
+#   publish の job だけが Deploy Key (RELEASE_DEPLOY_KEY。両 Environment の secret) を読み、版上げコミットと注釈付きタグ
+#   (desktop-v<ver> / web-v<ver>) を main へ push する。main が開始時から進んでいたら rebase せず止める
+#   (scripts/release-push.sh)。ビルド・署名・公証・検証・デプロイが失敗したら push しない
+#
+# 承認: Environment の Required reviewers は job ごとに承認を求めるため、desktop は sign と publish-desktop、
+# web は deploy-web と publish-web の2回承認する。publish を別 job にするのは、第三者のコード (pnpm・cargo の依存、
+# ビルドした本体、sst) が動いた job に Deploy Key を渡さないため (起動されたプロセスは job の終わりまで残りうる)。
+#
+# desktop の job を分ける理由 (apps/desktop/scripts/build-macos.sh の --build-only / --sign-only):
 #   build … pnpm install・cargo で署名なしの .app と、dmgbuild で .dmg のテンプレート (背景・アイコン位置。.app なし) を作る。
-#           pnpm・cargo・uv の依存 (postinstall・build.rs 等の第三者のコード) が動くため
-#           secret を一切渡さない (environment も付けない)。両方を tar にして artifact で渡す
-#   sign  … Environment "production-release" (Required reviewers で承認制) で動き、Apple の secret はここにだけ渡す。
-#           依存を入れず、ビルドもしない。受け取った .app を Apple のツールだけで署名・公証し、テンプレートに入れて .dmg にする
+#           依存 (postinstall・build.rs 等の第三者のコード) が動くため secret を一切渡さない (environment も付けない)。
+#           両方を tar にして artifact で渡す
+#   sign  … 依存を入れず、ビルドもしない。受け取った .app を Apple のツールだけで署名・公証し、テンプレートに入れて .dmg にする
 #           (テンプレートは入れる前に apps/desktop/scripts/check-dmg-layout.py で余計なファイルがないことを確かめる)。
 #           ビルドした本体を実行する検証 (verify-macos.sh の --print-uv-path) は資格情報を片付けた後に行う
 # 同じ job の別 step にしないのは、ビルド中に起動されたプロセスが job の終わりまで残り、後の step の secret や
 # 解錠したキーチェーンに触れうるため (runner は job の終わりにプロセスを片付ける)
 #
-# production-release の secret:
+# production-desktop の secret:
 #   APPLE_CERTIFICATE           Developer ID Application 証明書と秘密鍵の .p12 を base64 にしたもの
 #   APPLE_CERTIFICATE_PASSWORD  .p12 のパスワード
 #   APPLE_API_KEY               App Store Connect API キーのキーID
 #   APPLE_API_ISSUER            同 Issuer ID
 #   APPLE_API_KEY_P8            同 .p8 ファイルの中身 (PEM テキストそのまま)
+#   RELEASE_DEPLOY_KEY          main へ push する Deploy Key (write) の秘密鍵 (production-web にも同じもの)
+# production-web の変数: AWS_DEPLOY_ROLE_ARN・AWS_REGION・MUKUCHI_WEB_CERT_ARN (OIDC で AWS のロールを引き受ける。長期の鍵を置かない。
+# 手順は .claude/plans/aws-web-deploy-setup.md)
 name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: "リリースするもの"
+        required: true
+        type: choice
+        options:
+          - desktop
+          - web
+      bump:
+        description: "版の上げ方 (X.Y.Z)"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions: {}
 
+# 同時に1つだけ (undeploy-web.yml も同じ group)。後の run は待つ (取り消さない)
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Prepare (${{ inputs.target }}, ${{ inputs.bump }})
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      previous: ${{ steps.bump.outputs.previous }}
+      tag: ${{ steps.bump.outputs.tag }}
+      commit: ${{ steps.bump.outputs.commit }}
+      epoch: ${{ steps.bump.outputs.epoch }}
+    steps:
+      # 後の job はすべてこの job を needs で待つ
+      - name: Require main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != refs/heads/main ]; then
+            echo "::error::Release は main からのみ実行できる (この run は $REF)。Run workflow で Branch: main を選ぶ"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Test bump script
+        run: node --test scripts/*.test.mjs
+      # 入力は式展開せず環境変数で渡す (スクリプトへの差し込みを避ける)
+      - name: Bump version (local commit only)
+        id: bump
+        env:
+          TARGET: ${{ inputs.target }}
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          epoch="$(date -u +%s)"
+          scripts/release-commit.sh "$TARGET" "$BUMP" "$epoch" >> "$GITHUB_OUTPUT"
+          echo "epoch=$epoch" >> "$GITHUB_OUTPUT"
+      # 長いビルドの前に止めるための早期の検査。このトークンでは下書きの Release が見えないため、
+      # 下書きを含めた確認は publish-desktop でもう一度行う
+      - name: Check tag and release do not exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$TAG" --jq ".[] | select(.ref == \"refs/tags/$TAG\") | .ref")" ]; then
+            echo "::error::タグ $TAG が既にある"; exit 1
+          fi
+          if [ -n "$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$TAG\") | .tag_name")" ]; then
+            echo "::error::$TAG の Release が既にある"; exit 1
+          fi
+      - name: Summary
+        env:
+          TARGET: ${{ inputs.target }}
+          PREVIOUS: ${{ steps.bump.outputs.previous }}
+          VERSION: ${{ steps.bump.outputs.version }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          COMMIT: ${{ steps.bump.outputs.commit }}
+        run: |
+          {
+            echo "### $TARGET $PREVIOUS → $VERSION"
+            echo "- タグ: \`$TAG\`"
+            echo "- ソース: \`$GITHUB_SHA\` (開始時の main) + 版上げコミット \`$COMMIT\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------- desktop
+
   build:
     name: Build unsigned .app
-    # environment の deployment branch policy に加えて main 以外からの実行を拒む
-    if: github.ref == 'refs/heads/main'
+    needs: prepare
+    if: inputs.target == 'desktop'
     runs-on: macos-15
     permissions:
       contents: read
     timeout-minutes: 90
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # 長いビルドの前に止めるための早期の検査。この job のトークン (contents: read) では下書きの Release が見えないため、
-      # 下書きを含めた確認は sign job でもう一度行う
-      - name: Resolve version
-        id: version
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          version="$(plutil -extract version raw -o - apps/desktop/src-tauri/tauri.conf.json)"
-          # プレリリース (-beta 等) は公開しても Latest にならず、LP の固定 URL が指さないため受け付けない
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::tauri.conf.json の version が X.Y.Z の形でない: '$version'"; exit 1
-          fi
-          tag="v$version"
-          if [ -n "$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" --jq ".[] | select(.ref == \"refs/tags/$tag\") | .ref")" ]; then
-            echo "::error::タグ $tag が既にある。apps/desktop/src-tauri/tauri.conf.json の version を上げる"; exit 1
-          fi
-          if [ -n "$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\") | .tag_name")" ]; then
-            echo "::error::$tag の Release が既にある。version を上げる"; exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "version: $version (tag $tag)"
       # 初回セットアップの検証用音声 (verify.wav) を scripts/make-verify-wav.sh が say -v Kyoko で作る。
       # GitHub の macOS ランナーに日本語音声 Kyoko が入っているかは公式に記載がないため、ビルド前に確かめて止める
       # (無い場合の代わりの方法は docs/release.md)
@@ -78,6 +160,13 @@ jobs:
             exit 1
           fi
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      # prepare と同じ版上げコミットを作ってからビルドする (.app の版と、埋め込むコミットの短縮ハッシュがこのコミットになる)
+      - name: Bump version (same commit as prepare)
+        env:
+          BUMP: ${{ inputs.bump }}
+          EPOCH: ${{ needs.prepare.outputs.epoch }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: nix develop -c scripts/release-commit.sh desktop "$BUMP" "$EPOCH" "$COMMIT"
       - name: pnpm install
         run: nix develop -c pnpm install --frozen-lockfile
       - name: Build (.app, unsigned + .dmg template)
@@ -94,35 +183,18 @@ jobs:
 
   sign:
     name: Sign and notarize (.dmg)
-    needs: build
-    if: github.ref == 'refs/heads/main'
+    needs: [prepare, build]
     runs-on: macos-15
-    environment: production-release
+    environment: production-desktop
     permissions:
-      contents: write # 下書きの Release の作成
+      contents: read
     timeout-minutes: 150
     steps:
-      # apps/desktop/scripts/ を build job の作業ツリーではなく同じコミットから取り直す (ビルド中に書き換えられたものを使わない)
+      # apps/desktop/scripts/ を build job の作業ツリーではなく開始時のコミットから取り直す (ビルド中に書き換えられたものを使わない)。
+      # 版上げは版の4か所しか変えないため、ここでは作らない (.dmg の名前・版は .app の Info.plist から読む)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # 下書きを含めて同じタグの Release がないかを確かめる (下書きは contents: write のトークンでないと見えない)。
-      # 資格情報を読み込む前に行う
-      - name: Check version and existing release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          set -euo pipefail
-          conf="$(plutil -extract version raw -o - apps/desktop/src-tauri/tauri.conf.json)"
-          [ -n "$VERSION" ] && [ "$conf" = "$VERSION" ] || { echo "::error::version が build job ('$VERSION') と違う ('$conf')"; exit 1; }
-          tag="v$VERSION"
-          if [ -n "$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" --jq ".[] | select(.ref == \"refs/tags/$tag\") | .ref")" ]; then
-            echo "::error::タグ $tag が既にある。apps/desktop/src-tauri/tauri.conf.json の version を上げる"; exit 1
-          fi
-          if [ -n "$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\") | .tag_name")" ]; then
-            echo "::error::$tag の Release (下書きを含む) が既にある。version を上げるか、不要な下書きを消す"; exit 1
-          fi
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: mukuchi-app-unsigned
@@ -133,6 +205,14 @@ jobs:
           dir=apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle
           mkdir -p "$dir"
           tar -C "$dir" -xzf "$RUNNER_TEMP/mukuchi-app.tar.gz" macos/mukuchi.app dmg-template/mukuchi.dmg
+      # 資格情報を読み込む前に .app の版を確かめる
+      - name: Check .app version
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/mukuchi.app/Contents/Info.plist)"
+          [ -n "$VERSION" ] && [ "$app_version" = "$VERSION" ] || { echo "::error::.app の版 ($app_version) が $VERSION と違う"; exit 1; }
 
       # 一時キーチェーンに証明書を読み込み、検索リストに加える (build-macos.sh は codesign / security find-identity でこれを使う)。
       # 出典: https://docs.github.com/en/actions/use-cases-and-examples/deploying/installing-an-apple-certificate-on-macos-runners-for-xcode-development
@@ -180,22 +260,16 @@ jobs:
       - name: Verify
         run: apps/desktop/scripts/verify-macos.sh
 
-      # 下書きで作る (公開は人が確認してから行う)。タグは公開時に target のコミットに作られる。
       # LP は固定 URL https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg を使うため、
       # 版付きの名前に加えて同じ中身を mukuchi_aarch64.dmg としても添付する (latest/download は公開済みで
-      # プレリリースでない「Latest」の Release の添付を返す。下書きのうちは古い版を返し続ける)。
+      # プレリリースでない「Latest」の Release の添付を返す)。
       # 出典: https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases
-      - name: Create draft release
+      - name: Prepare release assets
         env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.build.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          bundle=apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle
-          app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$bundle/macos/mukuchi.app/Contents/Info.plist")"
-          [ "$app_version" = "$VERSION" ] || { echo "::error::.app の版 ($app_version) が tauri.conf.json ($VERSION) と違う"; exit 1; }
-          tag="v$VERSION"
-          src="$bundle/dmg/mukuchi_${VERSION}_aarch64.dmg"
+          src="apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/mukuchi_${VERSION}_aarch64.dmg"
           [ -f "$src" ] || { echo "::error::$src がない"; exit 1; }
           out="$RUNNER_TEMP/release"
           rm -rf "$out"; mkdir -p "$out"
@@ -206,7 +280,184 @@ jobs:
             (cd "$out" && shasum -a 256 "$f" > "$f.sha256")
           done
           cmp "$out/mukuchi_${VERSION}_aarch64.dmg" "$out/mukuchi_aarch64.dmg"
-          gh release create "$tag" -R "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+      # publish が失敗した時に手で Release を作り直せるよう数日残す
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mukuchi-dmg-signed
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  # 順序: 版上げコミットを作り直して build と同じ ID か確かめる → main が開始時のままでタグがないことを確かめる →
+  # 下書きの Release を作って .dmg を添付 (アップロードの失敗はここで起き、main・タグは変わらない) →
+  # main とタグを atomic に push (失敗したら下書きを消す。公開されない) → 下書きを公開して Latest にする。
+  # 下書きはタグを作らないため、push の前に作ってよい。公開の時点ではタグが既にあるのでそれに結び付く
+  publish-desktop:
+    name: Publish desktop (push tag, GitHub Release)
+    needs: [prepare, sign]
+    runs-on: ubuntu-24.04
+    environment: production-desktop
+    permissions:
+      contents: write # Release の作成・公開 (main・タグの push は Deploy Key で行う)
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PREVIOUS: ${{ needs.prepare.outputs.previous }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      # main の ruleset を bypass できる Deploy Key で checkout する (actions/checkout が ssh-agent に鍵を入れ、
+      # origin を SSH にする)。この job では第三者のパッケージを入れない・ビルドした本体を実行しない
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+          persist-credentials: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mukuchi-dmg-signed
+          path: ${{ runner.temp }}/release
+      - name: Check assets
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/release"
+          ls -l
+          sha256sum -c "mukuchi_${VERSION}_aarch64.dmg.sha256" mukuchi_aarch64.dmg.sha256
+      - name: Bump version (same commit as build)
+        env:
+          BUMP: ${{ inputs.bump }}
+          EPOCH: ${{ needs.prepare.outputs.epoch }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: scripts/release-commit.sh desktop "$BUMP" "$EPOCH" "$COMMIT"
+      - name: Check main and tag
+        run: scripts/release-push.sh --check-only "$TAG" "$GITHUB_SHA"
+      # 下書きは contents: write のトークンでないと見えないため、ここで下書きを含めて確かめる
+      - name: Create draft release
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -n "$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$TAG\") | .tag_name")" ]; then
+            echo "::error::$TAG の Release (下書きを含む) が既にある。不要な下書きなら消してから実行し直す"; exit 1
+          fi
+          # ここから先で失敗したら (添付のアップロードの途中を含む) 後の step で下書きを消す
+          echo "attempted=true" >> "$GITHUB_OUTPUT"
+          # リリースノートの起点は前の desktop のタグ (web-v* のタグを起点にしないため明示する)
+          start=()
+          if [ -n "$(git ls-remote --tags origin "refs/tags/desktop-v$PREVIOUS")" ]; then
+            start=(--notes-start-tag "desktop-v$PREVIOUS")
+          fi
+          out="$RUNNER_TEMP/release"
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
             --title "mukuchi $VERSION" --notes "macOS (Apple Silicon) / Developer ID 署名・公証済み" \
+            --generate-notes "${start[@]}" \
             "$out/mukuchi_${VERSION}_aarch64.dmg" "$out/mukuchi_${VERSION}_aarch64.dmg.sha256" \
             "$out/mukuchi_aarch64.dmg" "$out/mukuchi_aarch64.dmg.sha256"
+      - name: Push version bump and tag
+        id: push
+        run: scripts/release-push.sh "$TAG" "$GITHUB_SHA"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --verify-tag --draft=false --latest
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          [ "$latest" = "$TAG" ] || { echo "::error::Latest の Release が $latest ($TAG でない)"; exit 1; }
+          echo "https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
+      # push できなかった時は公開しない。下書きを消して、同じ版で実行し直せるようにする
+      # (push 済みで公開だけ失敗した時は下書きを残す。docs/release.md の「失敗した時」)
+      - name: Delete draft release (push failed)
+        if: failure() && steps.draft.outputs.attempted == 'true' && steps.push.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # 下書きの時だけ消す (タグは push していないので残らない)
+          if [ "$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)" = true ]; then
+            gh release delete "$TAG" -R "$GITHUB_REPOSITORY" --yes
+          fi
+
+  # ---------------------------------------------------------------- web
+
+  deploy-web:
+    name: Deploy web (sst deploy)
+    needs: prepare
+    if: inputs.target == 'web'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: production-web
+      url: https://mukuchi.minimalcorp.com
+    permissions:
+      id-token: write # AWS の OIDC 用
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      # タグを付けるソースそのものをデプロイする
+      - name: Bump version (same commit as prepare)
+        env:
+          BUMP: ${{ inputs.bump }}
+          EPOCH: ${{ needs.prepare.outputs.epoch }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: scripts/release-commit.sh web "$BUMP" "$EPOCH" "$COMMIT"
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      # デプロイした後に版上げを push できない状態 (main が進んだ) を、デプロイの前にできるだけ避ける。
+      # ここから publish-web の push までに main が進むと、デプロイは済んだが版上げは push されない (docs/release.md)
+      - name: Check main has not moved
+        run: |
+          set -euo pipefail
+          remote_main="$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          if [ "$remote_main" != "$GITHUB_SHA" ]; then
+            echo "::error::実行中に main が進んだ ($GITHUB_SHA → $remote_main)。デプロイしない。Actions > Release を main で実行し直す"
+            exit 1
+          fi
+      # build (pnpm --filter @mukuchi/web build) は sst deploy の中で StaticSite が実行する
+      - name: sst deploy
+        env:
+          MUKUCHI_WEB_CERT_ARN: ${{ vars.MUKUCHI_WEB_CERT_ARN }}
+        run: pnpm exec sst deploy --stage production
+
+  publish-web:
+    name: Publish web (push tag)
+    needs: [prepare, deploy-web]
+    runs-on: ubuntu-24.04
+    environment: production-web
+    permissions:
+      contents: read # main・タグの push は Deploy Key で行う
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+          persist-credentials: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Bump version (same commit as deploy)
+        env:
+          BUMP: ${{ inputs.bump }}
+          EPOCH: ${{ needs.prepare.outputs.epoch }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: scripts/release-commit.sh web "$BUMP" "$EPOCH" "$COMMIT"
+      - name: Push version bump and tag
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          scripts/release-push.sh "$TAG" "$GITHUB_SHA"
+          echo "デプロイ済み・\`$TAG\` を push した" >> "$GITHUB_STEP_SUMMARY"

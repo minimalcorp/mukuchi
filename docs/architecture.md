@@ -27,7 +27,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 | ASR | Python + MLX (`mlx-qwen3-asr`)、モデルは `neosophie/Qwen3-ASR-1.7B-JA` 系 | Rust実装(candle/MLX)は約3倍遅い (spikes/asr-bench) |
 | 操作 | 音声入力のON/OFFは **常時表示パネルのボタン** と **メニューバー** のみ。**キーボードショートカットは設けない**。押している間だけ録音するモードも実装しない | 2026-09-30 確定 |
 | 入力単位 | ONの間、発話(VAD区間)ごとに文字起こしし、話し終わったら入力。入力は単一キューで直列化 | 必須要件 |
-| リアルタイムプレビュー | 発話中は約0.8秒ごとに「その時点までの音声」を文字起こしし直してパネルに表示する。入力するのは話し終わり時点の最終結果のみ。ASRが処理中なら途中表示の要求は送らない(最終結果を優先) | 2026-09-30 確定 |
+| リアルタイムプレビュー | 発話中は前回から音声が0.8秒以上伸び、かつ途中表示の要求が処理中でなければ、発話開始からの音声を文字起こしし直してパネルに表示する。入力するのは話し終わり時点の最終結果のみ。確定後は最終結果で表示を置き換えて2秒間表示する | 2026-09-30 確定。値はtsunagiの音声入力に準拠 (implementation-plan.md「音声入力の体験」) |
 | 入力方式 | クリップボード + ⌘V、元のクリップボードを復元 | IMEの影響を受けない |
 | 音声コマンド | 「言い方→キー」対応表(既定: 確定/エンター→Enter、改行→Shift+Enter、送信→⌘+Enter)。発話全体が正規化後に完全一致した時のみ。機能ごとON/OFF可 | 表記揺れは複数の言い方で吸収 |
 | 入力しないアプリ | 登録したアプリが前面にある間は入力しない(パネルに「このアプリには入力しません」) | デザインの任意提案Aを採用 |
@@ -101,13 +101,14 @@ type UtteranceResult =
   | { kind: "command"; id: number; text: string; key: string }        // key 表示用 例 "Enter"
   | { kind: "skipped_excluded"; id: number; text: string; appName: string }
   | { kind: "empty"; id: number }                                     // 認識結果が空
+  | { kind: "discarded"; id: number }                                 // 短すぎる発話(誤検出) / 発話中にOFF
   | { kind: "failed"; id: number; text: string; error: AppError };
 
 type Settings = {
   launchAtLogin: boolean;                 // 既定 true
   inputDeviceId: string | null;           // null=システム既定
   vadSensitivity: number;                 // 0..100 既定 60
-  silenceMs: number;                      // 300..3000 既定 800
+  silenceMs: number;                      // 300..3000 既定 1300 (話の途中の間で分割しないため長め)
   voiceCommandsEnabled: boolean;          // 既定 true
   voiceCommands: { id: string; phrases: string[]; key: KeyCombo }[];
   vocabulary: string[];                   // ASR の context に空白区切りで渡す
@@ -166,7 +167,7 @@ type AppInfo = { version: string; build: string };
 |---|---|---|
 | `status-changed` | `AppStatus` | 状態遷移時 |
 | `audio-level` | `{ level: number; threshold: number; speech: boolean }` (0..1) | ON中のみ、約20Hz。levelはRMSを表示用に正規化、thresholdは感度から求めたしきい値の位置 |
-| `utterance-started` | `{ id: number }` | 発話検出 |
+| `utterance-started` | `{ id: number }` | 発話検出。前の発話の確定処理中に次の発話が始まることがある(idで区別) |
 | `utterance-partial` | `Utterance` | リアルタイムプレビュー |
 | `utterance-result` | `UtteranceResult` | 最終結果と入力結果 |
 | `settings-changed` | `Settings` | 他ウィンドウからの変更の反映 |

@@ -1,5 +1,7 @@
+import logging
 import threading
 import time
+from urllib.parse import quote
 
 import numpy as np
 import pytest
@@ -166,3 +168,22 @@ def test_transcribe_before_load_fails():
     worker = InferenceWorker(lambda: FakeTranscriber())
     with pytest.raises(RuntimeError):
         asyncio.run(worker.transcribe(np.zeros(1, dtype=np.float32), "Japanese", ""))
+
+
+@pytest.mark.parametrize("text", ["秘密の認識結果テキスト", "ご視聴ありがとうございました。"])
+def test_logs_contain_no_text_or_context(client, fake, wav_bytes, caplog, text):
+    # 認識テキスト・context(ユーザー語彙)はログに出さない。ハルシネーション除外経路も確認する
+    fake.text = text
+    context = "社外秘プロジェクト名"
+    with caplog.at_level(logging.DEBUG):
+        r = post(client, wav_bytes(np.full(1600, 1000, dtype="<i2")), context=context)
+    assert r.status_code == 200
+    assert fake.calls[0][2] == context
+    # httpx(TestClient側)のリクエストログはサーバーのログではないので除く
+    records = [rec for rec in caplog.records if not rec.name.startswith(("httpx", "httpcore"))]
+    assert any(rec.name == "mukuchi_asr" for rec in records)
+    for rec in records:
+        msg = rec.getMessage()
+        for secret in (text, context, quote(context)):
+            assert secret not in msg, msg
+        assert "context=" not in msg, msg

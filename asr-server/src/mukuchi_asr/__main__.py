@@ -46,7 +46,8 @@ def _load(model: str) -> Transcriber:
     logger.info("model loaded in %.1fs", time.perf_counter() - t0)
 
     def transcribe(audio: np.ndarray, language: str, context: str) -> str:
-        return session.transcribe(audio, language=language, context=context).text
+        # verbose=Trueだと認識テキストがstdoutに出るため明示的に無効化する
+        return session.transcribe(audio, language=language, context=context, verbose=False).text
 
     # 初回推論はMetalカーネルのコンパイル等で遅いため、待受前に済ませて最初の発話を待たせない
     t0 = time.perf_counter()
@@ -78,6 +79,7 @@ def main() -> None:
     worker.load()
 
     app = create_app(worker, args.model)
+    # access logはクエリ文字列(context=ユーザー語彙)を含むため無効化する
     uvicorn.run(app, host=HOST, port=args.port, log_config=None, access_log=False)
 
 

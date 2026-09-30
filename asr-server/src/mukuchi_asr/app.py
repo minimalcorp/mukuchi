@@ -46,13 +46,21 @@ def create_app(worker: InferenceWorker, model_id: str) -> FastAPI:
         except InvalidAudioError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         text = ""
+        dropped = False
         if audio.size > 0:
             text = (await worker.transcribe(audio, language, context or "")).strip()
             if is_hallucination_phrase(text):
-                logger.info("dropped hallucination phrase: %r", text)
                 text = ""
+                dropped = True
         elapsed_ms = round((time.perf_counter() - t0) * 1000)
-        logger.info("transcribed %.2fs audio in %dms: %r", audio.size / SAMPLE_RATE, elapsed_ms, text)
+        # 認識テキスト・音声・context(ユーザー語彙)は個人情報になり得るためログに出さない。メタデータのみ
+        logger.info(
+            "transcribed %.2fs audio in %dms: %d chars%s",
+            audio.size / SAMPLE_RATE,
+            elapsed_ms,
+            len(text),
+            " (dropped hallucination phrase)" if dropped else "",
+        )
         return {"text": text, "elapsed_ms": elapsed_ms}
 
     return app

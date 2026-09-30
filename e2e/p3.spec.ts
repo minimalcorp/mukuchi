@@ -56,13 +56,6 @@ test("settings: 認識で実行環境とモデルがない → セットアッ�
   await expect.poll(async () => (await calls(page, "open_setup")).length).toBe(1);
 });
 
-test("settings: open_setup が未実装なら無効にして「未対応」を示す", async ({ page }) => {
-  await open(page, "window=settings&mock=runtime-missing&category=recognition&unimplemented=open_setup", SETTINGS);
-  const button = page.getByRole("button", { name: "セットアップを開く" });
-  await button.click();
-  await expect(button).toBeDisabled();
-});
-
 // ---------- 即時保存・エラー・他ウィンドウ ----------
 
 test("settings: ログイン時に起動を切り替えると即時保存する", async ({ page }) => {
@@ -108,13 +101,6 @@ test("settings: ログイン時に起動をオンにできなければエラー�
   await expect.poll(async () => (await calls(page, "open_system_settings")).map((c) => c.args)).toEqual([
     { pane: "login_items" },
   ]);
-});
-
-test("settings: update_settings が未実装ならログイン項目を開くボタンを出さない", async ({ page }) => {
-  await open(page, "window=settings&mock=default&category=general&unimplemented=update_settings", SETTINGS);
-  await page.getByRole("switch", { name: "ログイン時に起動" }).click();
-  await expect(page.getByRole("alert")).toContainText("この版では変更できません");
-  await expect(page.getByRole("button", { name: "システム設定を開く" })).toHaveCount(0);
 });
 
 test("setup: 完了画面でログイン時に起動をオンにできなければエラーとログイン項目を開くボタンを出す", async ({ page }) => {

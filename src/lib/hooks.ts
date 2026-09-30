@@ -1,13 +1,11 @@
 /*
  * Rust の状態を購読する hooks。いずれも「購読してから初期値を取得」して取りこぼしを防ぐ (subscribeWithInitial)。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   commands,
-  isNotImplemented,
   latestStatusOnly,
   subscribeWithInitial,
-  unimplementedStore,
   type AppStatus,
   type Permissions,
   type ProvisioningStatus,
@@ -59,7 +57,7 @@ export function useSettings(): [Settings | null, (patch: Partial<Settings>) => v
       },
       (e: unknown) => {
         done();
-        const message = errorMessage(e) ?? "この版では変更できません";
+        const message = errorMessage(e);
         setErrors((prev) => ({ ...prev, ...Object.fromEntries(keys.map((k) => [k, message])) }));
       },
     );
@@ -101,18 +99,8 @@ export function useProvisioning(): ProvisioningStatus | null {
   return status;
 }
 
-/**
- * 指定した command のいずれかが未実装 (`not_implemented:` で reject) と分かっているか。
- * 呼んで初めて分かるため、最初は false で、reject された時点で true になる。
- */
-export function useUnimplemented(...commandNames: string[]): boolean {
-  useSyncExternalStore(unimplementedStore.subscribe, unimplementedStore.version);
-  return commandNames.some((c) => unimplementedStore.has(c));
-}
-
-/** 未実装以外のエラーのメッセージ (Rust の表示用メッセージ)。未実装は null */
-export function errorMessage(e: unknown): string | null {
-  if (isNotImplemented(e)) return null;
+/** エラーの表示用メッセージ (Rust の表示用メッセージ) */
+export function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 

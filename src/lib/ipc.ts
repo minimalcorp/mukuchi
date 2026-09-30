@@ -109,64 +109,30 @@ export type SettingsCategory = "general" | "voice" | "commands" | "recognition" 
 
 // ---------- エラー ----------
 
-/** Rust は表示用の日本語メッセージで reject し、未実装の command は `not_implemented:` で始まる文字列を返す */
-const NOT_IMPLEMENTED_PREFIX = "not_implemented:";
-
+/** Rust は表示用の日本語メッセージ (文字列) で reject する */
 export class IpcError extends Error {
   readonly command: string;
-  readonly notImplemented: boolean;
   constructor(command: string, message: string) {
     super(message);
     this.name = "IpcError";
     this.command = command;
-    this.notImplemented = message.startsWith(NOT_IMPLEMENTED_PREFIX);
   }
-}
-
-export function isNotImplemented(e: unknown): boolean {
-  return e instanceof IpcError && e.notImplemented;
-}
-
-// 未実装と分かった command。操作を無効化して「未対応」と示すために、一度 reject されたら覚えておく
-const unimplemented = new Set<string>();
-const unimplementedListeners = new Set<() => void>();
-let unimplementedVersion = 0;
-
-export const unimplementedStore = {
-  has: (command: string) => unimplemented.has(command),
-  subscribe(listener: () => void) {
-    unimplementedListeners.add(listener);
-    return () => {
-      unimplementedListeners.delete(listener);
-    };
-  },
-  /** useSyncExternalStore 用。集合が変わるたびに変わる値 */
-  version: () => unimplementedVersion,
-};
-
-function markUnimplemented(command: string) {
-  if (unimplemented.has(command)) return;
-  unimplemented.add(command);
-  unimplementedVersion += 1;
-  unimplementedListeners.forEach((l) => l());
 }
 
 function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   return invoke<T>(command, args).catch((e: unknown) => {
     const message = typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
-    const err = new IpcError(command, message);
-    if (err.notImplemented) markUnimplemented(command);
-    throw err;
+    throw new IpcError(command, message);
   });
 }
 
 /**
  * 結果を待たない操作用。失敗は状態の変化 (status-changed 等) で表示されるため、ここではログだけ残す
- * (捕捉しないと unhandled rejection になる)。未実装は useUnimplemented で表示するので記録しない。
+ * (捕捉しないと unhandled rejection になる)。
  */
 export function runCommand(p: Promise<unknown>): void {
   p.catch((e: unknown) => {
-    if (!isNotImplemented(e)) console.warn(e);
+    console.warn(e);
   });
 }
 
@@ -274,7 +240,7 @@ export function subscribeWithInitial<E extends EventName>(
         if (!disposed && at === seq) apply(v);
       },
       (e: unknown) => {
-        if (!isNotImplemented(e)) console.warn(e);
+        console.warn(e);
       },
     );
   };

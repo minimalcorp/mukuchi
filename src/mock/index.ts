@@ -2,7 +2,6 @@
  * 開発用モック (npm run dev のブラウザ表示・Playwright 用)。本番ビルドには含まれない。
  * @tauri-apps/api/mocks で IPC とイベントを差し替え、?window= と ?mock= で画面・状態を選ぶ。
  * シナリオ一覧は src/mock/scenarios.ts。
- * &unimplemented=<command,...> で指定した command を未実装 (`not_implemented:` で reject) にできる。
  * &slow=<command,...> で指定した command の応答を 500ms 遅らせる (初期値取得と event の順序の確認用)。
  * window.__mukuchiMock.fail[<command>] = "<メッセージ>" でその command を失敗させられる (エラー表示の確認用)。
  */
@@ -47,11 +46,6 @@ export function installMock(params: URLSearchParams) {
   devOverrides.setupStep = step;
 
   mockWindows(windowLabel, "panel", "settings", "setup");
-  // Rust の現状に合わせて未実装の command を指定できる
-  const unimplemented = new Set([
-    ...(scenario.unimplemented ?? []),
-    ...(params.get("unimplemented")?.split(",").filter(Boolean) ?? []),
-  ]);
   const slow = new Set(params.get("slow")?.split(",").filter(Boolean) ?? []);
 
   let scriptStarted = false;
@@ -149,10 +143,6 @@ export function installMock(params: URLSearchParams) {
     async (cmd, args) => {
       const a = (args ?? {}) as Record<string, unknown>;
       if (!cmd.startsWith("plugin:")) api.calls.push({ cmd, args: a });
-      if (unimplemented.has(cmd)) {
-        // Rust と同じく文字列で reject する
-        return Promise.reject(`not_implemented: ${cmd} は未実装です`);
-      }
       const failure = api.fail[cmd];
       if (failure != null) return Promise.reject(failure);
       if (slow.has(cmd)) {

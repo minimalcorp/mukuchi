@@ -15,8 +15,6 @@ export type Scenario = {
   step?: number;
   setup?: (db: MockDb) => void;
   script?: (api: MockApi) => void;
-  /** 未実装 (`not_implemented:` で reject) にする command */
-  unimplemented?: string[];
 };
 
 const TEXT = "明日の打ち合わせは十時からに変更してください。";
@@ -383,14 +381,6 @@ const SETTINGS: Scenario[] = [
   {
     name: "asr-stopped",
     description: "文字起こしサーバー停止",
-    setup: (db) => {
-      setStatus(db, { phase: "error", loadingProgress: null, error: ERRORS.asr });
-    },
-  },
-  {
-    name: "unimplemented",
-    description: "restart_asr が未実装 (ASR 停止中)",
-    unimplemented: ["restart_asr"],
     setup: (db) => {
       setStatus(db, { phase: "error", loadingProgress: null, error: ERRORS.asr });
     },

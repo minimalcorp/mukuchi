@@ -3,8 +3,6 @@ import { Cpu, Download, Plus, RotateCw, X } from "lucide-react";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Unimplemented } from "@/components/app/unimplemented";
-import { useUnimplemented } from "@/lib/hooks";
 import { commands, runCommand, type AppStatus } from "@/lib/ipc";
 import { Card, FieldError, FieldHeading, TitleWithSub, type SectionProps } from "./common";
 
@@ -36,8 +34,6 @@ export function RecognitionSection({
   const [notice, setNotice] = useState<string | null>(null);
   const vocab = settings.vocabulary;
   const model = modelState(status);
-  const restartUnimplemented = useUnimplemented("restart_asr");
-  const setupUnimplemented = useUnimplemented("open_setup");
 
   const add = () => {
     // 「Apple Silicon」のように空白を含む語があるため、空白では区切らない
@@ -63,28 +59,14 @@ export function RecognitionSection({
         <Cpu size={20} className="flex-none text-fg-muted" aria-hidden />
         <TitleWithSub title="Qwen3-ASR（日本語追加学習）" sub={model.sub} />
         {status?.error?.code === "runtime_missing" ? (
-          <Unimplemented active={setupUnimplemented}>
-            <Button
-              size="sm"
-              iconLeft={Download}
-              disabled={setupUnimplemented}
-              onClick={() => runCommand(commands.openSetup())}
-            >
-              セットアップを開く
-            </Button>
-          </Unimplemented>
+          <Button size="sm" iconLeft={Download} onClick={() => runCommand(commands.openSetup())}>
+            セットアップを開く
+          </Button>
         ) : null}
         {status?.error?.code === "asr_stopped" ? (
-          <Unimplemented active={restartUnimplemented}>
-            <Button
-              size="sm"
-              iconLeft={RotateCw}
-              disabled={restartUnimplemented}
-              onClick={() => runCommand(commands.restartAsr())}
-            >
-              再起動
-            </Button>
-          </Unimplemented>
+          <Button size="sm" iconLeft={RotateCw} onClick={() => runCommand(commands.restartAsr())}>
+            再起動
+          </Button>
         ) : null}
         <Badge tone={model.tone} dot>
           {model.label}

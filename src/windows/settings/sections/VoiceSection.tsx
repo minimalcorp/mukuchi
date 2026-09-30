@@ -219,7 +219,7 @@ function ExcludedApps({ settings, update, errors }: SectionProps) {
               setRunningError(null);
               commands.listRunningApps().then(setRunning, (e: unknown) => {
                 setRunning([]);
-                setRunningError(errorMessage(e) ?? "この版では未対応です");
+                setRunningError(errorMessage(e));
               });
             }}
           >

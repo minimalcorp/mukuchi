@@ -1,5 +1,5 @@
 /*
- * P2 (実データ接続) で増えたやり取りの確認: set_panel_size、settings-navigate、未実装 command、
+ * P2 (実データ接続) で増えたやり取りの確認: set_panel_size、settings-navigate、
  * 購読と初期値取得の順序、ダークモードの切り替え。
  */
 import { expect, test, type Page } from "@playwright/test";
@@ -112,13 +112,6 @@ test("panel: アクセシビリティ未許可 → システム設定を開く",
     .toEqual({ pane: "accessibility" });
 });
 
-test("panel: 復旧 command が未実装ならボタンを消す", async ({ page }) => {
-  await open(page, "window=panel&mock=error-asr&unimplemented=restart_asr", PANEL);
-  await page.getByRole("button", { name: "再起動" }).click();
-  await expect(page.getByRole("button", { name: "再起動" })).toHaveCount(0);
-  await expect(page.getByText("文字起こしが停止しました")).toBeVisible();
-});
-
 // ---------- settings-navigate ----------
 
 test("settings: settings-navigate でカテゴリを切り替える", async ({ page }) => {
@@ -137,16 +130,6 @@ test("settings: open_settings(category) が開いている設定を切り替え�
   await expect(page.getByText("ログイン時に起動")).toBeVisible();
   await mock(page, `api.invoke("open_settings", { category: "voice" });`);
   await expect(page.getByText("発話検出の感度")).toBeVisible();
-});
-
-// ---------- 未実装 command ----------
-
-test("settings: 再起動が未実装なら押した後に無効にする", async ({ page }) => {
-  await open(page, "window=settings&mock=unimplemented&category=recognition", SETTINGS);
-  const restart = page.getByRole("button", { name: "再起動" });
-  await expect(restart).toBeEnabled();
-  await restart.click();
-  await expect(restart).toBeDisabled();
 });
 
 // ---------- 購読と初期値の順序 ----------

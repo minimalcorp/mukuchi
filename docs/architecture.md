@@ -195,7 +195,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 
 #### commands
 
-エラー時は表示用メッセージ(日本語の文字列)で reject する。未実装のcommandは `not_implemented:` で始まる文字列を返す。
+エラー時は表示用メッセージ(日本語の文字列)で reject する。
 
 | command | 引数 → 戻り値 | 用途 |
 |---|---|---|

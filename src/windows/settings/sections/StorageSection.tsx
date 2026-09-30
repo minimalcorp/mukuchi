@@ -19,7 +19,7 @@ export function StorageSection({ status }: { status: AppStatus | null }) {
         setUsage(u);
         setUsageError(null);
       },
-      (e: unknown) => setUsageError(errorMessage(e) ?? "使用量を取得できませんでした"),
+      (e: unknown) => setUsageError(errorMessage(e)),
     );
   }, []);
   // 削除後やセットアップの完了で実行環境の有無が変わったら取り直す
@@ -174,7 +174,7 @@ function DeleteRuntimeDialog({ open, onClose, onDone }: { open: boolean; onClose
                   setError(null);
                   commands
                     .deleteRuntimeAndModel()
-                    .then(onDone, (e: unknown) => setError(errorMessage(e) ?? "削除できませんでした"))
+                    .then(onDone, (e: unknown) => setError(errorMessage(e)))
                     .finally(() => setBusy(false));
                 }}
               >
@@ -205,7 +205,7 @@ function UninstallDialog({ open, onClose }: { open: boolean; onClose: () => void
     if (!open) return;
     commands.getUninstallTargets().then(setTargets, (e: unknown) => {
       // 削除対象を示せない状態ではアンインストールさせない (targets は null のまま)
-      setError(errorMessage(e) ?? "削除対象を確認できませんでした");
+      setError(errorMessage(e));
     });
   }, [open]);
 
@@ -244,7 +244,7 @@ function UninstallDialog({ open, onClose }: { open: boolean; onClose: () => void
                       (e: unknown) => {
                         // 失敗しても残りの削除は続いている。本体を消せなかった等の理由を示し、閉じられるようにする
                         setPhase("confirm");
-                        setError(errorMessage(e) ?? "アンインストールできませんでした");
+                        setError(errorMessage(e));
                       },
                     );
                   }}

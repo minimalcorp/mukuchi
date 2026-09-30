@@ -35,9 +35,7 @@ import {
   usePermissions,
   useProvisioning,
   useSettings,
-  useUnimplemented,
 } from "@/lib/hooks";
-import { Unimplemented } from "@/components/app/unimplemented";
 import { LaunchAtLoginError } from "@/components/app/launch-at-login-error";
 import { commands, runCommand, subscribeEvents, type Permissions, type ProvisioningStatus } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
@@ -552,7 +550,6 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
 
 function DoneStep({ provisioning }: { provisioning: ProvisioningStatus | null }) {
   const [settings, update, settingsErrors] = useSettings();
-  const completeUnimplemented = useUnimplemented("complete_setup");
   const [completeError, setCompleteError] = useState<string | null>(null);
   // 導入が済むまで (動作確認の成功まで) はセットアップを完了させない
   const ready = provisioning?.stage === "done";
@@ -583,18 +580,16 @@ function DoneStep({ provisioning }: { provisioning: ProvisioningStatus | null })
         ) : null}
       </StepBody>
       <StepFooter>
-        <Unimplemented active={completeUnimplemented}>
-          <Button
-            variant="primary"
-            disabled={completeUnimplemented || !ready}
-            onClick={() => {
-              setCompleteError(null);
-              commands.completeSetup().catch((e: unknown) => setCompleteError(errorMessage(e)));
-            }}
-          >
-            閉じる
-          </Button>
-        </Unimplemented>
+        <Button
+          variant="primary"
+          disabled={!ready}
+          onClick={() => {
+            setCompleteError(null);
+            commands.completeSetup().catch((e: unknown) => setCompleteError(errorMessage(e)));
+          }}
+        >
+          閉じる
+        </Button>
       </StepFooter>
     </>
   );

@@ -22,7 +22,6 @@ import { commands, runCommand, type AppError, type AppStatus } from "@/lib/ipc";
 import { useAudioLevel } from "@/lib/audio-level";
 import { env } from "@/lib/env";
 import { errorActionView } from "@/lib/error-actions";
-import { useUnimplemented } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { usePanelModel, type PanelItem } from "./usePanelModel";
 
@@ -181,12 +180,10 @@ function ErrorPill({ error }: { error: AppError }) {
 
 /**
  * 復旧操作 (メニューバーの復旧項目と同じ)。デザイン 06 のピルは文言のみだが、パネルからも直接復旧できるようにした。
- * 未実装の command はボタンごと出さない (パネルは小さく Tooltip を出す余地がないため)。
  */
 function ErrorActionButton({ error }: { error: AppError }) {
   const action = errorActionView(error.action);
-  const unimplemented = useUnimplemented(action?.command ?? "");
-  if (!action || unimplemented) return null;
+  if (!action) return null;
   const Icon = action.icon;
   return (
     <button

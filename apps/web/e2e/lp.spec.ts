@@ -159,7 +159,7 @@ test.describe("PC", () => {
     const reqs = page.locator("#requirements dl");
     await expect(reqs).toContainText("macOS 13 Ventura 以降");
     await expect(reqs).toContainText("空き容量 6 GB 以上");
-    await expect(page.getByText("モデル（約 4.1 GB）", { exact: false })).toBeVisible();
+    await expect(page.getByText("モデル（約 2.2 GB）", { exact: false })).toBeVisible();
     await expect(page.getByText("モデルの取得以外に通信しません。")).toBeVisible();
     await expect(heroPc(page)).toContainText("36 MB");
     await expect(page.getByTestId("cta-note").first()).toHaveText(/検出しました/);

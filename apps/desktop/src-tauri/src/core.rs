@@ -20,6 +20,7 @@ use crate::pipeline::{
     self, PartialRequest, PipelineSink, Running, StartError, PARTIAL_CHUNK_MAX_SAMPLES,
 };
 use crate::provisioning::hf::HfModel;
+use crate::provisioning::models::{Catalog, ModelInfo, ModelManager};
 use crate::provisioning::runtime::UvRuntime;
 use crate::provisioning::{Provisioner, ServerVerify, Stage};
 use crate::settings::{Settings, SettingsStore};
@@ -37,6 +38,7 @@ pub mod events {
     pub const PERMISSIONS_CHANGED: &str = "permissions-changed";
     pub const INPUT_DEVICES_CHANGED: &str = "input-devices-changed";
     pub const PROVISIONING_PROGRESS: &str = "provisioning-progress";
+    pub const MODELS_CHANGED: &str = "models-changed";
 }
 
 /// 未バンドルの開発実行 (tauri dev) で WebKit がキャッシュ等に使う名前 (実行ファイル名)
@@ -175,6 +177,13 @@ pub struct Core {
     dev_asr_url: Option<String>,
     asr_process: Arc<AsrProcess>,
     pub provisioning: Arc<Provisioner>,
+    pub models: Arc<ModelManager>,
+    /// モデルの切り替え中 (select_model)。切り替え・削除・restart_asr を重ねない
+    model_switch: tokio::sync::Mutex<()>,
+    /// 新しいモデルで起動できるかを確かめている間 (select_model)。この間の異常終了は停止エラーにしない
+    trying_model: std::sync::atomic::AtomicBool,
+    /// アプリの終了中 (切り替えの失敗で元のモデルを起動し直さない)
+    shutting_down: std::sync::atomic::AtomicBool,
     asr: RwLock<Option<Arc<HttpAsrClient>>>,
     insert: Mutex<Option<InsertQueue>>,
     running: Mutex<Option<Capture>>,
@@ -196,11 +205,22 @@ impl Core {
         resources: Resources,
     ) -> Result<Arc<Self>> {
         let asr_process = Arc::new(AsrProcess::new());
-        let model = HfModel::distributed();
+        let emit_app = app.clone();
+        let models = ModelManager::new(paths.clone(), Catalog::distributed(), move |list| {
+            let _ = emit_app.emit(events::MODELS_CHANGED, list);
+        })?;
+        let selected = {
+            let m = models.clone();
+            move || m.selected().hf
+        };
+        let spec = {
+            let (paths, log_dir, m) = (paths.clone(), log_dir.clone(), models.clone());
+            move || launch_spec(&paths, &log_dir, &m.selected().hf)
+        };
         let emit_app = app.clone();
         let provisioning = Provisioner::new(
             paths.clone(),
-            model.clone(),
+            Arc::new(selected),
             Arc::new(UvRuntime {
                 paths: paths.clone(),
                 resources: resources.clone(),
@@ -208,7 +228,7 @@ impl Core {
             }),
             Arc::new(ServerVerify {
                 asr: asr_process.clone(),
-                spec: launch_spec(&paths, &log_dir, &model),
+                spec: Arc::new(spec),
                 wav: resources.verify_wav.clone(),
             }),
             move |s| {
@@ -224,6 +244,10 @@ impl Core {
             log_dir,
             asr_process,
             provisioning,
+            models,
+            model_switch: tokio::sync::Mutex::new(()),
+            trying_model: std::sync::atomic::AtomicBool::new(false),
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
             asr: RwLock::new(None),
             insert: Mutex::new(None),
             running: Mutex::new(None),
@@ -308,8 +332,9 @@ impl Core {
         self.dev_asr_url.is_none()
     }
 
+    /// 選択中のモデルでの起動方法
     fn launch_spec(&self) -> LaunchSpec {
-        launch_spec(&self.paths, &self.log_dir, &HfModel::distributed())
+        launch_spec(&self.paths, &self.log_dir, &self.models.selected().hf)
     }
 
     fn asr_client(&self) -> Option<Arc<HttpAsrClient>> {
@@ -436,11 +461,15 @@ impl Core {
                 detail,
             } => {
                 self.set_asr_client(None);
-                if self.provisioning.is_done() {
-                    self.fail_later(AppError::asr_stopped(detail), None);
-                } else {
-                    // セットアップの動作確認での失敗 (セットアップ画面に表示される)
-                    self.state.set_error(AppError::runtime_missing());
+                match crash_response(
+                    self.provisioning.is_done(),
+                    self.trying_model.load(Ordering::SeqCst),
+                ) {
+                    CrashResponse::Fail => self.fail_later(AppError::asr_stopped(detail), None),
+                    CrashResponse::RuntimeMissing => {
+                        self.state.set_error(AppError::runtime_missing())
+                    }
+                    CrashResponse::Ignore => {}
                 }
             }
             AsrEvent::Stopped => {
@@ -463,6 +492,11 @@ impl Core {
             // 削除の実行中 (削除する側がサーバーを止め、未導入に戻す)
             return;
         }
+        // セットアップで取得したモデルの状態・選択を反映する (新規の導入では選択をここで初めて記録する)
+        if stage == Stage::Done {
+            self.models.persist_selection();
+        }
+        self.models.emit_now();
         match stage {
             Stage::Done if self.managed_asr() => {
                 // 動作確認で起動したサーバーをそのまま使う。以後は異常終了時に起動し直す
@@ -510,8 +544,13 @@ impl Core {
         if self.managed_asr() {
             self.set_listening(false).await?;
         }
-        // 削除が終わるまでセットアップ・サーバーの起動をさせない (落とすと解除)
+        let _switch = self
+            .model_switch
+            .try_lock()
+            .map_err(|_| anyhow!("モデルを切り替え中です"))?;
+        // 削除が終わるまでセットアップ・モデルの取得・サーバーの起動をさせない (落とすと解除)
         let _suspended = self.provisioning.suspend().await?;
+        let _models_suspended = self.models.suspend().await?;
         self.asr_process.stop().await;
         let paths = self.paths.clone();
         let result =
@@ -519,8 +558,9 @@ impl Core {
                 .await
                 .map_err(|e| anyhow!("削除処理が異常終了しました: {e}"));
         // 失敗しても (途中まで消えている・サーバーは止めた) 未導入に戻す。記録は最初に消すため、
-        // 再セットアップでは残っているものを確かめ直す
+        // 再セットアップでは残っているものを確かめ直す。モデルの選択は既定に戻る (セットアップで既定を取る)
         self.provisioning.reset();
+        self.models.reset();
         if self.managed_asr() {
             self.state.set_error(AppError::runtime_missing());
         }
@@ -575,13 +615,19 @@ impl Core {
         self.with_uninstall_context(|ctx| {
             storage::check_app_bundle(ctx.app_bundle.as_deref(), ctx.dev.is_some())
         })??;
+        // モデルの切り替え中は行わない (切り替えの失敗で元のモデルを起動し直してしまうため)
+        let _switch = self
+            .model_switch
+            .try_lock()
+            .map_err(|_| anyhow!("モデルを切り替え中です"))?;
         let suspended = if dry_run {
             None
         } else {
             self.set_listening(false).await?;
             let s = self.provisioning.suspend().await?;
+            let m = self.models.suspend().await?;
             self.asr_process.stop().await;
-            Some(s)
+            Some((s, m))
         };
         let core = self.clone();
         let trashed = tauri::async_runtime::spawn_blocking(move || {
@@ -592,6 +638,7 @@ impl Core {
         if suspended.is_some() {
             // 本体を消せずに続ける場合 (開発・失敗): データは消えているため未導入に戻す
             self.provisioning.reset();
+            self.models.reset();
             if self.managed_asr() {
                 self.state.set_error(AppError::runtime_missing());
             }
@@ -607,7 +654,9 @@ impl Core {
 
     /// アプリ終了時: セットアップ (uv・ダウンロード・動作確認) と ASR サーバーを止める
     pub fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
         self.provisioning.shutdown_blocking(Duration::from_secs(3));
+        self.models.shutdown_blocking(Duration::from_secs(3));
         self.asr_process.shutdown_blocking();
     }
 
@@ -665,6 +714,10 @@ impl Core {
         if self.provisioning.is_suspended() {
             return Err(anyhow!("削除を実行中です"));
         }
+        let _switch = self
+            .model_switch
+            .try_lock()
+            .map_err(|_| anyhow!("モデルを切り替え中です"))?;
         if self.managed_asr() {
             if !self.provisioning.is_done() {
                 return Err(anyhow!("実行環境とモデルが導入されていません"));
@@ -693,6 +746,124 @@ impl Core {
                 Err(anyhow!("文字起こしサーバーが応答しません"))
             }
         }
+    }
+
+    // ---- モデルの管理 (docs/architecture.md「モデルの管理」) --------------------
+
+    /// モデルの操作ができるか: セットアップ完了後で、削除の実行中でない
+    fn check_models_available(&self) -> Result<()> {
+        if self.provisioning.is_suspended() {
+            return Err(anyhow!("削除を実行中です"));
+        }
+        if !self.provisioning.is_done() {
+            return Err(anyhow!("セットアップが完了していません"));
+        }
+        Ok(())
+    }
+
+    pub fn list_models(&self) -> Vec<ModelInfo> {
+        self.models.list()
+    }
+
+    pub fn download_model(&self, id: &str) -> Result<()> {
+        self.check_models_available()?;
+        self.models.download(id)
+    }
+
+    pub async fn pause_model_download(&self, id: &str) -> Result<()> {
+        self.models.pause(id).await
+    }
+
+    pub async fn cancel_model_download(&self, id: &str) -> Result<()> {
+        // 途中のファイルを消すため削除と同じ条件で拒む
+        if !self.destructive_ops_allowed() {
+            return Err(anyhow!(
+                "開発ビルドを本番のバンドルIDで実行しているため削除しません"
+            ));
+        }
+        self.check_models_available()?;
+        self.models.cancel(id).await
+    }
+
+    pub fn delete_model(&self, id: &str) -> Result<()> {
+        if !self.destructive_ops_allowed() {
+            return Err(anyhow!(
+                "開発ビルドを本番のバンドルIDで実行しているため削除しません"
+            ));
+        }
+        self.check_models_available()?;
+        // 切り替えの失敗で元のモデルに戻す間に、元のモデルを消させない
+        let _switch = self
+            .model_switch
+            .try_lock()
+            .map_err(|_| anyhow!("モデルを切り替え中です"))?;
+        self.models.delete(id)
+    }
+
+    /// 使うモデルを切り替え、新しいモデルでサーバーを起動し直して準備完了まで待つ。
+    /// 準備完了にならなければ元のモデルに戻して起動し直し、エラーを返す
+    pub async fn select_model(self: &Arc<Self>, id: &str) -> Result<()> {
+        let _switch = self
+            .model_switch
+            .try_lock()
+            .map_err(|_| anyhow!("モデルを切り替え中です"))?;
+        self.check_models_available()?;
+        let prev = self.models.selected();
+        if prev.id == id {
+            return Ok(());
+        }
+        let next = self.models.selectable(id)?;
+        if !self.managed_asr() {
+            self.models.select(&next.id)?;
+            log::info!(
+                "モデルの選択を {} に変えた (外部の文字起こしサーバーは起動し直さない)",
+                next.id
+            );
+            return Ok(());
+        }
+        log::info!("モデルを切り替える: {} → {}", prev.id, next.id);
+        // 選択の記録は起動を確かめてから書く (途中でアプリが終わっても、読み込めるか分からないモデルを選択中に残さない)
+        let result = {
+            // この間の異常終了 (Crashed{will_restart:false}) は停止エラーにしない。通知は wait_ready が
+            // 失敗を返す前に届くため、戻した後の読み込み中に遅れて停止エラーが出ることはない
+            let _trying = Flag::set(&self.trying_model);
+            // 読み込めるかを確かめる間は自動で起動し直さない (失敗したら元のモデルに戻すため)
+            self.asr_process
+                .start(launch_spec(&self.paths, &self.log_dir, &next.hf), false)
+                .await;
+            // 送り手を持ち続ける (落とすと待つのをやめてしまう)
+            let (_never_tx, never) = tokio::sync::watch::channel(false);
+            self.asr_process.wait_ready(never).await
+        };
+        let failure = match result {
+            Ok(_) => match self.models.select(&next.id) {
+                Ok(()) => {
+                    self.asr_process.set_auto_restart(true);
+                    log::info!("モデルを切り替えた: {}", next.id);
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::error!("モデルの選択を保存できないため {} に戻す: {e:#}", prev.id);
+                    format!("{e}。「{}」に戻しました", prev.name)
+                }
+            },
+            Err(e) => {
+                log::error!(
+                    "モデル {} で起動できないため {} に戻す: {e:#}",
+                    next.id,
+                    prev.id
+                );
+                format!(
+                    "「{}」を読み込めませんでした。「{}」に戻しました",
+                    next.name, prev.name
+                )
+            }
+        };
+        if !self.shutting_down.load(Ordering::SeqCst) {
+            // 選択は元のまま (launch_spec は元のモデル)
+            self.asr_process.start(self.launch_spec(), true).await;
+        }
+        Err(anyhow!(failure))
     }
 
     fn audio_source(&self) -> Source {
@@ -1143,6 +1314,44 @@ impl Core {
     }
 }
 
+/// 自動で起動し直さない異常終了 (Crashed{will_restart:false}) への対応
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrashResponse {
+    /// 停止エラー (asr_stopped) にして音声入力を止める
+    Fail,
+    /// セットアップの動作確認での失敗 (セットアップ画面に表示される)
+    RuntimeMissing,
+    /// モデルの切り替えで起動を確かめている間: select_model が元のモデルに戻してエラーを返す。
+    /// ここで停止エラーにすると、戻した元のモデルの読み込み中に遅れて停止エラーが出てしまう
+    Ignore,
+}
+
+fn crash_response(provisioning_done: bool, trying_model: bool) -> CrashResponse {
+    if trying_model {
+        CrashResponse::Ignore
+    } else if provisioning_done {
+        CrashResponse::Fail
+    } else {
+        CrashResponse::RuntimeMissing
+    }
+}
+
+/// 立てている間だけ true にする (途中の return・panic でも戻す)
+struct Flag<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl<'a> Flag<'a> {
+    fn set(flag: &'a std::sync::atomic::AtomicBool) -> Self {
+        flag.store(true, Ordering::SeqCst);
+        Self(flag)
+    }
+}
+
+impl Drop for Flag<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 fn launch_spec(paths: &DataPaths, log_dir: &std::path::Path, model: &HfModel) -> LaunchSpec {
     LaunchSpec {
         python: paths.venv_python(),
@@ -1375,6 +1584,74 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 起動してすぐ落ちる ASR サーバー (python の代わりの sh スクリプト)
+    fn crashing_spec(dir: &std::path::Path) -> LaunchSpec {
+        use std::os::unix::fs::PermissionsExt;
+        let py = dir.join("python");
+        std::fs::write(&py, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        LaunchSpec {
+            python: py,
+            model_dir: dir.into(),
+            hf_home: dir.into(),
+            cwd: dir.into(),
+            log_file: dir.join("asr-server.log"),
+        }
+    }
+
+    /// select_model の失敗: 新しいモデルの異常終了は停止エラーにせず (元のモデルの読み込み中に
+    /// 遅れて停止エラーが出ないように)、切り替えを終えた後の異常終了は停止エラーにする
+    #[test]
+    fn crash_while_trying_model_is_not_reported() {
+        assert_eq!(crash_response(true, false), CrashResponse::Fail);
+        assert_eq!(crash_response(false, false), CrashResponse::RuntimeMissing);
+        assert_eq!(crash_response(true, true), CrashResponse::Ignore);
+
+        tauri::async_runtime::block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let asr = Arc::new(AsrProcess::new());
+            let trying = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let responses = Arc::new(Mutex::new(Vec::new()));
+            {
+                let (trying, responses) = (trying.clone(), responses.clone());
+                asr.subscribe(move |ev| {
+                    if let AsrEvent::Crashed {
+                        will_restart: false,
+                        ..
+                    } = ev
+                    {
+                        let r = crash_response(true, trying.load(Ordering::SeqCst));
+                        lock(&responses).push(r);
+                    }
+                });
+            }
+            let wait = || {
+                let asr = asr.clone();
+                async move {
+                    let (_tx, rx) = tokio::sync::watch::channel(false);
+                    tokio::time::timeout(Duration::from_secs(10), asr.wait_ready(rx))
+                        .await
+                        .expect("起動の失敗を待てない")
+                }
+            };
+            {
+                let _trying = Flag::set(&trying);
+                asr.start(crashing_spec(tmp.path()), false).await;
+                assert!(wait().await.is_err());
+            }
+            assert!(!trying.load(Ordering::SeqCst), "確かめ終えたら下ろす");
+            // 異常終了の通知は wait_ready が失敗を返す前に、確かめている間として届いている
+            assert_eq!(*lock(&responses), vec![CrashResponse::Ignore]);
+
+            asr.start(crashing_spec(tmp.path()), false).await;
+            assert!(wait().await.is_err());
+            assert_eq!(
+                *lock(&responses),
+                vec![CrashResponse::Ignore, CrashResponse::Fail]
+            );
+        });
+    }
 
     #[test]
     fn stable_length_is_common_prefix() {

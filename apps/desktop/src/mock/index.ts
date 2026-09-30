@@ -17,6 +17,7 @@ import type {
   EventMap,
   PanelAnchor,
   EventName,
+  ModelInfo,
   ProvisioningStatus,
   Settings,
   SettingsCategory,
@@ -25,7 +26,7 @@ import type {
 } from "@/lib/ipc";
 import { devOverrides } from "@/lib/env";
 import { findScenario } from "./scenarios";
-import { createDb, provisioning, GB, MODEL_TOTAL, type MockDb } from "./data";
+import { createDb, model, provisioning, GB, MODEL_TOTAL, type MockDb, type ModelId } from "./data";
 
 const HOME = "/Users/you";
 const RUNTIME_MISSING: AppError = {
@@ -150,11 +151,61 @@ export function installMock(params: URLSearchParams) {
         if (stageTicks >= 4) {
           stopProvisioningTicker();
           setProvisioning(provisioning("done"));
+          // セットアップは選択中のモデルを取得する
+          setModels(
+            db.models.map((m) =>
+              m.selected ? model(m.id as ModelId, "downloaded", { selected: true }) : m,
+            ),
+          );
           setStatus({ phase: "off", loadingProgress: null, error: null });
         }
       } else {
         stopProvisioningTicker();
       }
+    }, 250);
+  };
+
+  // Rust のモデルの管理を模す: 取得は 0.1 GB / 250ms (最初の約2秒は残り時間 null)、同時に取得するのは1つ。
+  // 選択は loading を経由して約1秒で準備完了 (db.modelSelectFail があれば元のモデルに戻して reject)
+  let modelTimer: ReturnType<typeof setInterval> | null = null;
+  let modelTicks = 0;
+  let switching = false;
+  const setModels = (next: ModelInfo[]) => {
+    db.models = next;
+    fire("models-changed", next);
+  };
+  const patchModel = (id: string, patch: Partial<ModelInfo>) =>
+    setModels(db.models.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  const resetModel = (id: string) =>
+    setModels(db.models.map((m) => (m.id === id ? model(m.id as ModelId, "not_downloaded", { selected: m.selected }) : m)));
+  const findModel = (id: unknown): ModelInfo => {
+    const m = db.models.find((x) => x.id === id);
+    if (!m) throw "不明なモデルです";
+    return m;
+  };
+  // Rust は reject の値に表示用の文字列を返す
+  const requireModelOps = () => {
+    if (db.provisioning.stage !== "done") throw "セットアップが完了していません";
+  };
+  const stopModelTicker = () => {
+    if (modelTimer) clearInterval(modelTimer);
+    modelTimer = null;
+  };
+  const startModelTicker = (id: string) => {
+    stopModelTicker();
+    modelTicks = 0;
+    modelTimer = setInterval(() => {
+      const m = db.models.find((x) => x.id === id);
+      if (!m || m.state !== "downloading") return stopModelTicker();
+      modelTicks += 1;
+      const next = Math.min(m.sizeBytes, m.bytesDone + 0.1 * GB);
+      if (next >= m.sizeBytes) {
+        stopModelTicker();
+        patchModel(id, { state: "downloaded", bytesDone: m.sizeBytes, diskBytes: m.sizeBytes, etaSeconds: null });
+        return;
+      }
+      const eta = modelTicks < 8 ? null : Math.round(((m.sizeBytes - next) / (0.1 * GB)) * 0.25);
+      patchModel(id, { bytesDone: next, diskBytes: next, etaSeconds: eta });
     }, 250);
   };
 
@@ -236,14 +287,81 @@ export function installMock(params: URLSearchParams) {
         }
         case "get_storage_usage":
           return db.provisioning.stage === "done"
-            ? { runtimeBytes: 1.2 * GB, modelBytes: MODEL_TOTAL, otherBytes: 12_000_000 }
+            ? {
+                runtimeBytes: 1.2 * GB,
+                modelBytes: db.models.reduce((sum, m) => sum + m.diskBytes, 0),
+                otherBytes: 12_000_000,
+              }
             : { runtimeBytes: 0, modelBytes: 0, otherBytes: 12_000_000 };
         case "delete_runtime_and_model":
           await new Promise((r) => setTimeout(r, 300));
           stopProvisioningTicker();
+          stopModelTicker();
           setProvisioning(provisioning("idle"));
+          // 全モデルを消し、選択は既定に戻る
+          setModels(db.models.map((m) => model(m.id as ModelId, "not_downloaded", { selected: m.recommended })));
           setStatus({ phase: "error", loadingProgress: null, error: RUNTIME_MISSING });
           return null;
+        case "list_models":
+          return db.models;
+        case "select_model": {
+          requireModelOps();
+          const m = findModel(a.id);
+          if (switching) throw "モデルを切り替え中です";
+          if (m.selected) return null;
+          if (m.state !== "downloaded") throw "ダウンロードが済んでいないモデルは選べません";
+          switching = true;
+          // Rust は新しいモデルで ASR を起動し直し (音声入力は OFF、phase は loading を経由)、
+          // 準備完了してから選択を記録する。失敗したら選択は元のまま
+          setStatus({ phase: "loading", loadingProgress: null, error: null });
+          await new Promise((r) => setTimeout(r, 1000));
+          const failure = db.modelSelectFail;
+          if (failure == null) {
+            setModels(db.models.map((x) => ({ ...x, selected: x.id === m.id })));
+          }
+          setStatus({ phase: "off", loadingProgress: null, error: null });
+          switching = false;
+          if (failure != null) throw failure;
+          return null;
+        }
+        case "download_model": {
+          requireModelOps();
+          const m = findModel(a.id);
+          if (m.state === "downloaded" || m.state === "downloading") return null;
+          if (db.models.some((x) => x.state === "downloading")) throw "他のモデルをダウンロード中です";
+          patchModel(m.id, { state: "downloading", etaSeconds: null, error: null });
+          startModelTicker(m.id);
+          return null;
+        }
+        case "pause_model_download": {
+          // Rust は止めるだけのため、セットアップ未完了・削除の実行中でも拒まない
+          const m = findModel(a.id);
+          if (m.state !== "downloading") return null;
+          stopModelTicker();
+          // Rust は実際に止まってから返る
+          await new Promise((r) => setTimeout(r, 300));
+          patchModel(m.id, { state: "paused", etaSeconds: null });
+          return null;
+        }
+        case "cancel_model_download": {
+          requireModelOps();
+          const m = findModel(a.id);
+          if (m.state === "downloaded") throw "ダウンロード済みです";
+          if (m.state === "downloading") stopModelTicker();
+          await new Promise((r) => setTimeout(r, 200));
+          resetModel(m.id);
+          return null;
+        }
+        case "delete_model": {
+          requireModelOps();
+          const m = findModel(a.id);
+          if (switching) throw "モデルを切り替え中です";
+          if (m.selected) throw "使用中のモデルは削除できません";
+          if (m.state === "downloading") throw "ダウンロード中のモデルは削除できません。中止してください";
+          await new Promise((r) => setTimeout(r, 300));
+          resetModel(m.id);
+          return null;
+        }
         case "get_uninstall_targets":
           return [
             // Rust は存在するものだけを絶対パスで返す

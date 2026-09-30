@@ -62,7 +62,7 @@ pub fn destructive_ops_allowed(debug_build: bool, bundle_id: &str) -> bool {
 }
 
 /// データディレクトリを削除してよいか: 目印があり、リポジトリでないこと
-fn check_data_dir(dir: &Path) -> Result<()> {
+pub fn check_data_dir(dir: &Path) -> Result<()> {
     if !dir.join(DATA_MARKER).is_file() {
         bail!(
             "mukuchi が作ったデータディレクトリではないため削除しません ({DATA_MARKER} がない): {}",

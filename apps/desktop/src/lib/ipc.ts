@@ -107,7 +107,31 @@ export type ProvisioningStatus = {
   error: string | null;
 };
 
+/** modelBytes は models/ 全体 (全モデル・取得途中を含む) */
 export type StorageUsage = { runtimeBytes: number; modelBytes: number; otherBytes: number };
+
+export type ModelState = "not_downloaded" | "downloading" | "paused" | "error" | "downloaded";
+export type ModelInfo = {
+  /** カタログの id ("ja-8bit" | "ja-bf16")。list_models はカタログ順 (表示もこの順) */
+  id: string;
+  name: string;
+  description: string;
+  /** 取得するファイルの合計 (固定した revision の値)。進捗の分母・未取得時の容量表示 */
+  sizeBytes: number;
+  /** 既定・推奨。ちょうど1つ */
+  recommended: boolean;
+  /** 使用中。常にちょうど1つ (セットアップ未完了の間は未取得のことがある) */
+  selected: boolean;
+  state: ModelState;
+  /** downloading・paused・error: 取得済みのバイト数。downloaded: sizeBytes。not_downloaded: 0 */
+  bytesDone: number;
+  /** downloading のみ (最初の2秒は null) */
+  etaSeconds: number | null;
+  /** state=error の時の表示用。再試行は download_model */
+  error: string | null;
+  /** このモデルのディスク上の使用量 (取得途中・古い版を含む) */
+  diskBytes: number;
+};
 export type AudioDevice = { id: string; name: string; isDefault: boolean };
 export type AppInfo = { version: string; build: string };
 export type UninstallTarget = { path: string; bytes: number };
@@ -163,6 +187,16 @@ export const commands = {
   pauseProvisioning: () => call<void>("pause_provisioning"),
   getStorageUsage: () => call<StorageUsage>("get_storage_usage"),
   deleteRuntimeAndModel: () => call<void>("delete_runtime_and_model"),
+  listModels: () => call<ModelInfo[]>("list_models"),
+  /** ASR を新しいモデルで起動し直し、準備完了まで待って返る。失敗時は元のモデルに戻して reject */
+  selectModel: (id: string) => call<void>("select_model", { id }),
+  /** 開始・再開・再試行。開始したらすぐ返る (進捗は models-changed) */
+  downloadModel: (id: string) => call<void>("download_model", { id }),
+  /** 止まるまで待って返る */
+  pauseModelDownload: (id: string) => call<void>("pause_model_download", { id }),
+  /** 途中のファイルを消して not_downloaded にする */
+  cancelModelDownload: (id: string) => call<void>("cancel_model_download", { id }),
+  deleteModel: (id: string) => call<void>("delete_model", { id }),
   getUninstallTargets: () => call<UninstallTarget[]>("get_uninstall_targets"),
   uninstall: () => call<void>("uninstall"),
   listRunningApps: () => call<RunningApp[]>("list_running_apps"),
@@ -195,6 +229,7 @@ export type EventMap = {
   "provisioning-progress": ProvisioningStatus;
   // マイクの接続・切断。変化後の一覧を送る (Rust が送らない版でも購読は無害)
   "input-devices-changed": AudioDevice[];
+  "models-changed": ModelInfo[];
 };
 
 export type EventName = keyof EventMap;

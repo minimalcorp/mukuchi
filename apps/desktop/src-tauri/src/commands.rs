@@ -9,6 +9,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::audio::{self, AudioDevice};
 use crate::core::Core;
 use crate::permissions::{self, Pane, Permissions};
+use crate::provisioning::models::ModelInfo;
 use crate::provisioning::ProvisioningStatus;
 use crate::settings::Settings;
 use crate::state::AppStatus;
@@ -132,6 +133,46 @@ pub async fn get_storage_usage(core: State<'_, Arc<Core>>) -> CmdResult<StorageU
 #[tauri::command]
 pub async fn delete_runtime_and_model(core: State<'_, Arc<Core>>) -> CmdResult<()> {
     core.inner().delete_runtime_and_model().await.map_err(err)
+}
+
+// ---- モデルの管理 --------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_models(core: State<'_, Arc<Core>>) -> CmdResult<Vec<ModelInfo>> {
+    // ディスクの使用量を数えるためブロッキングで行う
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || core.list_models())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn select_model(core: State<'_, Arc<Core>>, id: String) -> CmdResult<()> {
+    core.inner().select_model(&id).await.map_err(err)
+}
+
+#[tauri::command]
+pub fn download_model(core: State<'_, Arc<Core>>, id: String) -> CmdResult<()> {
+    core.download_model(&id).map_err(err)
+}
+
+#[tauri::command]
+pub async fn pause_model_download(core: State<'_, Arc<Core>>, id: String) -> CmdResult<()> {
+    core.pause_model_download(&id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn cancel_model_download(core: State<'_, Arc<Core>>, id: String) -> CmdResult<()> {
+    core.cancel_model_download(&id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn delete_model(core: State<'_, Arc<Core>>, id: String) -> CmdResult<()> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || core.delete_model(&id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(err)
 }
 
 #[tauri::command]

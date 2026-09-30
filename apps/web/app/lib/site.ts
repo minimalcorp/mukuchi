@@ -17,8 +17,8 @@ export const VERSION = "v0.1.0";
 export const PRICE = "無料";
 /** 署名・公証済み dmg の実測 (v0.1.0: 35.95 MB) */
 export const DMG_SIZE = "36 MB";
-/** 現在の配布モデル neosophie/Qwen3-ASR-1.7B-JA。8bit 版 (約 2.2 GB) に切り替えたら更新する */
-export const MODEL_SIZE = "約 4.1 GB";
+/** 既定のモデル minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit (2,185,804,096 B)。初回セットアップはこれだけを取得する */
+export const MODEL_SIZE = "約 2.2 GB";
 export const SETUP_DURATION = "約 5 分";
 
 export const REQUIREMENTS = {

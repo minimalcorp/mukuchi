@@ -16,7 +16,10 @@ from .worker import InferenceWorker, Transcriber
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 18765
-DEFAULT_MODEL = "neosophie/Qwen3-ASR-1.7B-JA"
+# 配布の既定 (自前変換の全層8bit版)。リポジトリIDでは版を固定できない
+# (mlx-qwen3-asr は revision を受け取らない) ため、本番・開発はどちらも
+# 固定した版のスナップショットのディレクトリを --model で渡す
+DEFAULT_MODEL = "minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit"
 
 logger = logging.getLogger("mukuchi_asr")
 

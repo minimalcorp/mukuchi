@@ -28,11 +28,7 @@ use tokio::io::AsyncWriteExt;
 use super::{failed, Cancel, StepError};
 
 pub const HF_ENDPOINT: &str = "https://huggingface.co";
-/// 配布モデル。
-/// TODO(P4): 全層8bit量子化したモデルを org 配下の HF リポジトリに置いたら差し替える
-/// (docs/architecture.md「決定事項」ASR)。それまでは元の bf16 版を commit で固定して使う
-pub const MODEL_REPO: &str = "neosophie/Qwen3-ASR-1.7B-JA";
-pub const MODEL_REVISION: &str = "987bda160f2dabfa6757550bcff7cdda2ba0648c";
+// 取得するモデル (リポジトリと revision) は models.rs の CATALOG で固定する
 
 /// 取得するファイル。mlx-qwen3-asr (load_models._resolve_path) の snapshot_download の allow_patterns と同じ。
 /// fnmatch の `*` は `/` も含むため、末尾の一致で判定する
@@ -55,11 +51,12 @@ pub struct HfModel {
 }
 
 impl HfModel {
-    pub fn distributed() -> Self {
+    /// Hugging Face 本体から取るモデル
+    pub fn hub(repo: &str, revision: &str) -> Self {
         Self {
             endpoint: HF_ENDPOINT.into(),
-            repo: MODEL_REPO.into(),
-            revision: MODEL_REVISION.into(),
+            repo: repo.into(),
+            revision: revision.into(),
         }
     }
 
@@ -352,6 +349,41 @@ impl<'a> Cache<'a> {
         let tmp = dir.join(format!("{}.json.tmp", self.model.revision));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&data)?)?;
         std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    /// 同じリポジトリの他の revision のもの (snapshots/<他>・trees/<他>.json・今の revision から参照されない blobs)
+    /// を消す。アプリの更新で revision が変わった時に古い版を残さないため。取得の完了後に呼ぶ
+    pub fn prune_other_revisions(&self, files: &[RemoteFile]) -> anyhow::Result<()> {
+        let keep_blobs: std::collections::HashSet<&str> =
+            files.iter().map(|f| f.blob.as_str()).collect();
+        let tree = format!("{}.json", self.model.revision);
+        let targets = [
+            (
+                "snapshots",
+                Box::new(|n: &str| n == self.model.revision) as Box<dyn Fn(&str) -> bool>,
+            ),
+            ("trees", Box::new(|n: &str| n == tree)),
+            ("blobs", Box::new(|n: &str| keep_blobs.contains(n))),
+        ];
+        for (dir, keep) in targets {
+            let dir = self.storage.join(dir);
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                if keep(&e.file_name().to_string_lossy()) {
+                    continue;
+                }
+                let p = e.path();
+                let r = if e.file_type().is_ok_and(|t| t.is_dir()) {
+                    std::fs::remove_dir_all(&p)
+                } else {
+                    std::fs::remove_file(&p)
+                };
+                r.with_context(|| format!("削除できません: {}", p.display()))?;
+            }
+        }
         Ok(())
     }
 

@@ -9,13 +9,13 @@ HTTP APIは [docs/architecture.md](../../../docs/architecture.md) の「ASRサ�
 
 ```bash
 uv sync --project asr-server
-HF_HOME=<モデル置き場> uv run --project asr-server mukuchi-asr --port 18765 --model neosophie/Qwen3-ASR-1.7B-JA
+HF_HOME=<モデル置き場> uv run --project asr-server mukuchi-asr --port 18765 --model minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit
 ```
 
 | 引数 | 既定 | |
 |---|---|---|
 | `--port` | `18765` | 待受ポート (ホストは `127.0.0.1` 固定) |
-| `--model` | `neosophie/Qwen3-ASR-1.7B-JA` | HFリポジトリID or ローカルパス。未取得ならHF_HOME配下へダウンロード |
+| `--model` | `minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit` | HFリポジトリID or ローカルパス。リポジトリIDは未取得ならHF_HOME配下へ最新版をダウンロード (版は固定できない)。本番・`make up` は版を固定したスナップショットのディレクトリ (`<HF_HOME>/hub/models--<org>--<name>/snapshots/<commit>`) を渡す。元の bf16 版は `neosophie/Qwen3-ASR-1.7B-JA` |
 | `--exit-on-stdin-eof` | off | stdinがEOFになったら即終了する。親(Rust)がパイプで起動し、親の終了に追従させるため |
 
 モデル読み込みとウォームアップが終わってから待受を始めるため、`/health` が応答した時点で利用可能。ログはstdout。

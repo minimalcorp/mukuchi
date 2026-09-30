@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { CircleAlert, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { formatBytes } from "@/lib/format";
 import { errorMessage } from "@/lib/hooks";
 import { commands, runCommand, type AppStatus, type StorageUsage, type UninstallTarget } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
-import { Card, FieldError, TitleWithSub } from "./common";
+import { Card, ConfirmLayout, FieldError, TitleWithSub } from "./common";
 
 export function StorageSection({ status }: { status: AppStatus | null }) {
   const [usage, setUsage] = useState<StorageUsage | null>(null);
@@ -113,36 +113,6 @@ export function StorageSection({ status }: { status: AppStatus | null }) {
         }}
       />
       <UninstallDialog open={confirm === "uninstall"} onClose={closeConfirm} />
-    </>
-  );
-}
-
-function ConfirmLayout({
-  title,
-  description,
-  error,
-  children,
-  actions,
-}: {
-  title: string;
-  description: string;
-  error?: string | null;
-  children?: ReactNode;
-  actions: ReactNode;
-}) {
-  return (
-    <>
-      <div className="flex flex-col gap-2 px-5 pt-5">
-        <DialogTitle className="m-0 text-lg leading-[1.4] font-semibold text-fg-strong">{title}</DialogTitle>
-        <DialogDescription className="m-0 text-sm text-fg-muted">{description}</DialogDescription>
-      </div>
-      {children ?? <div className="h-3.5" />}
-      {error ? (
-        <p role="alert" className="mx-5 mt-0 mb-3.5 text-xs leading-[1.5] text-fg-danger">
-          {error}
-        </p>
-      ) : null}
-      <div className="flex justify-end gap-2 px-5 pb-5">{actions}</div>
     </>
   );
 }

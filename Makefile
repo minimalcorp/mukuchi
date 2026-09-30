@@ -18,6 +18,12 @@ $(wordlist 2,$(words $(_GOALS)),$(_GOALS)):
 else
 
 export MUKUCHI_DEV_DATA := $(HOME)/Library/Application Support/com.minimalcorp.mukuchi.dev
+# 開発で使う ASR モデル。本番の既定 (docs/architecture.md「モデルの管理」の ja-8bit) と同じ版に固定する。
+# setup.sh が取得し、process-compose.yaml の asr はスナップショットのディレクトリを直接渡す
+# (HF_HUB_OFFLINE=1 でリポジトリIDを渡すと refs/main を引くが、commit 指定の取得では refs/main が作られないため)
+export MUKUCHI_MODEL ?= minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit
+export MUKUCHI_MODEL_REVISION ?= 698eff963b084561b12a045c95bc4a208898337f
+export MUKUCHI_MODEL_SNAPSHOT := $(MUKUCHI_DEV_DATA)/models/hub/models--$(subst /,--,$(MUKUCHI_MODEL))/snapshots/$(MUKUCHI_MODEL_REVISION)
 ASR_PORT := 18765
 ASR_HEALTH := http://127.0.0.1:$(ASR_PORT)/health
 # web (apps/web) の vite dev。ポートは apps/web/vite.config.ts (strictPort)、待ち受けアドレスは process-compose.yaml
@@ -126,7 +132,7 @@ else
 	@tail -n 200 -F "$(PC_DIR)/all.log"
 endif
 
-setup: ## pnpm install / uv sync / モデル取得
+setup: ## pnpm install / uv sync / モデル取得 (8bit 約2.2GB)
 	@$(DESKTOP_SCRIPTS)/setup.sh
 
 # CI (.github/workflows/ci.yml) の各 job と同じ検査。依存・同梱物は make setup で用意済みの前提

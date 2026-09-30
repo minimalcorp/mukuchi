@@ -1,5 +1,14 @@
 /* モックの初期データ */
-import type { AppStatus, AudioDevice, AudioLevel, PanelAnchor, Permissions, ProvisioningStatus, Settings } from "@/lib/ipc";
+import type {
+  AppStatus,
+  AudioDevice,
+  AudioLevel,
+  ModelInfo,
+  PanelAnchor,
+  Permissions,
+  ProvisioningStatus,
+  Settings,
+} from "@/lib/ipc";
 import type { MockApi } from "./index";
 
 export type MockDb = {
@@ -7,6 +16,10 @@ export type MockDb = {
   settings: Settings;
   permissions: Permissions;
   provisioning: ProvisioningStatus;
+  /** list_models の値 (カタログ順) */
+  models: ModelInfo[];
+  /** select_model を読み込みの途中で失敗させる (元のモデルに戻して reject する) 時のメッセージ */
+  modelSelectFail: string | null;
   level: AudioLevel;
   devices: AudioDevice[];
   /** panel のアンカー (get_panel_anchor の値) */
@@ -41,6 +54,49 @@ const DEFAULT_SETTINGS: Settings = {
 export const GB = 1_000_000_000;
 
 export const MODEL_TOTAL = 2.4 * GB;
+
+/** カタログ (Rust の provisioning/models.rs の CATALOG と同じ値) */
+const CATALOG = [
+  {
+    id: "ja-8bit",
+    name: "日本語 (8bit)",
+    description: "元のモデルと同等の精度で、より速く、メモリの使用量が少ない (約3GB)",
+    sizeBytes: 2_185_804_096,
+    recommended: true,
+  },
+  {
+    id: "ja-bf16",
+    name: "日本語 (bf16)",
+    description: "量子化していない元のモデル。容量とメモリの使用量 (約8.5GB) が大きい",
+    sizeBytes: 4_092_092_275,
+    recommended: false,
+  },
+] as const;
+
+export type ModelId = (typeof CATALOG)[number]["id"];
+
+/**
+ * Rust と同じ形の ModelInfo を作る。bytesDone は downloading・paused・error の時だけ使う
+ * (downloaded は sizeBytes、not_downloaded は 0)。diskBytes は手元のファイルの量
+ */
+export function model(
+  id: ModelId,
+  state: ModelInfo["state"],
+  opts: { selected?: boolean; bytesDone?: number; eta?: number | null; error?: string } = {},
+): ModelInfo {
+  const c = CATALOG.find((m) => m.id === id)!;
+  const bytesDone =
+    state === "downloaded" ? c.sizeBytes : state === "not_downloaded" ? 0 : (opts.bytesDone ?? 0.9 * GB);
+  return {
+    ...c,
+    selected: opts.selected ?? false,
+    state,
+    bytesDone,
+    etaSeconds: state === "downloading" ? (opts.eta === undefined ? 180 : opts.eta) : null,
+    error: state === "error" ? (opts.error ?? "モデルのダウンロードに失敗しました。ネットワーク接続を確認してください。") : null,
+    diskBytes: bytesDone,
+  };
+}
 
 type ItemId = ProvisioningStatus["items"][number]["id"];
 const ORDER: ItemId[] = ["runtime", "model", "verify"];
@@ -94,6 +150,8 @@ export function createDb(): MockDb {
     settings: structuredClone(DEFAULT_SETTINGS),
     permissions: { microphone: "granted", accessibility: true },
     provisioning: provisioning("done"),
+    models: [model("ja-8bit", "downloaded", { selected: true }), model("ja-bf16", "not_downloaded")],
+    modelSelectFail: null,
     level: { level: 0.18, threshold: 0.55, speech: false },
     devices: [
       { id: "builtin", name: "MacBook Pro のマイク", isDefault: true },

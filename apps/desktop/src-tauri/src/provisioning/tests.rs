@@ -111,10 +111,15 @@ impl Fixture {
     }
 
     fn provisioner(&self) -> Arc<Provisioner> {
+        let model = self.model();
+        self.provisioner_with(Arc::new(move || model.clone()))
+    }
+
+    fn provisioner_with(&self, model: SelectedModel) -> Arc<Provisioner> {
         let ev = self.events.clone();
         Provisioner::new(
             self.paths.clone(),
-            self.model(),
+            model,
             self.runtime.clone(),
             self.verify.clone(),
             move |s| ev.lock().unwrap().push(s.clone()),
@@ -194,10 +199,14 @@ fn full_run_writes_hf_layout_and_skips_on_rerun() {
     let rec = Provisioned::load(&fx.paths.provisioned());
     assert_eq!(rec.runtime.as_ref().unwrap().version, "rt-1");
     assert_eq!(
-        rec.model.as_ref().unwrap().version,
-        format!("{REPO}@{REVISION}")
+        rec.models.keys().collect::<Vec<_>>(),
+        vec![&format!("{REPO}@{REVISION}")]
     );
     assert_eq!(rec.verify.as_ref().unwrap().runtime, "rt-1");
+    // 旧形式の model は書かない
+    let raw: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fx.paths.provisioned()).unwrap()).unwrap();
+    assert!(raw.get("model").is_none(), "{raw}");
 
     // 段階の通知の順序
     let stages: Vec<Stage> = {
@@ -552,15 +561,16 @@ fn plan_rules() {
             version: v.into(),
             completed_at: 1,
         }),
-        model: m.map(|v| StepRecord {
-            version: v.into(),
-            completed_at: 1,
-        }),
+        models: m
+            .map(|v| (v.to_string(), ModelRecord { completed_at: 1 }))
+            .into_iter()
+            .collect(),
         verify: v.map(|(r, m)| VerifyRecord {
             runtime: r.into(),
             model: m.into(),
             completed_at: 1,
         }),
+        ..Provisioned::default()
     };
     let all = |r, m, v| Plan {
         runtime: r,
@@ -607,6 +617,107 @@ fn plan_rules() {
         plan(&Provisioned::default(), Some("r1"), true, "m1", true),
         all(true, true, true)
     );
+    // 取得済みの別のモデルに切り替えても verify はやり直さない (verify の model は記録のみ)
+    let mut two = full.clone();
+    two.models
+        .insert("m2".into(), ModelRecord { completed_at: 2 });
+    assert_eq!(
+        plan(&two, Some("r1"), true, "m2", true),
+        all(false, false, false)
+    );
+}
+
+#[test]
+fn legacy_single_model_record_is_migrated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("provisioned.json");
+    std::fs::write(
+        &path,
+        r#"{"runtime":{"version":"r1","completedAt":1},
+            "model":{"version":"org/a@1111","completedAt":5},
+            "verify":{"runtime":"r1","model":"org/a@1111","completedAt":6}}"#,
+    )
+    .unwrap();
+    let rec = Provisioned::load(&path);
+    assert_eq!(
+        rec.models.get("org/a@1111"),
+        Some(&ModelRecord { completed_at: 5 })
+    );
+    assert_eq!(rec.selected_model, None);
+    assert!(!rec.is_empty());
+    assert_eq!(
+        plan(&rec, Some("r1"), true, "org/a@1111", true),
+        Plan {
+            runtime: false,
+            model: false,
+            verify: false
+        }
+    );
+    // 書き直すと新しい形式になる
+    Provisioned::update(&path, |r| r.selected_model = Some("x".into())).unwrap();
+    let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(raw.get("model").is_none());
+    assert_eq!(raw["models"]["org/a@1111"]["completedAt"], 5);
+    assert_eq!(raw["selectedModel"], "x");
+    // 選択だけでは導入の記録とみなさない
+    let only_selection = Provisioned {
+        selected_model: Some("x".into()),
+        ..Provisioned::default()
+    };
+    assert!(only_selection.is_empty());
+}
+
+#[test]
+fn setup_fetches_the_selected_model() {
+    let fx = Fixture::new();
+    // 選択中のモデルを外から変えられる (models::ModelManager の代わり)
+    let other = HfModel {
+        endpoint: fx.server.endpoint.clone(),
+        repo: "org/other".into(),
+        revision: "2222222222222222222222222222222222222222".into(),
+    };
+    fx.server
+        .state()
+        .other_repos
+        .push(super::test_server::Repo {
+            repo: other.repo.clone(),
+            revision: other.revision.clone(),
+            files: vec![File {
+                path: "config.json".into(),
+                content: b"{\"b\":2}".to_vec(),
+                lfs: false,
+            }],
+        });
+    let selected = Arc::new(Mutex::new(fx.model()));
+    let provider: SelectedModel = {
+        let s = selected.clone();
+        Arc::new(move || lock(&s).clone())
+    };
+    let p = fx.provisioner_with(provider.clone());
+    p.start();
+    assert_eq!(block_on(wait_finished(&p)).stage, Stage::Done);
+
+    // 取得済みでない別のモデルが選ばれていれば、model (と verify) をやり直す
+    *lock(&selected) = other.clone();
+    let p = fx.provisioner_with(provider.clone());
+    assert!(!p.is_done());
+    assert_eq!(
+        p.status().items.iter().map(|i| i.state).collect::<Vec<_>>(),
+        vec![ItemState::Done, ItemState::Pending, ItemState::Pending]
+    );
+    p.start();
+    assert_eq!(block_on(wait_finished(&p)).stage, Stage::Done);
+    let rec = Provisioned::load(&fx.paths.provisioned());
+    assert_eq!(rec.models.len(), 2, "{rec:?}");
+    assert_eq!(rec.verify.unwrap().model, other.version());
+    assert_eq!(
+        std::fs::read(other.snapshot_dir(&fx.paths.models()).join("config.json")).unwrap(),
+        b"{\"b\":2}"
+    );
+
+    // 両方取得済みなら、どちらを選んでも導入済み
+    *lock(&selected) = fx.model();
+    assert!(fx.provisioner_with(provider).is_done());
 }
 
 #[test]

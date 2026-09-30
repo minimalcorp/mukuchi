@@ -24,7 +24,8 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 | ダークモード | システム設定に追従。デザインの参考表示(gray 700〜900を面に使用)に従う | |
 | 録音 | Rust (cpal) | WebView経由のgetUserMediaは権限ダイアログ二重表示等の既知問題あり |
 | VAD | Silero VAD (`ort`、arm64は静的リンク)。差し替え可能なtraitの背後に置く | 代替: earshot |
-| ASR | Python + MLX (`mlx-qwen3-asr`)、モデルは `neosophie/Qwen3-ASR-1.7B-JA` を全層8bit量子化したもの(自前変換、約2.2GB。org配下のHFリポジトリに置き revision を固定して取得。配置までは開発で元の bf16 版を使う) | Rust実装(candle/MLX)は約3倍遅い (spikes/asr-bench)。8bitはfp16と同等精度・約2割速い・メモリ1/3 (spikes/asr-bench/MODEL_DECISION.md) |
+| ASR | Python + MLX (`mlx-qwen3-asr`)。既定のモデルは `neosophie/Qwen3-ASR-1.7B-JA` を全層8bit量子化したもの (自前変換、`minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit`、約2.2GB)。元の bf16 版 (`neosophie/Qwen3-ASR-1.7B-JA`、約4.1GB) も選べる (下の「モデルの管理」)。どちらも revision (commit) を固定して取得 | Rust実装(candle/MLX)は約3倍遅い (spikes/asr-bench)。8bitはfp16と同等精度・約2割速い・メモリ1/3 (spikes/asr-bench/MODEL_DECISION.md) |
+| モデルの管理 | 候補はアプリに固定 (`provisioning/models.rs` の `CATALOG`)。常に「取得済みのモデルが1つ選択されている」状態を保つ (取得途中は選べない、選択中は削除できない)。取得 (進捗・一時停止・再開・中止)・削除はモデルごと。**取得中にできるのは1つ** (一時停止・失敗で止まっているものは複数あってよい)。モデルの操作はセットアップ完了後のみ (セットアップの取得と同時に走らせない)。詳細は「モデルの管理」の節 | 2026-10-01 決定 |
 | 操作 | 音声入力のON/OFFは **常時表示パネルのボタン** と **メニューバー** のみ。**キーボードショートカットは設けない**。押している間だけ録音するモードも実装しない | 2026-09-30 確定 |
 | 入力単位 | ONの間、発話(VAD区間)ごとに文字起こしし、話し終わったら入力。入力は単一キューで直列化 | 必須要件 |
 | リアルタイムプレビュー | 発話中は前回から音声が0.8秒以上伸び、かつ途中表示の要求が処理中でなければ、発話開始からの音声を文字起こしし直してパネルに表示する。入力するのは話し終わり時点の最終結果のみ。確定後は最終結果で表示を置き換えて750ms表示する (入力成功時は成功マークのみで入力先アプリ名は出さない)。推論時間の見積もり(実測から学習)が話し終わりの無音(silenceMs)を超える場合は送らない。長い発話は区切り (見積もりが silenceMs に収まる最長、3〜12秒) ごとに静かな所で確定し、以後は区切りの後の音声だけを送る (表示は確定した区切りの文字 + 今の区切りの文字。1回の推論が発話の長さに比例して伸びず、確定を遅らせない) | 2026-09-30 確定。値はtsunagiの音声入力に準拠 (implementation-plan.md「音声入力の体験」)。途中表示の応答待ちを取り消してもサーバーの推論は止まらず(直列実行)、確定がその分遅れるため |
@@ -50,7 +51,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 | バンドルID | `com.minimalcorp.mukuchi` | `com.minimalcorp.mukuchi.dev` |
 | データ | `~/Library/Application Support/<バンドルID>/` | 同左 (devのID) |
 
-データディレクトリ配下: `.mukuchi-data`(目印。下記) `settings.json` `provisioned.json` `uv/`(uv のその他の書き込み先: UV_PYTHON_BIN_DIR・UV_TOOL_DIR。同梱 uv のハッシュのキャッシュ `bundled-uv-hash.json` も置く) `python/`(UV_PYTHON_INSTALL_DIR) `venv/`(UV_PROJECT_ENVIRONMENT) `cache/`(UV_CACHE_DIR) `asr-server/`(同梱物のコピー。uv sync のプロジェクト) `models/`(HF_HOME)。ログは `~/Library/Logs/<バンドルID>/`。アプリ外(`~/.cache` 等)に書き込まない。
+データディレクトリ配下: `.mukuchi-data`(目印。下記) `settings.json` `provisioned.json` `uv/`(uv のその他の書き込み先: UV_PYTHON_BIN_DIR・UV_TOOL_DIR。同梱 uv のハッシュのキャッシュ `bundled-uv-hash.json` も置く) `python/`(UV_PYTHON_INSTALL_DIR) `venv/`(UV_PROJECT_ENVIRONMENT) `cache/`(UV_CACHE_DIR) `asr-server/`(同梱物のコピー。uv sync のプロジェクト) `models/`(HF_HOME。モデルごとに `hub/models--<org>--<name>/`)。ログは `~/Library/Logs/<バンドルID>/`。アプリ外(`~/.cache` 等)に書き込まない。
 
 削除の安全策:
 - 目印 `.mukuchi-data`: 起動時にデータディレクトリを作り (本番・開発とも) 空ファイルを書く。アンインストール・「実行環境とモデルのみ削除」は目印があり `.git` を含まないデータディレクトリだけを消す (無ければ対象から外す・エラー)
@@ -84,20 +85,56 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 ### セットアップ手順 (provisioning)
 
 1. **runtime**: `asr-server/` をデータディレクトリへコピーし、同梱 uv で `uv python install <.python-version の版> --no-bin` (引数なしだと最新版も入るため版を明示) → `uv sync --frozen --no-dev --compile-bytecode` で `venv/` を作る。uv には環境変数を引き継がず (`PYTHONPATH` 等の混入防止)、`HOME` `TMPDIR` `LANG`、プロキシ変数 (`HTTP_PROXY` `HTTPS_PROXY` `NO_PROXY` `ALL_PROXY` とその小文字)、`SSL_CERT_FILE` `SSL_CERT_DIR` だけ渡す。`UV_SYSTEM_CERTS=1` で OS の証明書ストアを使う (社内プロキシの独自ルート証明書向け。uv 0.12 で `UV_NATIVE_TLS` は非推奨になりこちらが正)。`UV_PYTHON_INSTALL_DIR` `UV_CACHE_DIR` `UV_PROJECT_ENVIRONMENT` `UV_PYTHON_BIN_DIR` `UV_TOOL_DIR` `UV_TOOL_BIN_DIR` をデータディレクトリ配下に向け、`UV_NO_CONFIG=1` (ユーザーのuv設定を読まない)・`UV_PYTHON_PREFERENCE=only-managed` (システムの Python を使わない)。出力は `~/Library/Logs/<バンドルID>/provisioning.log` (5MB を超えたら `.1` に1世代残す)
-2. **model**: 配布モデルを Hugging Face から `models/` (HF_HOME) に取得。リポジトリIDと revision は Rust の定数で固定 (`provisioning/hf.rs`。配布用リポジトリが決まるまで `neosophie/Qwen3-ASR-1.7B-JA@987bda16…`)。進捗・一時停止・再開(部分ファイルからの再開)は Rust が HTTP で直接取得して実現する
+2. **model**: 選択中のモデル (新規の導入では既定の `ja-8bit`) を Hugging Face から `models/` (HF_HOME) に取得。リポジトリIDと revision は Rust の定数で固定 (`provisioning/models.rs` の `CATALOG`)。進捗・一時停止・再開(部分ファイルからの再開)は Rust が HTTP で直接取得して実現する。設定画面からのモデルごとの取得 (「モデルの管理」) も同じ処理を使う
    - 一覧は `GET /api/models/<repo>/tree/<revision>?recursive=true`。取得対象は mlx-qwen3-asr と同じ `*.json *.safetensors *.txt *.model`
    - 本体は `GET /<repo>/resolve/<revision>/<path>` を `Range: bytes=<取得済み>-` で続きから取る (リダイレクト先の CDN も Range に対応)。通信の一時的な失敗は3回まで続きから取り直す。206 の `Content-Range` が要求 (`<取得済み>-<size-1>/<size>`) と合わなければ書かずに一時的な失敗として取り直し、200 (Range を無視) なら最初から取り直す。配布ビルドの HTTP クライアントは https のみ (リダイレクト先も)。取得後に LFS は sha256、それ以外は git の blob id (sha1) で検証し、一致しなければ捨てる
    - 書き込み先は huggingface_hub (2.0) のキャッシュと同じレイアウト: `hub/models--<org>--<name>/{blobs/<etag>, blobs/<etag>.incomplete, snapshots/<commit>/<path> → ../../blobs/<etag>, refs/main, trees/<commit>.json}`。`trees/` は revision に commit を指定したオフラインの snapshot_download に必要 (無いとネットワークへ出て失敗する)。取得したファイルだけを載せる
+   - 取得の完了時に、同じリポジトリの他の revision のもの (`snapshots/<他>`・`trees/<他>.json`・今の revision から参照されない `blobs/`) を消す (アプリの更新で revision が変わった時に古い版を残さない)
 3. **verify**: 本番と同じ起動方法 (下記) でASRサーバーを起動し `/health` と、同梱の短い無音ではない検証用音声 (TTSで作成、`Resources/verify.wav`) で `/transcribe` が成功し結果が空でないことを確認。検証中は自動再起動しない。成功したサーバーはそのまま使い続ける (読み込みをやり直さない)
 
-導入済みの判定は `<データ>/provisioned.json` (`{ runtime: {version, completedAt}, model: {version, completedAt}, verify: {runtime, model, completedAt} }`、時刻は UNIX 秒) で行う。runtime の版は同梱 uv と `asr-server/` の内容の sha256 (uv のハッシュは大きさ・更新時刻が同じならキャッシュを使う)、model の版は `<repo>@<revision>`。記録があっても導入先 (`venv/bin/python`・スナップショットの `config.json`) が無ければやり直す。版が変わった場合は該当ステップとその後の verify のみやり直す。起動時に、セットアップ完了済みで記録があるのに版が変わっていれば (アプリの更新) 自動でやり直す (その間 phase は loading)。「実行環境とモデルのみ削除」は記録ごと消すため自動ではやり直さない
+導入済みの判定は `<データ>/provisioned.json` で行う:
+
+```jsonc
+{
+  "runtime": { "version": "<sha256>", "completedAt": 1759300000 },
+  // 取得を終えたモデル。キーは版 `<repo>@<revision>` (revision が変わると別のキーになり、未取得扱い)
+  "models": { "minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit@698eff96…": { "completedAt": 1759300000 } },
+  // 選択中のモデル (カタログの id)。無ければ起動時に決める (「モデルの管理」の移行)
+  "selectedModel": "ja-8bit",
+  // 動作確認したときの runtime とモデルの版。model は記録のみ (モデルを切り替えても verify はやり直さない)
+  "verify": { "runtime": "<sha256>", "model": "<repo>@<revision>", "completedAt": 1759300000 }
+}
+```
+
+時刻は UNIX 秒。runtime の版は同梱 uv と `asr-server/` の内容の sha256 (uv のハッシュは大きさ・更新時刻が同じならキャッシュを使う)。旧形式の `model: {version, completedAt}` (モデルが1つだった頃) は読み込み時に `models` へ移し、書き込み時には出さない。セットアップの model は **選択中のモデル** の記録で判定する。記録があっても導入先 (`venv/bin/python`・スナップショットの `config.json`) が無ければやり直す。版が変わった場合は該当ステップとその後の verify のみやり直す (verify は runtime の版が記録と同じで、runtime・model が済んでいれば済み。model をやり直した時は verify もやり直す)。起動時に、セットアップ完了済みで記録 (runtime・models・verify のいずれか。selectedModel だけでは数えない) があるのに版が変わっていれば (アプリの更新) 自動でやり直す (その間 phase は loading)。「実行環境とモデルのみ削除」は記録ごと消すため自動ではやり直さない。**旧版へのダウングレードは想定しない** (旧版は新しい形式の `models`・`selectedModel` を読まず、モデルを未導入とみなして取り直しうる)。`provisioned.json` の読み書きは1か所 (プロセス内のロック) で直列にし、段階ごとに読み直して部分的に書き換える (セットアップとモデルの管理が互いの記録を上書きしないため)
 
 - 一時停止: model は途中のファイルを残し再開時に続きから取る。runtime は uv を止め再開時にやり直す (uv のキャッシュで続きから進む)。verify はやり直す
 - 失敗: `ProvisioningStatus.error` に表示用の文言。`start_provisioning` で再試行 (一時停止からの再開と同じ。済んだ段階はやり直さない)
 
 ### 本番の ASR サーバー起動
 
-`<データ>/venv/bin/python -m mukuchi_asr --port <空きポート> --model <models/hub/models--<org>--<name>/snapshots/<commit>> --exit-on-stdin-eof` を stdin をパイプにして起動。環境変数は引き継がず `HOME` `USER` `LOGNAME` `TMPDIR` `LANG` `LC_*` と `PATH=/usr/bin:/bin:/usr/sbin:/sbin` `HF_HOME` `HF_HUB_OFFLINE=1` `HF_HUB_DISABLE_TELEMETRY=1` `PYTHONNOUSERSITE=1` `PYTHONSAFEPATH=1` だけ渡す。作業ディレクトリは `venv/` (cwd のファイルを import しない)。セットアップの動作確認で起動した場合は `/transcribe` の確認が済むまで準備完了 (asrReady) にしない。stdout/stderr は `~/Library/Logs/<バンドルID>/asr-server.log` へ (5MB を超えたら `.1` に1世代残す)。`/health` が応答するまで phase は loading (上限10分)。異常終了時は3回まで自動再起動 (10分以上動いた後の異常終了は数え直す)。使い切ったら `asr_stopped`。`restart_asr` は止めてから起動し直す。アプリ終了時は実行中のセットアップ (uv・ダウンロード・動作確認) を止めて最大3秒待ち、stdin を閉じてサーバーを止める (3秒で終わらなければ kill)。未導入なら `runtime_missing` (action `start_setup`)
+`<データ>/venv/bin/python -m mukuchi_asr --port <空きポート> --model <models/hub/models--<org>--<name>/snapshots/<commit>> --exit-on-stdin-eof` (選択中のモデル) を stdin をパイプにして起動。環境変数は引き継がず `HOME` `USER` `LOGNAME` `TMPDIR` `LANG` `LC_*` と `PATH=/usr/bin:/bin:/usr/sbin:/sbin` `HF_HOME` `HF_HUB_OFFLINE=1` `HF_HUB_DISABLE_TELEMETRY=1` `PYTHONNOUSERSITE=1` `PYTHONSAFEPATH=1` だけ渡す。作業ディレクトリは `venv/` (cwd のファイルを import しない)。セットアップの動作確認で起動した場合は `/transcribe` の確認が済むまで準備完了 (asrReady) にしない。stdout/stderr は `~/Library/Logs/<バンドルID>/asr-server.log` へ (5MB を超えたら `.1` に1世代残す)。`/health` が応答するまで phase は loading (上限10分)。異常終了時は3回まで自動再起動 (10分以上動いた後の異常終了は数え直す)。使い切ったら `asr_stopped`。`restart_asr` は止めてから起動し直す。アプリ終了時は実行中のセットアップ (uv・ダウンロード・動作確認) を止めて最大3秒待ち、stdin を閉じてサーバーを止める (3秒で終わらなければ kill)。未導入なら `runtime_missing` (action `start_setup`)
+
+### モデルの管理
+
+| id | リポジトリ@revision | 容量 (取得するファイルの合計) | |
+|---|---|---|---|
+| `ja-8bit` | `minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit@698eff963b084561b12a045c95bc4a208898337f` | 2,185,804,096 B (約2.2GB) | 既定・推奨 (`recommended`)。新規のセットアップで取得する |
+| `ja-bf16` | `neosophie/Qwen3-ASR-1.7B-JA@987bda160f2dabfa6757550bcff7cdda2ba0648c` | 4,092,092,275 B (約4.1GB) | 元の bf16 版 (任意) |
+
+容量は固定した revision の tree API の値 (取得対象 `*.json *.safetensors *.txt *.model` の合計)。表示名・説明も同じ定数に持ち `list_models` で返す。
+
+- **選択**: 選択中のモデルは `provisioned.json` の `selectedModel` に記録する (`Settings` には置かない。「取得済みのものだけ選べる」は導入の記録と一緒に保つ必要があり、「実行環境とモデルのみ削除」で記録ごと既定に戻るため)。`select_model` は取得済み (現在の revision の記録があり `config.json` がある) のモデルだけ受け付け、ASR サーバーを新しいモデルで起動し直す (音声入力は OFF になり phase は loading を経由)。準備完了 (`/health`) まで待ち、**準備完了してから選択を記録して** 返る (切り替えの途中でアプリが終わっても、読み込めるか分からないモデルを選択中に残さない。その間 `ModelInfo.selected` は元のモデルのまま)。切り替えの起動は自動再起動なしで行い、準備完了したら自動再起動を有効にする
+- **切り替えの失敗**: 新しいモデルでサーバーが準備完了にならなければ (異常終了・読み込みの上限10分)、元のモデル (選択は元のまま) で起動し直し (自動再起動あり)、エラーで reject する (「『<新>』を読み込めませんでした。『<元>』に戻しました」)。新しいモデルの異常終了は `asr_stopped` にしない (元のモデルの読み込み中に停止エラーを出さないため)。準備完了後に選択を記録できなかった場合も元のモデルに戻して reject する。元のモデルでも起動できなければ通常の `asr_stopped`
+- **切り替え中**: `select_model`・`delete_model`・`restart_asr`・`delete_runtime_and_model`・`uninstall` はエラー (「モデルを切り替え中です」。失敗時に元のモデルを起動し直す処理と重ねないため)
+- **取得**: モデルごとに開始・一時停止・再開・中止。処理はセットアップの model と同じ (`hf.rs`。部分ファイルからの再開・検証・huggingface_hub 互換のレイアウト)。同時に取得するのは1つ (他が取得中なら `download_model` はエラー)。一時停止・失敗で止まったものは複数残ってよい。完了したら `models` に記録する (選択は変えない)。中止 (`cancel_model_download`) は途中のファイルごとそのモデルのディレクトリを消す (削除と同じく、開発ビルドが本番のバンドルIDで動いている時は拒む)
+- **削除**: `delete_model` は選択中・取得中のモデルを拒む。記録を先に消してから `models/hub/models--<org>--<name>/` を消す (データディレクトリの目印を確かめる。開発ビルドが本番のバンドルIDで動いている時は拒む)。ディレクトリの削除中 (中止を含む) はそのモデルの取得・削除を拒む
+- **利用できる時**: モデルの操作 (`select_model`・`download_model`・`delete_model` 等) はセットアップ完了後 (`ProvisioningStatus.stage` が `done`) のみ。それ以外・削除の実行中はエラー。セットアップの取得は `ProvisioningStatus` で表し、`list_models` には手元のファイルの状態だけが出る
+- **移行** (起動時): `selectedModel` が無い・カタログに無い・そのモデルの記録 (どの revision でも) かディレクトリが無い場合は、既定 (`ja-8bit`) が記録ありならそれ、無ければ記録のある他のモデル (カタログ順)、どれも無ければ既定を選ぶ。記録 (runtime・models・verify) があれば `selectedModel` を書き込む。つまり **bf16 だけ導入済みの既存の導入は bf16 を選択中として残し、8bit を自動では取得しない** (2GB 超の取得を利用者の操作なしに始めないため)。8bit への切り替えは設定画面から (取得 → 選択)
+- **revision が変わった時** (アプリの更新): 選択中のモデルは起動時にセットアップの自動やり直しで取り直す (上記)。選択中でないモデルは記録が合わないため取得済みではなくなり、古いファイルが残っていれば `paused` と表示する (`download_model` で新しい revision を取る。同じファイルは取り直さない。完了時に古い版を消す)
+- **ストレージ**: `StorageUsage.modelBytes` は `models/` 全体 (全モデル・取得途中を含む)。モデルごとの量は `ModelInfo.diskBytes`。「実行環境とモデルのみ削除」は取得中のモデルを止めてから全モデルを消し、選択を既定に戻す (記録ごと消えるため)。アンインストールも取得を止めてから消す
+- **開発** (`MUKUCHI_ASR_URL` 使用中): `select_model` は記録の書き換えのみ (外部のサーバーは起動し直さない。使うモデルは process-compose 側で決まる。既定は ja-8bit と同じ版で、`Makefile` の `MUKUCHI_MODEL`・`MUKUCHI_MODEL_REVISION`)。**設定画面の選択・表示は実際に使っているモデルと食い違いうる** (例: 以前に bf16 でセットアップした dev データでは bf16 が選択中のまま)。`make setup` (`apps/desktop/scripts/setup.sh`) は取得したモデルを、アプリのセットアップ済み (`runtime` の記録がある) の dev データに限り `models` に記録する (8bit が「一時停止中」ではなく取得済みに見えるように。選択は変えない。記録が無い・`make reset PROVISION=1` の後はアプリのセットアップが取得・記録する)
+- エラー (reject の文言): 不明な id「不明なモデルです」、セットアップ未完了「セットアップが完了していません」、削除の実行中「削除を実行中です」、他が取得中「他のモデルをダウンロード中です」、未取得を選択「ダウンロードが済んでいないモデルは選べません」、選択中を削除「使用中のモデルは削除できません」、取得中を削除「ダウンロード中のモデルは削除できません。中止してください」、取得済みを中止「ダウンロード済みです」、切り替え中「モデルを切り替え中です」、ディレクトリの削除中「モデルを削除しています」、開発ビルドが本番のバンドルIDで削除・中止「開発ビルドを本番のバンドルIDで実行しているため削除しません」。取得の失敗は reject せず `ModelInfo.error` (文言はセットアップの model と同じ)
 
 ### アンインストール (アプリ内)
 
@@ -194,7 +231,24 @@ type ProvisioningStatus = {
   error: string | null;       // stage=error の時の表示用 (日本語)
 };
 
-type StorageUsage = { runtimeBytes: number; modelBytes: number; otherBytes: number };
+type StorageUsage = { runtimeBytes: number; modelBytes: number; otherBytes: number }; // modelBytes は models/ 全体 (全モデル・取得途中を含む)
+
+type ModelState = "not_downloaded" | "downloading" | "paused" | "error" | "downloaded";
+type ModelInfo = {
+  id: string;               // カタログの id ("ja-8bit" | "ja-bf16")。list_models はカタログ順 (表示もこの順)
+  name: string;             // 表示名
+  description: string;      // 説明 (1文程度)
+  sizeBytes: number;        // 取得するファイルの合計 (固定した revision の値)。進捗の分母・「約 2.2 GB」の表示に使う
+  recommended: boolean;     // 既定・推奨 (新規のセットアップで取得するもの)。ちょうど1つ
+  selected: boolean;        // 使用中。常にちょうど1つ (選択中は downloaded。ただしセットアップ未完了の間は未取得のことがある)
+  state: ModelState;
+  // downloading・paused・error: 取得済みのバイト数 (起動し直した後の paused は手元のファイルからの目安)。
+  // downloaded: sizeBytes。not_downloaded: 0
+  bytesDone: number;
+  etaSeconds: number | null; // downloading のみ (直近10秒の速度から。最初の2秒は null)
+  error: string | null;      // state=error の時の表示用 (日本語)。再試行は download_model
+  diskBytes: number;         // このモデルのディスク上の使用量 (取得途中・古い版を含む)
+};
 type AudioDevice = { id: string; name: string; isDefault: boolean };
 type AppInfo = { version: string; build: string };
 type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "permissions" | "storage" | "about";
@@ -213,11 +267,17 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `get_permissions` | → `Permissions` | 権限表示(setupでは1秒ごとに再取得) |
 | `request_microphone` | → `Permissions` | マイク許可ダイアログを出す |
 | `open_system_settings` | `{ pane: "microphone" \| "accessibility" \| "login_items" }` → `()` | システム設定を開く。`login_items` はログイン項目 (`SMAppService.openSystemSettingsLoginItems`。launchAtLogin を ON にできなかった時の案内用) |
-| `restart_asr` | → `()` | エラーからの復旧 |
+| `restart_asr` | → `()` | エラーからの復旧 (選択中のモデルで起動し直す。モデルの切り替え中はエラー) |
 | `get_provisioning_status` | → `ProvisioningStatus` | |
 | `start_provisioning` / `pause_provisioning` | → `()` | ダウンロード開始・再開・失敗後の再試行 (実行中・完了済みなら何もしない) / 一時停止 (止まるまで待って返る) |
-| `get_storage_usage` | → `StorageUsage` | runtime = python・venv・uv・cache・asr-server、model = models、other = settings.json・provisioned.json・ログ (ディスク上の使用量) |
-| `delete_runtime_and_model` | → `()` | 実行環境とモデルのみ削除 (セットアップ一時停止・ASR停止の後。設定・ログは残す)。以後 provisioning は idle、status は `runtime_missing` |
+| `get_storage_usage` | → `StorageUsage` | runtime = python・venv・uv・cache・asr-server、model = models (全モデル)、other = settings.json・provisioned.json・ログ (ディスク上の使用量) |
+| `delete_runtime_and_model` | → `()` | 実行環境とモデルのみ削除 (セットアップ一時停止・モデルの取得の停止・ASR停止の後。全モデルを消す。設定・ログは残す)。以後 provisioning は idle、status は `runtime_missing`、モデルの選択は既定 (`models-changed` を送る) |
+| `list_models` | → `ModelInfo[]` | モデルの一覧 (カタログ順) |
+| `select_model` | `{ id: string }` → `()` | 使うモデルを切り替える (取得済みのみ)。ASR を新しいモデルで起動し直し、準備完了まで待って選択を記録してから返る。失敗したら元のモデルに戻してエラー (「モデルの管理」)。選んだモデルが既に選択中なら何もしない |
+| `download_model` | `{ id: string }` → `()` | 取得の開始・一時停止からの再開・失敗後の再試行。開始したらすぐ返る (進捗は `models-changed`)。取得済み・取得中なら何もしない。他のモデルが取得中ならエラー |
+| `pause_model_download` | `{ id: string }` → `()` | 一時停止 (止まるまで待って返る)。途中のファイルは残す。取得中でなければ何もしない |
+| `cancel_model_download` | `{ id: string }` → `()` | 中止。取得中なら止めてから、途中のファイルを消して `not_downloaded` にする。取得済みならエラー (削除は `delete_model`)。開発ビルドが本番のバンドルIDで動いている時はエラー |
+| `delete_model` | `{ id: string }` → `()` | 取得済み (または paused・error) のモデルを消して `not_downloaded` にする。選択中・取得中はエラー |
 | `get_uninstall_targets` | → `{ path: string; bytes: number }[]` | 確認ダイアログの一覧 (存在するものだけ。bytes はディスク上の使用量) |
 | `uninstall` | → `()` | 完全にアンインストール(完了後にアプリ終了) |
 | `list_running_apps` | → `{ bundleId: string; name: string }[]` | 入力しないアプリの追加候補 |
@@ -246,3 +306,4 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `permissions-changed` | `Permissions` | 権限の変化を検知した時 |
 | `input-devices-changed` | `AudioDevice[]` | マイクの接続・取り外し・既定の変更を検知した時 (2秒ごとのポーリング。settings/setup を開いている間か ON の間のみ) |
 | `provisioning-progress` | `ProvisioningStatus` | 実行中は変化があれば約4Hz。段階の変化 (開始・完了・一時停止・失敗) は即時 |
+| `models-changed` | `ModelInfo[]` | モデルの状態・選択が変わった時は即時 (取得の開始・完了・一時停止・失敗・中止・削除・選択、セットアップの完了、実行環境とモデルのみ削除)。取得中は変化があれば約4Hz |

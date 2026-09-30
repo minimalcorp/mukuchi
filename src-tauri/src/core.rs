@@ -14,7 +14,7 @@ use crate::asr::{self, AsrClient, HttpAsrClient};
 use crate::audio::{self, Source};
 use crate::insert::{InsertConfig, InsertQueue, Job, UtteranceResult};
 use crate::macos::{self, MicAuthorization};
-use crate::pipeline::{self, PipelineSink, Running};
+use crate::pipeline::{self, PipelineSink, Running, StartError};
 use crate::settings::{Settings, SettingsStore};
 use crate::state::{AppError, ErrorCode, StateManager, DONE_DISPLAY};
 use crate::vad::VadParams;
@@ -27,6 +27,7 @@ pub mod events {
     pub const UTTERANCE_RESULT: &str = "utterance-result";
     pub const SETTINGS_CHANGED: &str = "settings-changed";
     pub const PERMISSIONS_CHANGED: &str = "permissions-changed";
+    pub const INPUT_DEVICES_CHANGED: &str = "input-devices-changed";
 }
 
 /// 開発用: 設定するとマイクの代わりにこの WAV を入力にする (デバッグビルドのみ)
@@ -78,6 +79,45 @@ pub struct Utterance {
     pub stable_length: usize,
 }
 
+/// 途中表示1回の推論時間の見積もり (音声の長さに比例 + 固定分)。
+///
+/// 途中表示を取り消しても ASR サーバーは推論を最後まで続ける (直列実行のため、次の確定はその後になる)。
+/// そこで「今話し終わったとしても、話し終わりの判定 (無音 silenceMs) までに終わる」見込みの時だけ送る
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PartialCost {
+    /// 音声1秒あたりの推論時間 (ms)。実測の指数移動平均
+    ms_per_sec: f64,
+}
+
+impl PartialCost {
+    /// HTTP・WAV デコード等の固定分 (ms)
+    const BASE_MS: f64 = 150.0;
+    /// 実測前の仮の値。開発機 (M系) の実測: 12.8秒の確定が約 810ms → 約 60ms/秒
+    const INITIAL_MS_PER_SEC: f64 = 60.0;
+
+    pub fn estimate_ms(&self, secs: f64) -> f64 {
+        Self::BASE_MS + self.ms_per_sec * secs
+    }
+
+    pub fn observe(&mut self, secs: f64, elapsed_ms: f64) {
+        let per_sec = (elapsed_ms - Self::BASE_MS).max(0.0) / secs.max(0.5);
+        self.ms_per_sec = self.ms_per_sec * 0.7 + per_sec * 0.3;
+    }
+
+    /// 今送った途中表示が、話し終わりの判定までに終わる見込みか
+    pub fn fits(&self, secs: f64, silence_ms: u32) -> bool {
+        self.estimate_ms(secs) <= silence_ms as f64
+    }
+}
+
+impl Default for PartialCost {
+    fn default() -> Self {
+        Self {
+            ms_per_sec: Self::INITIAL_MS_PER_SEC,
+        }
+    }
+}
+
 /// 途中表示の状態
 #[derive(Default)]
 struct PartialState {
@@ -88,6 +128,13 @@ struct PartialState {
     closed_upto: u64,
     /// 直前の途中表示 (stableLength の計算用)
     prev: Option<(u64, String)>,
+    cost: PartialCost,
+}
+
+/// 録音中のセッション。`generation` は開始ごとに変わり、古いセッションからの通知 (切断等) を見分ける
+struct Capture {
+    generation: u64,
+    running: Running,
 }
 
 pub struct Core {
@@ -96,12 +143,14 @@ pub struct Core {
     pub state: StateManager,
     asr: RwLock<Option<Arc<HttpAsrClient>>>,
     insert: Mutex<Option<InsertQueue>>,
-    running: Mutex<Option<Running>>,
+    running: Mutex<Option<Capture>>,
+    capture_generation: AtomicU64,
     next_id: AtomicU64,
     partial: Mutex<PartialState>,
     /// 応答待ちの確定リクエストの数。0 でない間は途中表示を送らない (ASR は直列のため確定を遅らせる)
     finals_in_flight: AtomicUsize,
-    /// set_listening の多重実行を防ぐ (マイク許可ダイアログ待ちの間に再度押された場合など)
+    /// 録音の開始・停止を直列にする (マイク許可ダイアログ待ちの間に再度押された場合、
+    /// マイク切り替えの停止→開始の間に他の操作が割り込む場合など)
     toggle_lock: tokio::sync::Mutex<()>,
 }
 
@@ -114,6 +163,7 @@ impl Core {
             asr: RwLock::new(None),
             insert: Mutex::new(None),
             running: Mutex::new(None),
+            capture_generation: AtomicU64::new(0),
             next_id: AtomicU64::new(0),
             partial: Mutex::new(PartialState::default()),
             finals_in_flight: AtomicUsize::new(0),
@@ -261,7 +311,7 @@ impl Core {
         if self.state.error().map(|e| e.code) == Some(ErrorCode::AsrStopped) {
             return;
         }
-        self.fail(AppError::asr_stopped(detail)).await;
+        self.fail(AppError::asr_stopped(detail), None).await;
     }
 
     /// エラーからの復旧 (restart_asr)。開発時はサーバーを process-compose が管理するため、
@@ -333,8 +383,7 @@ impl Core {
             return Err(anyhow!(e.message));
         }
 
-        let source = self.audio_source();
-        if matches!(source, Source::Device(_)) {
+        if matches!(self.audio_source(), Source::Device(_)) {
             let mut mic = macos::microphone_authorization();
             if mic == MicAuthorization::NotDetermined {
                 mic = macos::request_microphone().await;
@@ -347,7 +396,19 @@ impl Core {
             }
         }
 
-        let sink: Arc<dyn PipelineSink> = Arc::new(Sink(Arc::downgrade(self)));
+        self.start_capture_locked().await?;
+        self.state.set_listening(true);
+        Ok(())
+    }
+
+    /// 録音を開始する。`toggle_lock` を持って呼ぶ。失敗時はエラー状態にする (OFFになる)。
+    async fn start_capture_locked(self: &Arc<Self>) -> Result<()> {
+        let source = self.audio_source();
+        let generation = self.capture_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let sink: Arc<dyn PipelineSink> = Arc::new(Sink {
+            core: Arc::downgrade(self),
+            generation,
+        });
         // VAD の読み込みとデバイスの初期化は時間がかかりうるため async ランタイムを塞がない
         let started =
             tauri::async_runtime::spawn_blocking(move || pipeline::start(source, sink)).await;
@@ -355,59 +416,103 @@ impl Core {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 log::error!("録音を開始できません: {e:#}");
-                let err = AppError::microphone_missing(format!("{e:#}"));
+                let err = match e {
+                    StartError::Vad(e) => AppError::vad_failed(format!("{e:#}")),
+                    StartError::Capture(e) => AppError::microphone_missing(format!("{e:#}")),
+                };
                 self.state.set_error(err.clone());
                 return Err(anyhow!(err.message));
             }
-            Err(e) => return Err(anyhow!("録音の開始処理が異常終了しました: {e}")),
+            Err(e) => {
+                self.state.set_listening(false);
+                return Err(anyhow!("録音の開始処理が異常終了しました: {e}"));
+            }
         };
-        *lock(&self.running) = Some(running);
-        self.state.set_listening(true);
+        *lock(&self.running) = Some(Capture {
+            generation,
+            running,
+        });
         Ok(())
+    }
+
+    /// ON のまま録音をやり直す (マイクの切り替え・既定のマイクの変更)。
+    /// 停止と開始を1つの `toggle_lock` の中で行い、間に ON/OFF やエラー処理を割り込ませない。
+    pub async fn restart_capture(self: &Arc<Self>) {
+        let _guard = self.toggle_lock.lock().await;
+        if !self.state.is_listening() {
+            return;
+        }
+        log::info!("マイクの変更のため録音をやり直す");
+        self.stop_capture().await;
+        if let Err(e) = self.start_capture_locked().await {
+            log::error!("マイク切り替え後の再開に失敗: {e:#}");
+        }
     }
 
     /// 録音を止める。話し終わりの無音待ちのものは確定し、話している最中のものは破棄する。
     /// 確定処理中のものは入力まで続く。スレッドの終了待ちは async ランタイムの外で行う。
     async fn stop_capture(&self) {
-        let running = lock(&self.running).take();
-        if let Some(r) = running {
-            if let Err(e) = tauri::async_runtime::spawn_blocking(move || r.stop()).await {
+        let capture = lock(&self.running).take();
+        if let Some(c) = capture {
+            if let Err(e) = tauri::async_runtime::spawn_blocking(move || c.running.stop()).await {
                 log::error!("録音の停止処理が異常終了しました: {e}");
             }
         }
     }
 
-    /// エラーで音声入力を止める。
-    async fn fail(self: &Arc<Self>, error: AppError) {
-        log::error!("エラーのため音声入力をOFFにする: {}", error.message);
+    /// エラーで音声入力を止める。`generation` を指定した場合、その録音がもう動いていなければ
+    /// (OFF・マイク切り替えで新しい録音に替わった後の古い通知なら) 何もしない。
+    async fn fail(self: &Arc<Self>, error: AppError, generation: Option<u64>) {
         let _guard = self.toggle_lock.lock().await;
+        if let Some(g) = generation {
+            let current = lock(&self.running).as_ref().map(|c| c.generation);
+            if current != Some(g) {
+                log::info!("停止済みの録音 ({g}) からのエラーのため無視する");
+                return;
+            }
+        }
+        log::error!("エラーのため音声入力をOFFにする: {}", error.message);
         self.stop_capture().await;
         self.state.set_error(error);
     }
 
-    fn fail_later(self: &Arc<Self>, error: AppError) {
+    fn fail_later(self: &Arc<Self>, error: AppError, generation: Option<u64>) {
         let core = self.clone();
-        tauri::async_runtime::spawn(async move { core.fail(error).await });
+        tauri::async_runtime::spawn(async move { core.fail(error, generation).await });
     }
 
+    /// 設定を部分更新して保存し、即時に反映する。各項目の反映先:
+    /// - inputDeviceId: ON なら録音をやり直す (ここ)
+    /// - vadSensitivity / silenceMs: 処理スレッドが約0.5秒ごとに読み直す (`Sink::vad_params`)。
+    ///   audio-level の threshold も同じ値から求める
+    /// - voiceCommandsEnabled / voiceCommands / excludedApps: 入力キューが発話ごとに読む
+    /// - vocabulary: 途中表示・確定のリクエストごとに読む
+    /// - panelPosition: パネルを動かす (ここ)
+    /// - launchAtLogin: ログイン項目を登録・解除する (ここ。失敗したら保存しない)
+    /// - setupCompleted: 起動時にセットアップを出すかの判定だけに使う
     pub fn update_settings(self: &Arc<Self>, patch: &serde_json::Value) -> Result<Settings> {
         let before = self.settings.get();
+        if let Some(want) = patch.get("launchAtLogin").and_then(|v| v.as_bool()) {
+            if want != before.launch_at_login {
+                // 利用者の明示的な操作。開発ビルドでも登録する (autostart.rs)
+                crate::autostart::set_enabled(want)?;
+            }
+        }
         let next = self.settings.update(patch)?;
         let _ = self.app.emit(events::SETTINGS_CHANGED, &next);
         if before.panel_position != next.panel_position {
             crate::windows::on_settings_panel_position(&self.app, next.panel_position.clone());
         }
-        // マイクを変えたら録音をやり直す (感度・無音時間は処理スレッドが読み直す)
         if before.input_device_id != next.input_device_id && self.state.is_listening() {
             let core = self.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = core.set_listening(false).await;
-                if let Err(e) = core.set_listening(true).await {
-                    log::error!("マイク切り替え後の再開に失敗: {e:#}");
-                }
-            });
+            tauri::async_runtime::spawn(async move { core.restart_capture().await });
         }
         Ok(next)
+    }
+
+    /// 録音の取り込み元がマイクか (開発用の WAV 入力でないか)
+    pub fn uses_microphone(&self) -> bool {
+        matches!(self.audio_source(), Source::Device(_))
     }
 
     pub fn emit_permissions(&self) {
@@ -431,7 +536,7 @@ impl Core {
         }
         match result.error_code() {
             Some(ErrorCode::AccessibilityDenied) => {
-                self.fail_later(AppError::accessibility_denied())
+                self.fail_later(AppError::accessibility_denied(), None)
             }
             Some(ErrorCode::AsrStopped) => self.check_asr_after_failure(),
             _ => {}
@@ -440,11 +545,15 @@ impl Core {
 
     // ---- 途中表示 -------------------------------------------------------------
 
-    fn can_request_partial(&self) -> bool {
+    fn can_request_partial(&self, samples: usize) -> bool {
         if dev_flag(ENV_DEV_NO_PARTIAL) {
             return false;
         }
-        lock(&self.partial).in_flight.is_none()
+        let secs = samples as f64 / crate::vad::SAMPLE_RATE as f64;
+        let silence_ms = self.settings.get().silence_ms;
+        let p = lock(&self.partial);
+        p.in_flight.is_none()
+            && p.cost.fits(secs, silence_ms)
             && self.finals_in_flight.load(Ordering::SeqCst) == 0
             && self.asr_client().is_some()
     }
@@ -484,7 +593,11 @@ impl Core {
             return;
         }
         let text = match result {
-            Ok(t) => t,
+            Ok(t) => {
+                p.cost
+                    .observe(secs, started.elapsed().as_secs_f64() * 1000.0);
+                t
+            }
             Err(e) => {
                 // 暫定値のため失敗は無視する (確定処理に任せる)
                 log::warn!("発話 {id} の途中表示に失敗: {e:#}");
@@ -506,7 +619,8 @@ impl Core {
             started.elapsed().as_millis()
         );
         p.prev = Some((id, text.clone()));
-        drop(p);
+        // ロックを持ったまま送る: close_partial (確定・破棄) と排他にし、確定・破棄の後に
+        // その発話の途中表示が届かないようにする (emit は Core を呼び返さないので詰まらない)
         let _ = self.app.emit(
             events::UTTERANCE_PARTIAL,
             Utterance {
@@ -515,10 +629,15 @@ impl Core {
                 stable_length,
             },
         );
+        drop(p);
     }
 
-    /// 発話が確定処理に入った・破棄された。処理中の途中表示は取り消す (確定を待たせない)。
+    /// 発話が確定処理に入った・破棄された。処理中の途中表示の応答待ちをやめる (結果は捨てる)。
     /// 取り消したかを返す。
+    ///
+    /// 注意: 応答待ちをやめても ASR サーバー側の推論は止まらない (推論は直列のため、確定はその推論の
+    /// 終了を待つ)。影響を抑えるため、途中表示は話し終わりの判定までに終わる見込みの時だけ送り
+    /// (`PartialCost`)、長い発話 (`PARTIAL_MAX_SAMPLES` 以上) では送らない
     fn close_partial(&self, id: u64) -> bool {
         let mut p = lock(&self.partial);
         p.closed_upto = p.closed_upto.max(id);
@@ -609,12 +728,16 @@ fn resolve_v_keycode(app: &AppHandle) -> u16 {
 }
 
 /// 処理スレッドからの通知を Core に中継する。Core が破棄された後は何もしない。
-struct Sink(std::sync::Weak<Core>);
+struct Sink {
+    core: std::sync::Weak<Core>,
+    /// どの録音セッションからの通知か
+    generation: u64,
+}
 
 impl PipelineSink for Sink {
     fn vad_params(&self) -> VadParams {
         let s = self
-            .0
+            .core
             .upgrade()
             .map(|c| c.settings.get())
             .unwrap_or_default();
@@ -622,14 +745,14 @@ impl PipelineSink for Sink {
     }
 
     fn next_utterance_id(&self) -> u64 {
-        self.0
+        self.core
             .upgrade()
             .map(|c| c.next_id.fetch_add(1, Ordering::SeqCst) + 1)
             .unwrap_or(0)
     }
 
     fn audio_level(&self, level: f32, threshold: f32, speech: bool) {
-        if let Some(c) = self.0.upgrade() {
+        if let Some(c) = self.core.upgrade() {
             let _ = c.app.emit(
                 events::AUDIO_LEVEL,
                 AudioLevel {
@@ -642,7 +765,7 @@ impl PipelineSink for Sink {
     }
 
     fn utterance_started(&self, id: u64) {
-        if let Some(c) = self.0.upgrade() {
+        if let Some(c) = self.core.upgrade() {
             log::info!("発話 {id} を検出");
             let _ = c
                 .app
@@ -651,25 +774,27 @@ impl PipelineSink for Sink {
         }
     }
 
-    fn can_request_partial(&self) -> bool {
-        self.0.upgrade().is_some_and(|c| c.can_request_partial())
+    fn can_request_partial(&self, samples: usize) -> bool {
+        self.core
+            .upgrade()
+            .is_some_and(|c| c.can_request_partial(samples))
     }
 
     fn request_partial(&self, id: u64, audio: Vec<f32>) {
-        if let Some(c) = self.0.upgrade() {
+        if let Some(c) = self.core.upgrade() {
             c.request_partial(id, audio);
         }
     }
 
     fn utterance_ended(&self, id: u64, audio: Vec<f32>) {
-        if let Some(c) = self.0.upgrade() {
+        if let Some(c) = self.core.upgrade() {
             c.state.set_speaking(false);
             c.finalize(id, audio);
         }
     }
 
     fn utterance_discarded(&self, id: u64) {
-        if let Some(c) = self.0.upgrade() {
+        if let Some(c) = self.core.upgrade() {
             log::info!("発話 {id} を破棄");
             c.close_partial(id);
             c.state.set_speaking(false);
@@ -680,9 +805,9 @@ impl PipelineSink for Sink {
     }
 
     fn capture_lost(&self, message: String) {
-        if let Some(c) = self.0.upgrade() {
+        if let Some(c) = self.core.upgrade() {
             // 処理スレッド自身から stop (join) できないため、別タスクで止める
-            c.fail_later(AppError::microphone_missing(message));
+            c.fail_later(AppError::microphone_missing(message), Some(self.generation));
         }
     }
 }
@@ -706,6 +831,25 @@ mod tests {
         assert_eq!(common_prefix_chars("abc", "abc"), 3);
         // サロゲートペアは2単位 (JS の length と同じ)
         assert_eq!(common_prefix_chars("𠮷野家", "𠮷野屋"), 3);
+    }
+
+    #[test]
+    fn partial_cost_limits_partials_to_silence_window() {
+        let mut c = PartialCost::default();
+        // 既定 60ms/秒 + 150ms: 5秒 → 450ms
+        assert!((c.estimate_ms(5.0) - 450.0).abs() < 1e-9);
+        assert!(c.fits(5.0, 1300));
+        assert!(
+            !c.fits(5.0, 300),
+            "無音300msでは5秒の途中表示は間に合わない"
+        );
+        assert!(c.fits(2.0, 300));
+        // 遅い実測が続くと見積もりが伸びる
+        for _ in 0..20 {
+            c.observe(10.0, 2150.0); // 200ms/秒
+        }
+        assert!((c.estimate_ms(10.0) - 2150.0).abs() < 20.0);
+        assert!(!c.fits(10.0, 1300));
     }
 
     #[test]

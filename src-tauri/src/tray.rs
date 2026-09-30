@@ -62,13 +62,16 @@ impl IconKind {
         }
     }
 
-    fn icon(self) -> StatusIcon {
+    fn icon(self, dark: bool) -> StatusIcon {
         match self {
             Self::Off => StatusIcon::Template(ICON_MIC_OFF),
             Self::Listening => StatusIcon::Template(ICON_MIC),
             Self::Speaking => StatusIcon::Template(ICON_AUDIO_LINES),
             Self::Finalizing => StatusIcon::Template(ICON_LOADER),
-            Self::Error => StatusIcon::WithRedDot(ICON_MIC),
+            Self::Error => StatusIcon::WithRedDot {
+                png: ICON_MIC,
+                dark,
+            },
         }
     }
 }
@@ -132,7 +135,8 @@ fn toggle_text(listening: bool) -> &'static str {
 #[derive(Default)]
 struct TrayState {
     menu: Mutex<Option<MenuModel>>,
-    icon: Mutex<Option<IconKind>>,
+    /// 表示中のアイコンと、描いた時のメニューバーの外観 (暗いか。テンプレート画像では常に false)
+    icon: Mutex<Option<(IconKind, bool)>>,
     /// メインスレッドへの反映を依頼済みか (連続した通知をまとめる)
     pending: AtomicBool,
 }
@@ -146,6 +150,7 @@ pub fn setup(app: &AppHandle, core: &Arc<Core>) -> Result<()> {
         .context("メニューバーのアイコンを作成できません")?;
 
     let state = Arc::new(TrayState::default());
+    app.manage(state.clone());
     // 先に購読してから現在の状態を反映する (その間の変化を取りこぼさない)
     {
         let app = app.clone();
@@ -155,6 +160,14 @@ pub fn setup(app: &AppHandle, core: &Arc<Core>) -> Result<()> {
     }
     schedule_refresh(app, &state);
     Ok(())
+}
+
+/// メニューバーの外観 (明暗) の変化を反映する。見回り (1秒ごと) から呼ぶ。
+/// 変更通知 (KVO) を使わずポーリングにするのは、エラー表示中にしか影響せず、確認も軽いため
+pub fn refresh_appearance(app: &AppHandle) {
+    if let Some(state) = app.try_state::<Arc<TrayState>>() {
+        schedule_refresh(app, state.inner());
+    }
 }
 
 fn schedule_refresh(app: &AppHandle, state: &Arc<TrayState>) {
@@ -185,15 +198,22 @@ fn refresh(app: &AppHandle, state: &TrayState) -> Result<()> {
 
     let kind = IconKind::of(status.phase);
     let mut icon = state.icon.lock().unwrap_or_else(|p| p.into_inner());
-    if *icon != Some(kind) {
-        tray.with_inner_tray_icon(move |t| {
-            if let (Some(item), Some(mtm)) = (t.ns_status_item(), objc2::MainThreadMarker::new()) {
-                status_icon::set(&item, mtm, kind.icon());
+    let current = *icon;
+    let applied = tray
+        .with_inner_tray_icon(move |t| {
+            let (Some(item), Some(mtm)) = (t.ns_status_item(), objc2::MainThreadMarker::new())
+            else {
+                return current;
+            };
+            // 赤い点付きの画像は外観ごとに描き分けるため、外観の変化でも描き直す
+            let dark = kind == IconKind::Error && status_icon::is_dark(&item, mtm);
+            if current != Some((kind, dark)) {
+                status_icon::set(&item, mtm, kind.icon(dark));
             }
+            Some((kind, dark))
         })
         .context("アイコンを変更できません")?;
-        *icon = Some(kind);
-    }
+    *icon = applied;
     drop(icon);
 
     // OFF後も確定処理中は Finalizing になるため、ONかどうかは Phase ではなく事実から判定する

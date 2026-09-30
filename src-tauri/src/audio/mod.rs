@@ -24,7 +24,7 @@ pub enum AudioMsg {
     Lost(String),
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioDevice {
     pub id: String,
@@ -102,12 +102,27 @@ fn find_device(id: Option<&str>) -> Result<cpal::Device> {
             .context("入力デバイスが見つかりません"),
         // デバイスIDは機器名を含みうるため、エラー文言 (ログ・画面) に出さない
         Some(id) => {
-            let parsed: cpal::DeviceId =
-                id.parse().map_err(|e| anyhow!("デバイスIDが不正: {e}"))?;
-            host.device_by_id(&parsed)
-                .context("選択したマイクが見つかりません")
+            let found = id
+                .parse::<cpal::DeviceId>()
+                .ok()
+                .and_then(|parsed| host.device_by_id(&parsed));
+            match found {
+                Some(d) => Ok(d),
+                // 選択したマイクが接続されていない: 設定は残したまま (つなぎ直せば戻る) システム既定で録音する。
+                // 設定画面は一覧にない選択を「接続されていません」と表示する
+                None => {
+                    log::warn!("選択したマイクが接続されていないため既定のマイクを使う");
+                    host.default_input_device()
+                        .context("入力デバイスが見つかりません")
+                }
+            }
         }
     }
+}
+
+/// 選択したマイクが今つながっているか (`None` = システム既定は常に true)
+pub fn is_connected(devices: &[AudioDevice], id: Option<&str>) -> bool {
+    id.is_none_or(|id| devices.iter().any(|d| d.id == id))
 }
 
 /// cpal の Stream はスレッドをまたいで扱いにくい (作成と破棄を同じスレッドで行うのが安全) ため、

@@ -180,7 +180,12 @@ impl Settings {
         }
         let next: Settings =
             serde_json::from_value(base).context("設定の値の型が正しくありません")?;
-        Ok(next.normalized())
+        let next = next.normalized();
+        // 保存済みの値は検証しない (古い設定が不正でも他の項目を変更できるように)。変更する時だけ
+        if patch.contains_key("voiceCommands") {
+            crate::voice_command::validate(&next.voice_commands)?;
+        }
+        Ok(next)
     }
 }
 
@@ -292,6 +297,22 @@ mod tests {
         assert!(s.apply_patch(&json!({ "nope": 1 })).is_err());
         assert!(s.apply_patch(&json!({ "silenceMs": "x" })).is_err());
         assert!(s.apply_patch(&json!([1])).is_err());
+    }
+
+    #[test]
+    fn patch_rejects_invalid_voice_commands() {
+        let s = Settings::default();
+        let mut cmds = serde_json::to_value(&s.voice_commands).unwrap();
+        cmds[1]["phrases"] = json!(["確定。"]);
+        let e = s
+            .apply_patch(&json!({ "voiceCommands": cmds }))
+            .unwrap_err();
+        assert!(format!("{e:#}").contains("重複"));
+        cmds[1]["phrases"] = json!(["  ", "、"]);
+        assert!(s.apply_patch(&json!({ "voiceCommands": cmds })).is_err());
+        cmds[1]["phrases"] = json!([" 改行 "]);
+        let next = s.apply_patch(&json!({ "voiceCommands": cmds })).unwrap();
+        assert_eq!(next.voice_commands[1].phrases, vec!["改行".to_string()]);
     }
 
     #[test]

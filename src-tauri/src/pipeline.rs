@@ -24,6 +24,10 @@ const LEVEL_INTERVAL_FRAMES: usize = 2;
 const PARAMS_REFRESH_FRAMES: usize = 16;
 /// 途中表示: 前回の要求から音声がこれだけ伸びたら次を送る (implementation-plan.md 2.)
 pub const PARTIAL_STEP_SAMPLES: usize = SAMPLE_RATE as usize * 8 / 10;
+/// 途中表示を送るのは発話がこの長さ未満の間だけ。
+/// 途中表示を取り消しても ASR サーバーは推論を最後まで続ける (直列実行) ため、話し終わり直前に
+/// 長い音声の途中表示が走っていると確定がその分遅れる。長い発話ほど1回の推論が長いので上限を設ける
+pub const PARTIAL_MAX_SAMPLES: usize = SAMPLE_RATE as usize * 20;
 /// デバイスが失われた時に開き直すまでの待ち (AirPods のプロファイル切り替え等が落ち着くまで)
 const REOPEN_DELAY: Duration = Duration::from_millis(500);
 /// 開き直してからこの時間内に再び失われたら諦める (開き直しは1回まで)
@@ -35,8 +39,9 @@ pub trait PipelineSink: Send + Sync {
     fn next_utterance_id(&self) -> u64;
     fn audio_level(&self, level: f32, threshold: f32, speech: bool);
     fn utterance_started(&self, id: u64);
-    /// 途中表示の要求を今送ってよいか (前の要求が処理中・確定処理中なら送らない)
-    fn can_request_partial(&self) -> bool;
+    /// 途中表示の要求を今送ってよいか (前の要求が処理中・確定処理中なら送らない)。
+    /// `samples` は送る音声の長さ (推論時間の見積もりに使う)
+    fn can_request_partial(&self, samples: usize) -> bool;
     /// 発話開始からの音声で途中表示を要求する。結果を待たずに戻ること
     fn request_partial(&self, id: u64, audio: Vec<f32>);
     /// 話し終わった発話。確定処理 (ASR→入力) を始める
@@ -45,6 +50,15 @@ pub trait PipelineSink: Send + Sync {
     fn utterance_discarded(&self, id: u64);
     /// デバイス切断など、録音を続けられない
     fn capture_lost(&self, message: String);
+}
+
+/// 録音の開始の失敗。VAD の問題をマイクの問題と区別して知らせるため分ける
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    #[error("VAD を初期化できません: {0:#}")]
+    Vad(anyhow::Error),
+    #[error("{0:#}")]
+    Capture(anyhow::Error),
 }
 
 pub struct Running {
@@ -90,17 +104,18 @@ fn open(source: &Source) -> Result<Stream> {
     })
 }
 
-pub fn start(source: Source, sink: Arc<dyn PipelineSink>) -> Result<Running> {
+pub fn start(source: Source, sink: Arc<dyn PipelineSink>) -> Result<Running, StartError> {
     // VAD の読み込み失敗は録音開始前に検出する
-    let mut vad = SileroVad::new().context("VAD を初期化できません")?;
+    let mut vad = SileroVad::new().map_err(StartError::Vad)?;
     vad.reset();
-    let stream = open(&source)?;
+    let stream = open(&source).map_err(StartError::Capture)?;
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
     let worker = std::thread::Builder::new()
         .name("mukuchi-pipeline".into())
         .spawn(move || run(source, stream, vad, sink, stop2))
-        .context("処理スレッドを起動できません")?;
+        .context("処理スレッドを起動できません")
+        .map_err(StartError::Capture)?;
     Ok(Running {
         stop,
         worker: Some(worker),
@@ -134,6 +149,8 @@ fn run(
             sink.capture_lost(lost);
             return;
         }
+        // 開き直す前に古いストリームを閉じる (同じデバイスを二重に開かない。録音スレッドの終了も待つ)
+        drop(stream);
         std::thread::sleep(REOPEN_DELAY);
         if stop.load(Ordering::SeqCst) {
             return;
@@ -242,10 +259,12 @@ impl<V: VoiceActivityDetector> Processor<V> {
         let (Some(id), Some(audio)) = (self.current, self.segmenter.current_audio()) else {
             return;
         };
-        if audio.len() < self.partial_len + PARTIAL_STEP_SAMPLES {
+        if audio.len() < self.partial_len + PARTIAL_STEP_SAMPLES
+            || audio.len() >= PARTIAL_MAX_SAMPLES
+        {
             return;
         }
-        if !self.sink.can_request_partial() {
+        if !self.sink.can_request_partial(audio.len()) {
             return;
         }
         self.partial_len = audio.len();
@@ -369,25 +388,42 @@ mod tests {
         assert!(segs.is_empty());
     }
 
-    #[derive(Default)]
     struct Sink {
         ids: AtomicU64,
         log: Mutex<Vec<String>>,
         levels: Mutex<usize>,
+        thresholds: Mutex<Vec<f32>>,
         busy: AtomicBool,
+        /// (感度, 無音ms)。設定画面での変更を模す
+        settings: Mutex<(u32, u32)>,
+    }
+
+    impl Default for Sink {
+        fn default() -> Self {
+            Self {
+                ids: AtomicU64::new(0),
+                log: Mutex::default(),
+                levels: Mutex::default(),
+                thresholds: Mutex::default(),
+                busy: AtomicBool::new(false),
+                settings: Mutex::new((60, 1300)),
+            }
+        }
     }
 
     impl PipelineSink for Sink {
         fn vad_params(&self) -> VadParams {
-            VadParams::from_settings(60, 1300)
+            let (s, ms) = *self.settings.lock().unwrap();
+            VadParams::from_settings(s, ms)
         }
         fn next_utterance_id(&self) -> u64 {
             self.ids.fetch_add(1, Ordering::SeqCst) + 1
         }
-        fn audio_level(&self, _: f32, _: f32, _: bool) {
+        fn audio_level(&self, _: f32, threshold: f32, _: bool) {
             *self.levels.lock().unwrap() += 1;
+            self.thresholds.lock().unwrap().push(threshold);
         }
-        fn can_request_partial(&self) -> bool {
+        fn can_request_partial(&self, _: usize) -> bool {
             !self.busy.load(Ordering::SeqCst)
         }
         fn request_partial(&self, id: u64, audio: Vec<f32>) {
@@ -505,6 +541,52 @@ mod tests {
         assert_eq!(
             partials,
             vec!["partial 1 25", "partial 1 50", "partial 1 81"]
+        );
+    }
+
+    /// 感度・無音時間の変更は再起動なしで約0.5秒以内に反映される (しきい値の表示も)
+    #[test]
+    fn settings_apply_live() {
+        let sink = Arc::new(Sink::default());
+        let mut p = Processor::new(Scripted(vec![], 0), sink.clone());
+        let quiet = vec![0.0f32; FRAME_SAMPLES];
+        for _ in 0..4 {
+            p.frame(&quiet);
+        }
+        let before = *sink.thresholds.lock().unwrap().last().unwrap();
+        *sink.settings.lock().unwrap() = (100, 300);
+        for _ in 0..PARAMS_REFRESH_FRAMES {
+            p.frame(&quiet);
+        }
+        assert_eq!(p.segmenter.params(), &VadParams::from_settings(100, 300));
+        let after = *sink.thresholds.lock().unwrap().last().unwrap();
+        assert!(after < before, "感度を上げるとしきい値の線が下がる");
+    }
+
+    #[test]
+    fn no_partials_after_max_length() {
+        let sink = Arc::new(Sink::default());
+        let max_frames = PARTIAL_MAX_SAMPLES / FRAME_SAMPLES; // 625
+        let mut probs = vec![0.0; 1];
+        probs.extend(vec![0.9; max_frames + 100]);
+        let mut p = Processor::new(Scripted(probs.clone(), 0), sink.clone());
+        let loud = vec![0.3f32; FRAME_SAMPLES];
+        for _ in 0..probs.len() {
+            p.frame(&loud);
+        }
+        let log = sink.log.lock().unwrap();
+        let lens: Vec<usize> = log
+            .iter()
+            .filter_map(|l| l.strip_prefix("partial 1 "))
+            .map(|n| n.parse().unwrap())
+            .collect();
+        assert!(!lens.is_empty());
+        assert!(lens
+            .iter()
+            .all(|&n| n * FRAME_SAMPLES < PARTIAL_MAX_SAMPLES));
+        assert!(
+            *lens.last().unwrap() + 25 >= max_frames,
+            "上限の直前までは送る"
         );
     }
 }

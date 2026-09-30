@@ -27,12 +27,13 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 | ASR | Python + MLX (`mlx-qwen3-asr`)、モデルは `neosophie/Qwen3-ASR-1.7B-JA` を全層8bit量子化したもの(自前変換、約2.2GB。org配下のHFリポジトリに置き revision を固定して取得。配置までは開発で元の bf16 版を使う) | Rust実装(candle/MLX)は約3倍遅い (spikes/asr-bench)。8bitはfp16と同等精度・約2割速い・メモリ1/3 (spikes/asr-bench/MODEL_DECISION.md) |
 | 操作 | 音声入力のON/OFFは **常時表示パネルのボタン** と **メニューバー** のみ。**キーボードショートカットは設けない**。押している間だけ録音するモードも実装しない | 2026-09-30 確定 |
 | 入力単位 | ONの間、発話(VAD区間)ごとに文字起こしし、話し終わったら入力。入力は単一キューで直列化 | 必須要件 |
-| リアルタイムプレビュー | 発話中は前回から音声が0.8秒以上伸び、かつ途中表示の要求が処理中でなければ、発話開始からの音声を文字起こしし直してパネルに表示する。入力するのは話し終わり時点の最終結果のみ。確定後は最終結果で表示を置き換えて2秒間表示する | 2026-09-30 確定。値はtsunagiの音声入力に準拠 (implementation-plan.md「音声入力の体験」) |
+| リアルタイムプレビュー | 発話中は前回から音声が0.8秒以上伸び、かつ途中表示の要求が処理中でなければ、発話開始からの音声を文字起こしし直してパネルに表示する。入力するのは話し終わり時点の最終結果のみ。確定後は最終結果で表示を置き換えて2秒間表示する。ただし発話が20秒以上になったら送らず、推論時間の見積もり(実測から学習)が話し終わりの無音(silenceMs)を超える場合も送らない | 2026-09-30 確定。値はtsunagiの音声入力に準拠 (implementation-plan.md「音声入力の体験」)。途中表示の応答待ちを取り消してもサーバーの推論は止まらず(直列実行)、確定がその分遅れるため |
 | 入力方式 | クリップボード + ⌘V、元のクリップボードを復元 | IMEの影響を受けない |
 | 音声コマンド | 「言い方→キー」対応表(既定: 確定/エンター→Enter、改行→Shift+Enter、送信→⌘+Enter)。発話全体が正規化後に完全一致した時のみ。機能ごとON/OFF可 | 表記揺れは複数の言い方で吸収 |
 | 入力しないアプリ | 登録したアプリが前面にある間は入力しない(パネルに「このアプリには入力しません」) | デザインの任意提案Aを採用 |
 | メニューバー | macOS標準のメニュー(NSMenu)。状態・エラーは文字の行、復旧はメニュー項目で表す。アイコンは状態別のテンプレート画像(エラー時のみ赤点付きの非テンプレート画像) | デザインの進捗バー・色付き表示は標準メニューで再現できないため |
-| 常時表示パネル | フォーカスを奪わないパネル(NSPanel, non-activating。`tauri-nspanel`)。既定は画面下中央(Dockの上16px)、ドラッグで移動し位置を記憶。前面ウィンドウのあるディスプレイに表示 | |
+| 常時表示パネル | フォーカスを奪わないパネル(NSPanel, non-activating。`tauri-nspanel`)。既定は画面下中央(Dockの上16px)、ドラッグで移動し位置を記憶。前面ウィンドウのあるディスプレイに表示。ピルはディスプレイの visibleFrame (Dock・メニューバーを除く) に収める。記憶するのは利用者のドラッグだけ(ディスプレイの取り外し等でシステムが動かした位置は記憶しない) | |
+| ログイン時に起動 | `SMAppService.mainAppService` (macOS 13+) で登録。本番ビルドは起動時・セットアップ完了時に設定へ揃える(システム設定で利用者がオフにした場合は設定をオフに合わせる)。開発ビルドは設定画面で明示的に切り替えた時だけ登録・解除する | tauri-plugin-autostart の macOS 実装は LaunchAgent (plist をアプリ外に置く) か AppleScript (自動化の許可が要る) のみのため使わない |
 | Dock | 通常は非表示(Accessory)。設定・セットアップウィンドウ表示中のみ表示(Regular) | |
 | 配布 | Developer ID署名 + 公証の .dmg。Mac App Storeは対象外 | サンドボックスではCGEventPost不可 |
 | 実行環境の導入 | アプリは軽量に保ち、初回セットアップでuv(同梱)がPython・依存・モデルを導入 | |
@@ -50,6 +51,9 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 データディレクトリ配下: `settings.json` `uv/` `python/`(UV_PYTHON_INSTALL_DIR) `venv/` `cache/`(UV_CACHE_DIR) `models/`(HF_HOME)。ログは `~/Library/Logs/<バンドルID>/`。アプリ外(`~/.cache` 等)に書き込まない。
 
 アンインストール対象: 上記データディレクトリ、`~/Library/{Caches,Logs,WebKit}/<バンドルID>`、`~/Library/Preferences/<バンドルID>.plist`、ログイン項目、TCC (`tccutil reset All <バンドルID>`)、アプリ本体。
+
+- ログイン項目: `SMAppService.mainAppService` で登録したもの。ファイルはアプリ外に置かず、システムの Background Task Management (BTM) に記録される(「システム設定 > 一般 > ログイン項目」に表示)。アプリ内のアンインストールでは本体を消す前に `SMAppService.mainApp.unregister` で解除する。`scripts/uninstall.sh` からは API を呼べないため、アプリ本体を消した後に BTM の記録が残るか(自動で消えるか)は未検証 (P4 で確認)。`sfltool resetbtm` は他のアプリの項目も消すため使わない
+- LaunchAgent (`~/Library/LaunchAgents/*.plist`) は作らない
 
 ## インターフェース
 
@@ -80,11 +84,14 @@ type AppStatus = {
   // phase=loading: モデル読み込み・ASR起動中。進捗が取れない場合は null (不定表示)
   loadingProgress: number | null;
   error: AppError | null;
+  // 状態が変わるたびに1ずつ増える通番。受け手は手元より小さい seq の status-changed / get_status の結果を捨てる
+  seq: number;
 };
 
 type AppError = {
   code: "accessibility_denied" | "microphone_denied" | "microphone_missing"
-      | "asr_stopped" | "runtime_missing" | "insert_failed";
+      | "asr_stopped" | "runtime_missing" | "insert_failed"
+      | "vad_failed";   // 発話検出 (VAD) を初期化できない。表示「発話検出を開始できません」、action は null
   message: string;   // 表示用 (日本語)
   // 復旧操作。メニュー・パネルのボタンに対応
   action: "open_accessibility" | "open_microphone" | "select_microphone"
@@ -106,15 +113,15 @@ type UtteranceResult =
   | { kind: "failed"; id: number; text: string; error: AppError };
 
 type Settings = {
-  launchAtLogin: boolean;                 // 既定 true
-  inputDeviceId: string | null;           // null=システム既定
+  launchAtLogin: boolean;                 // 既定 true。変更時に SMAppService で登録・解除し、失敗したら保存せずエラー (開発ビルドの挙動は「決定事項」)
+  inputDeviceId: string | null;           // null=システム既定。選択したマイクがつながっていない間は設定を残したままシステム既定で録音し、つながったら戻す
   vadSensitivity: number;                 // 0..100 既定 60
   silenceMs: number;                      // 300..3000 既定 1300 (話の途中の間で分割しないため長め)
   voiceCommandsEnabled: boolean;          // 既定 true
-  voiceCommands: { id: string; phrases: string[]; key: KeyCombo }[];
+  voiceCommands: { id: string; phrases: string[]; key: KeyCombo }[]; // 言い方のないコマンド・正規化(NFKC・記号空白除去・小文字化)後に空/重複する言い方は update_settings がエラーにする
   vocabulary: string[];                   // ASR の context に空白区切りで渡す
   excludedApps: { bundleId: string; name: string }[];
-  panelPosition: { x: number; y: number; displayId: string } | null; // null=既定位置。x,y はpanelウィンドウの下端中央の、ディスプレイ左下からの位置 (pt、y上向き)。displayId は CGDirectDisplayID
+  panelPosition: { x: number; y: number; displayId: string } | null; // null=既定位置。x,y はpanelウィンドウの下端中央の、ディスプレイ左下からの位置 (整数pt、y上向き)。displayId は CGDirectDisplayID (ピルの中心があるディスプレイ)
   setupCompleted: boolean;
 };
 type KeyCombo = { key: "enter" | "tab" | "escape" | "backspace"; modifiers: ("cmd" | "shift" | "option" | "ctrl")[] };
@@ -147,7 +154,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 |---|---|---|
 | `get_status` | → `AppStatus` | 初期表示 |
 | `set_listening` | `{ on: boolean }` → `()` | パネル・メニューのON/OFF |
-| `get_settings` / `update_settings` | → `Settings` / `{ patch: Partial<Settings> }` → `Settings` | 設定の読み書き(即時保存・即時反映) |
+| `get_settings` / `update_settings` | → `Settings` / `{ patch: Partial<Settings> }` → `Settings` | 設定の読み書き(即時保存・即時反映。感度・無音時間は録音中も約0.5秒以内に反映、マイクの変更は録音をやり直す) |
 | `list_input_devices` | → `AudioDevice[]` | マイク選択 |
 | `get_permissions` | → `Permissions` | 権限表示(setupでは1秒ごとに再取得) |
 | `request_microphone` | → `Permissions` | マイク許可ダイアログを出す |
@@ -179,4 +186,5 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `settings-changed` | `Settings` | 他ウィンドウからの変更の反映 |
 | `settings-navigate` | `{ category: SettingsCategory }` | settingsウィンドウ宛。表示中のカテゴリを切り替える |
 | `permissions-changed` | `Permissions` | 権限の変化を検知した時 |
+| `input-devices-changed` | `AudioDevice[]` | マイクの接続・取り外し・既定の変更を検知した時 (2秒ごとのポーリング。settings/setup を開いている間か ON の間のみ) |
 | `provisioning-progress` | `ProvisioningStatus` | 約4Hz |

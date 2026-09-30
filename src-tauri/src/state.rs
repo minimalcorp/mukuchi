@@ -32,6 +32,8 @@ pub enum ErrorCode {
     AsrStopped,
     RuntimeMissing,
     InsertFailed,
+    /// 発話検出 (VAD) の初期化に失敗した。マイクの問題ではないため別のコードにする
+    VadFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -92,6 +94,14 @@ impl AppError {
             action: Some(ErrorAction::StartSetup),
         }
     }
+    pub fn vad_failed(detail: impl std::fmt::Display) -> Self {
+        log::warn!("発話検出の初期化の失敗: {detail}");
+        Self {
+            code: ErrorCode::VadFailed,
+            message: "発話検出を開始できません".into(),
+            action: None,
+        }
+    }
     pub fn insert_failed(detail: impl std::fmt::Display) -> Self {
         log::warn!("入力の失敗: {detail}");
         Self {
@@ -108,6 +118,18 @@ pub struct AppStatus {
     pub phase: Phase,
     pub loading_progress: Option<f64>,
     pub error: Option<AppError>,
+    /// 状態が変わるたびに増える通番。通知が前後して届いても、受け手は古いものを捨てられる
+    /// (`get_status` の応答と `status-changed` の前後も含む)
+    pub seq: u64,
+}
+
+impl AppStatus {
+    /// 通番以外が同じか
+    fn same_state(&self, o: &AppStatus) -> bool {
+        self.phase == o.phase
+            && self.loading_progress == o.loading_progress
+            && self.error == o.error
+    }
 }
 
 #[derive(Debug, Default)]
@@ -147,6 +169,7 @@ impl Facts {
                 None
             },
             error: self.error.clone(),
+            seq: 0,
         }
     }
 }
@@ -154,8 +177,11 @@ impl Facts {
 type Listener = Arc<dyn Fn(&AppStatus) + Send + Sync>;
 
 pub struct StateManager {
-    facts: Mutex<(Facts, Option<AppStatus>)>,
+    /// 事実と、最後に計算した状態 (通番付き)
+    facts: Mutex<(Facts, AppStatus)>,
     listeners: Mutex<Vec<Listener>>,
+    /// 通知の送り手を1つにする。値は最後に通知した通番
+    notify: Mutex<u64>,
 }
 
 impl Default for StateManager {
@@ -166,9 +192,12 @@ impl Default for StateManager {
 
 impl StateManager {
     pub fn new() -> Self {
+        let facts = Facts::default();
+        let status = facts.status(Instant::now());
         Self {
-            facts: Mutex::new((Facts::default(), None)),
+            facts: Mutex::new((facts, status)),
             listeners: Mutex::new(Vec::new()),
+            notify: Mutex::new(0),
         }
     }
 
@@ -176,8 +205,9 @@ impl StateManager {
         lock(&self.listeners).push(Arc::new(f));
     }
 
+    /// 最後に確定した状態 (通番付き)。
     pub fn status(&self) -> AppStatus {
-        lock(&self.facts).0.status(Instant::now())
+        lock(&self.facts).1.clone()
     }
 
     pub fn is_listening(&self) -> bool {
@@ -254,23 +284,43 @@ impl StateManager {
         let changed = {
             let mut guard = lock(&self.facts);
             f(&mut guard.0);
-            let status = guard.0.status(Instant::now());
-            if guard.1.as_ref() == Some(&status) {
+            let mut status = guard.0.status(Instant::now());
+            if status.same_state(&guard.1) {
                 false
             } else {
-                guard.1 = Some(status);
+                status.seq = guard.1.seq + 1;
+                guard.1 = status;
                 true
             }
         };
-        // 購読者の中から再入 (状態の変更・購読の追加) しても詰まらないよう、どのロックも持たずに通知する。
-        // 複数スレッドから同時に変更されると通知の順序が前後しうるため、渡すのは通知時点の最新の状態にする
-        // (最後に届く通知が必ず最新になる)
         if changed {
-            let listeners: Vec<Listener> = lock(&self.listeners).clone();
+            self.deliver();
+        }
+    }
+
+    /// 購読者へ最新の状態を通知する。
+    ///
+    /// 複数スレッドから同時に変更されても通知が古い状態で終わらないよう、送り手を1つにする:
+    /// ロックを取れなかった (他のスレッドが通知中、または通知の中からの再入) 場合は何もせず、
+    /// 通知中のスレッドが通知後に最新の通番を見直して送る。通知は通番の昇順になり、最後は必ず最新になる。
+    /// 購読者の中から状態の変更・購読の追加をしても詰まらない (facts・listeners のロックは持たずに呼ぶ)
+    fn deliver(&self) {
+        loop {
+            let mut last = match self.notify.try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return,
+            };
             let status = self.status();
+            if status.seq <= *last {
+                return;
+            }
+            *last = status.seq;
+            let listeners: Vec<Listener> = lock(&self.listeners).clone();
             for l in &listeners {
                 l(&status);
             }
+            // ロックを離してから見直す: 通知中に変更したスレッドは try_lock に失敗して戻っているため
         }
     }
 }
@@ -352,5 +402,72 @@ mod tests {
         assert_eq!(v["loadingProgress"], serde_json::Value::Null);
         assert_eq!(v["error"]["code"], "accessibility_denied");
         assert_eq!(v["error"]["action"], "open_accessibility");
+        assert_eq!(v["seq"], 1);
+    }
+
+    #[test]
+    fn seq_increments_only_on_change() {
+        let s = StateManager::new();
+        assert_eq!(s.status().seq, 0);
+        s.set_asr_ready(true);
+        assert_eq!(s.status().seq, 1);
+        s.set_asr_ready(true);
+        s.refresh();
+        assert_eq!(s.status().seq, 1);
+        s.set_listening(true);
+        assert_eq!(s.status().seq, 2);
+    }
+
+    /// 複数スレッドから同時に変更しても、通知は通番の昇順で、最後の通知が最新の状態になる。
+    #[test]
+    fn concurrent_notifications_end_in_latest_state() {
+        for _ in 0..50 {
+            let s = Arc::new(StateManager::new());
+            s.set_asr_ready(true);
+            let seen = Arc::new(Mutex::new(Vec::<AppStatus>::new()));
+            let seen2 = seen.clone();
+            s.subscribe(move |st| {
+                // 通知中に他のスレッドが割り込みやすくする
+                std::thread::yield_now();
+                seen2.lock().unwrap().push(st.clone());
+            });
+            let threads: Vec<_> = (0..4)
+                .map(|t| {
+                    let s = s.clone();
+                    std::thread::spawn(move || {
+                        for i in 0..50 {
+                            match (t + i) % 3 {
+                                0 => s.set_listening(i % 2 == 0),
+                                1 => s.set_speaking(i % 2 == 0),
+                                _ => s.finalizing_started(),
+                            }
+                        }
+                    })
+                })
+                .collect();
+            for t in threads {
+                t.join().unwrap();
+            }
+            let seen = seen.lock().unwrap();
+            assert!(seen.windows(2).all(|w| w[0].seq < w[1].seq));
+            assert_eq!(seen.last(), Some(&s.status()));
+        }
+    }
+
+    #[test]
+    fn reentrant_change_is_delivered() {
+        let s = Arc::new(StateManager::new());
+        let s2 = s.clone();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        s.subscribe(move |st| {
+            seen2.lock().unwrap().push(st.phase);
+            // 通知の中から変更しても、その変更は後で通知される
+            if st.phase == Phase::Off {
+                s2.set_listening(true);
+            }
+        });
+        s.set_asr_ready(true);
+        assert_eq!(*seen.lock().unwrap(), vec![Phase::Off, Phase::Listening]);
     }
 }

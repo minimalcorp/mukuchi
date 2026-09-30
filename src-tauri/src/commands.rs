@@ -4,13 +4,14 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::audio::{self, AudioDevice};
 use crate::core::Core;
 use crate::permissions::{self, Pane, Permissions};
 use crate::settings::Settings;
 use crate::state::AppStatus;
+use crate::windows::{self, SettingsCategory};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -107,11 +108,6 @@ pub fn get_app_info(app: tauri::AppHandle) -> AppInfo {
 // ---- 未実装 (P2 以降) -------------------------------------------------------
 
 #[tauri::command]
-pub fn restart_asr() -> CmdResult<()> {
-    Err(not_implemented("restart_asr"))
-}
-
-#[tauri::command]
 pub fn get_provisioning_status() -> CmdResult<()> {
     Err(not_implemented("get_provisioning_status"))
 }
@@ -153,14 +149,32 @@ pub fn open_logs_folder(app: tauri::AppHandle) -> CmdResult<()> {
     crate::macos::open_path(&dir).map_err(err)
 }
 
+// ---- ウィンドウ ---------------------------------------------------------------
+
 #[tauri::command]
-pub fn open_settings(category: Option<String>) -> CmdResult<()> {
-    // TODO(P3): settings ウィンドウを開き、category を選択する
-    log::info!("open_settings({category:?}) は未実装");
-    Err(not_implemented("open_settings"))
+pub fn open_settings(app: AppHandle, category: Option<SettingsCategory>) -> CmdResult<()> {
+    windows::open_settings(&app, category).map_err(err)
 }
 
 #[tauri::command]
-pub fn complete_setup() -> CmdResult<()> {
-    Err(not_implemented("complete_setup"))
+pub fn open_setup(app: AppHandle) -> CmdResult<()> {
+    windows::open_setup(&app).map_err(err)
+}
+
+#[tauri::command]
+pub fn complete_setup(app: AppHandle, core: State<'_, Arc<Core>>) -> CmdResult<()> {
+    core.inner()
+        .update_settings(&serde_json::json!({ "setupCompleted": true }))
+        .map_err(err)?;
+    windows::close_setup(&app).map_err(err)
+}
+
+#[tauri::command]
+pub fn set_panel_size(app: AppHandle, width: f64, height: f64) -> CmdResult<()> {
+    windows::set_panel_size(&app, width, height).map_err(err)
+}
+
+#[tauri::command]
+pub async fn restart_asr(core: State<'_, Arc<Core>>) -> CmdResult<()> {
+    core.inner().restart_asr().await.map_err(err)
 }

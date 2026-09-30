@@ -11,6 +11,7 @@ mod state;
 mod tray;
 mod vad;
 mod voice_command;
+mod windows;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,24 +37,37 @@ pub fn run() {
                 ])
                 .build(),
         )
+        .plugin(tauri_nspanel::init())
         .setup(|app| {
-            // 常駐アプリのため Dock に出さない (設定・セットアップ表示中のみ Regular にするのは P3/P4)
+            // 常駐アプリのため Dock に出さない (設定・セットアップ表示中のみ Regular にする)
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let data_dir = app.path().app_data_dir()?;
             let core = Core::new(app.handle().clone(), data_dir.join("settings.json"));
             app.manage(core.clone());
+            let settings = core.settings.get();
+            app.manage(Arc::new(windows::Windows::new(
+                settings.panel_position.clone(),
+            )));
             core.start()?;
             tray::setup(app.handle(), &core)?;
-            spawn_permission_watcher(core);
+            windows::create_panel(app.handle())?;
+            // 自動テスト (MUKUCHI_DEV_AUTO_LISTEN) ではセットアップ画面を出さない (前面アプリを奪うため)
+            if !settings.setup_completed && !core::dev_flag(core::ENV_DEV_AUTO_LISTEN) {
+                windows::open_setup(app.handle())?;
+            }
+            spawn_watcher(core);
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // ウィンドウを閉じてもアプリは終了しない (メニューバーに常駐する)
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+        .on_window_event(|window, event| match (window.label(), event) {
+            // パネルは閉じない (メニューバー常駐。閉じる手段も出していない)
+            (windows::PANEL, WindowEvent::CloseRequested { api, .. }) => api.prevent_close(),
+            (windows::PANEL, WindowEvent::Moved(_)) => windows::on_panel_moved(window.app_handle()),
+            // 設定・セットアップは閉じたら破棄し、他に開いていなければ Dock から消す
+            (label @ (windows::SETTINGS | windows::SETUP), WindowEvent::Destroyed) => {
+                windows::update_activation_policy(window.app_handle(), Some(label));
             }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
@@ -76,7 +90,9 @@ pub fn run() {
             commands::open_logs_folder,
             commands::get_app_info,
             commands::open_settings,
+            commands::open_setup,
             commands::complete_setup,
+            commands::set_panel_size,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -91,9 +107,11 @@ pub fn run() {
     });
 }
 
-/// 権限の変化 (システム設定で許可された等) を検知して `permissions-changed` を送る。
-/// TCC には変更通知の API がないためポーリングする。問い合わせは軽い。
-fn spawn_permission_watcher(core: Arc<Core>) {
+/// 1秒ごとの見回り。
+/// - 権限の変化 (システム設定で許可された等) を検知して `permissions-changed` を送る。
+///   TCC には変更通知の API がないためポーリングする。問い合わせは軽い
+/// - パネルが既定位置に追従している間、前面ウィンドウのあるディスプレイへ移す
+fn spawn_watcher(core: Arc<Core>) {
     tauri::async_runtime::spawn(async move {
         let mut last = permissions::current();
         loop {
@@ -104,6 +122,7 @@ fn spawn_permission_watcher(core: Arc<Core>) {
                 core.emit_permissions();
                 last = now;
             }
+            windows::refresh_panel_position(core.app());
         }
     });
 }

@@ -10,19 +10,11 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "panel",
-        "title": "mukuchi",
-        "width": 440,
-        "height": 120,
-        "resizable": false,
-        "visible": false
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
-    }
+    },
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,
@@ -35,6 +27,10 @@
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns"
-    ]
+    ],
+    "resources": {
+      "../THIRD_PARTY_NOTICES": "THIRD_PARTY_NOTICES",
+      "resources/silero/LICENSE": "licenses/silero-vad-LICENSE"
+    }
   }
 }

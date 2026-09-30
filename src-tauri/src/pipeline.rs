@@ -5,10 +5,10 @@
 //! (このスレッドを ASR 待ちで止めない)。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -18,10 +18,16 @@ use crate::vad::{
     VoiceActivityDetector, FRAME_SAMPLES, SAMPLE_RATE,
 };
 
-/// `audio-level` を送る間隔 (約20Hz)
-const LEVEL_INTERVAL_SAMPLES: usize = SAMPLE_RATE as usize / 20;
+/// `audio-level` を送る間隔 (VADフレーム2つ = 64ms、約15Hz)
+const LEVEL_INTERVAL_FRAMES: usize = 2;
 /// 設定 (感度・無音時間) を読み直す間隔
 const PARAMS_REFRESH_FRAMES: usize = 16;
+/// 途中表示: 前回の要求から音声がこれだけ伸びたら次を送る (implementation-plan.md 2.)
+pub const PARTIAL_STEP_SAMPLES: usize = SAMPLE_RATE as usize * 8 / 10;
+/// デバイスが失われた時に開き直すまでの待ち (AirPods のプロファイル切り替え等が落ち着くまで)
+const REOPEN_DELAY: Duration = Duration::from_millis(500);
+/// 開き直してからこの時間内に再び失われたら諦める (開き直しは1回まで)
+const REOPEN_WINDOW: Duration = Duration::from_secs(10);
 
 /// 処理スレッドからの通知先。
 pub trait PipelineSink: Send + Sync {
@@ -29,6 +35,10 @@ pub trait PipelineSink: Send + Sync {
     fn next_utterance_id(&self) -> u64;
     fn audio_level(&self, level: f32, threshold: f32, speech: bool);
     fn utterance_started(&self, id: u64);
+    /// 途中表示の要求を今送ってよいか (前の要求が処理中・確定処理中なら送らない)
+    fn can_request_partial(&self) -> bool;
+    /// 発話開始からの音声で途中表示を要求する。結果を待たずに戻ること
+    fn request_partial(&self, id: u64, audio: Vec<f32>);
     /// 話し終わった発話。確定処理 (ASR→入力) を始める
     fn utterance_ended(&self, id: u64, audio: Vec<f32>);
     /// 誤検出・OFFによる破棄
@@ -40,12 +50,11 @@ pub trait PipelineSink: Send + Sync {
 pub struct Running {
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
-    // worker より後に drop する (録音を止めるのは worker の終了後)
-    _capture: Capture,
 }
 
 impl Running {
-    /// 録音を止める。発話中のものは破棄し (`utterance_discarded`)、確定処理中のものはそのまま続く。
+    /// 録音を止める (処理スレッドと録音スレッドの終了を待つため、ブロックする)。
+    /// 発話中のものは破棄または確定し ([`Segmenter::stop`])、確定処理中のものはそのまま続く。
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(w) = self.worker.take() {
@@ -60,51 +69,89 @@ impl Drop for Running {
     }
 }
 
-pub fn start(source: Source, sink: Arc<dyn PipelineSink>) -> Result<Running> {
-    // VAD の読み込み失敗は録音開始前に検出する
-    let mut vad = SileroVad::new().context("VAD を初期化できません")?;
-    vad.reset();
-    let (capture, rx) = audio::start(source)?;
-    let mut resampler = FrameResampler::new(
+struct Stream {
+    // 録音を止めるのは drop 時 (Capture の Drop が録音スレッドを join する)
+    _capture: Capture,
+    rx: Receiver<AudioMsg>,
+    resampler: FrameResampler,
+}
+
+fn open(source: &Source) -> Result<Stream> {
+    let (capture, rx) = audio::start(source.clone())?;
+    let resampler = FrameResampler::new(
         capture.sample_rate as usize,
         SAMPLE_RATE as usize,
         FRAME_SAMPLES,
     )?;
+    Ok(Stream {
+        _capture: capture,
+        rx,
+        resampler,
+    })
+}
+
+pub fn start(source: Source, sink: Arc<dyn PipelineSink>) -> Result<Running> {
+    // VAD の読み込み失敗は録音開始前に検出する
+    let mut vad = SileroVad::new().context("VAD を初期化できません")?;
+    vad.reset();
+    let stream = open(&source)?;
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
     let worker = std::thread::Builder::new()
         .name("mukuchi-pipeline".into())
-        .spawn(move || {
-            let mut proc = Processor::new(vad, sink.clone());
-            loop {
-                if stop2.load(Ordering::SeqCst) {
-                    break;
-                }
-                match rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(AudioMsg::Samples(buf)) => {
-                        resampler.push(&buf, |frame| proc.frame(frame));
-                    }
-                    Ok(AudioMsg::Lost(msg)) => {
-                        proc.abort();
-                        sink.capture_lost(msg);
-                        return;
-                    }
-                    Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => {
-                        proc.abort();
-                        sink.capture_lost("録音が停止しました".into());
-                        return;
-                    }
-                }
-            }
-            proc.abort();
-        })
+        .spawn(move || run(source, stream, vad, sink, stop2))
         .context("処理スレッドを起動できません")?;
     Ok(Running {
         stop,
         worker: Some(worker),
-        _capture: capture,
     })
+}
+
+fn run(
+    source: Source,
+    mut stream: Stream,
+    vad: SileroVad,
+    sink: Arc<dyn PipelineSink>,
+    stop: Arc<AtomicBool>,
+) {
+    let mut proc = Processor::new(vad, sink.clone());
+    let mut reopened_at: Option<Instant> = None;
+    while !stop.load(Ordering::SeqCst) {
+        let lost = match stream.rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(AudioMsg::Samples(buf)) => {
+                stream.resampler.push(&buf, |frame| proc.frame(frame));
+                continue;
+            }
+            Ok(AudioMsg::Lost(msg)) => msg,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => "録音が停止しました".to_string(),
+        };
+        // サンプルレートの変更や AirPods のプロファイル切り替えでもストリームは無効になる。
+        // 1回だけ開き直し、だめなら録音を止める
+        proc.stop();
+        log::warn!("録音が中断されました: {lost}");
+        if reopened_at.is_some_and(|t| t.elapsed() < REOPEN_WINDOW) {
+            sink.capture_lost(lost);
+            return;
+        }
+        std::thread::sleep(REOPEN_DELAY);
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        match open(&source) {
+            Ok(s) => {
+                log::info!("録音を開き直しました");
+                stream = s;
+                reopened_at = Some(Instant::now());
+            }
+            Err(e) => {
+                log::error!("録音を開き直せません: {e:#}");
+                sink.capture_lost(lost);
+                return;
+            }
+        }
+    }
+    proc.stop();
 }
 
 /// フレーム単位の処理。スレッドから切り離してテストできるようにする。
@@ -113,8 +160,10 @@ pub struct Processor<V: VoiceActivityDetector> {
     segmenter: Segmenter,
     sink: Arc<dyn PipelineSink>,
     current: Option<u64>,
+    /// 最後に途中表示を要求した時点の音声の長さ (サンプル数)
+    partial_len: usize,
     frames: usize,
-    level_samples: usize,
+    level_frames: usize,
     level_peak_db: f32,
     vad_failed: bool,
 }
@@ -127,8 +176,9 @@ impl<V: VoiceActivityDetector> Processor<V> {
             segmenter: Segmenter::new(params),
             sink,
             current: None,
+            partial_len: 0,
             frames: 0,
-            level_samples: 0,
+            level_frames: 0,
             level_peak_db: f32::MIN,
             vad_failed: false,
         }
@@ -155,49 +205,70 @@ impl<V: VoiceActivityDetector> Processor<V> {
             }
         };
 
-        match self.segmenter.push(frame, prob, db) {
+        let event = self.segmenter.push(frame, prob, db);
+        match event {
             Some(SegmentEvent::Started) => {
                 let id = self.sink.next_utterance_id();
                 self.current = Some(id);
+                self.partial_len = 0;
                 self.sink.utterance_started(id);
             }
-            Some(SegmentEvent::Ended { audio }) => {
-                if let Some(id) = self.current.take() {
-                    self.sink.utterance_ended(id, audio);
-                }
-            }
-            Some(SegmentEvent::Misfire) => {
-                if let Some(id) = self.current.take() {
-                    self.sink.utterance_discarded(id);
-                }
-            }
-            None => {
-                // TODO(P2): 途中表示。発話中 (self.segmenter.current_audio()) の長さが前回の要求から
-                // 0.8秒以上伸び、かつ途中表示の要求が処理中でなければ ASR に送り utterance-partial を出す
-            }
+            Some(e) => self.deliver(e),
+            None => self.maybe_request_partial(),
         }
 
-        self.level_samples += frame.len();
+        self.level_frames += 1;
         self.level_peak_db = self.level_peak_db.max(db);
-        if self.level_samples >= LEVEL_INTERVAL_SAMPLES {
+        if self.level_frames >= LEVEL_INTERVAL_FRAMES {
             let threshold = self.segmenter.params().floor_level();
             self.sink.audio_level(
                 normalize_db(self.level_peak_db),
                 threshold,
                 self.segmenter.is_speaking(),
             );
-            self.level_samples = 0;
+            self.level_frames = 0;
             self.level_peak_db = f32::MIN;
         }
     }
 
-    /// OFF・停止時。発話中のものは破棄する。
-    pub fn abort(&mut self) {
-        if self.segmenter.abort() {
-            if let Some(id) = self.current.take() {
-                self.sink.utterance_discarded(id);
-            }
+    /// 途中表示: 前回の要求から 0.8秒以上伸び、前の要求が処理中でなければ送る。
+    /// 間隔はタイマーではなく音声の長さで決める (処理が遅い時に要求が溜まらない)。
+    /// 無音待ちの間は送らない: 増えたのは無音だけで表示は変わらず (無音はハルシネーションの原因にもなる)、
+    /// 話し終わりの確定リクエストの直前に途中表示が ASR を占有して確定を遅らせるため
+    fn maybe_request_partial(&mut self) {
+        if self.segmenter.in_silence() {
+            return;
         }
+        let (Some(id), Some(audio)) = (self.current, self.segmenter.current_audio()) else {
+            return;
+        };
+        if audio.len() < self.partial_len + PARTIAL_STEP_SAMPLES {
+            return;
+        }
+        if !self.sink.can_request_partial() {
+            return;
+        }
+        self.partial_len = audio.len();
+        self.sink.request_partial(id, audio.to_vec());
+    }
+
+    fn deliver(&mut self, event: SegmentEvent) {
+        let Some(id) = self.current.take() else {
+            return;
+        };
+        match event {
+            SegmentEvent::Ended { audio } => self.sink.utterance_ended(id, audio),
+            SegmentEvent::Misfire => self.sink.utterance_discarded(id),
+            SegmentEvent::Started => {}
+        }
+    }
+
+    /// OFF・停止時。話し終わりの無音待ちなら確定し、話している最中なら破棄する。
+    pub fn stop(&mut self) {
+        if let Some(e) = self.segmenter.stop() {
+            self.deliver(e);
+        }
+        self.current = None;
         self.vad.reset();
     }
 }
@@ -302,6 +373,8 @@ mod tests {
     struct Sink {
         ids: AtomicU64,
         log: Mutex<Vec<String>>,
+        levels: Mutex<usize>,
+        busy: AtomicBool,
     }
 
     impl PipelineSink for Sink {
@@ -311,7 +384,18 @@ mod tests {
         fn next_utterance_id(&self) -> u64 {
             self.ids.fetch_add(1, Ordering::SeqCst) + 1
         }
-        fn audio_level(&self, _: f32, _: f32, _: bool) {}
+        fn audio_level(&self, _: f32, _: f32, _: bool) {
+            *self.levels.lock().unwrap() += 1;
+        }
+        fn can_request_partial(&self) -> bool {
+            !self.busy.load(Ordering::SeqCst)
+        }
+        fn request_partial(&self, id: u64, audio: Vec<f32>) {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("partial {id} {}", audio.len() / FRAME_SAMPLES));
+        }
         fn utterance_started(&self, id: u64) {
             self.log.lock().unwrap().push(format!("start {id}"));
         }
@@ -346,10 +430,81 @@ mod tests {
         for _ in 0..85 {
             p.frame(&loud);
         }
-        p.abort();
+        p.stop();
+        let log: Vec<String> = sink
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| !l.starts_with("partial"))
+            .cloned()
+            .collect();
+        assert_eq!(log, vec!["start 1", "end 1", "start 2", "discard 2"]);
+        // 85フレームで約15Hz (2フレームごと)
+        assert_eq!(*sink.levels.lock().unwrap(), 42);
+    }
+
+    #[test]
+    fn off_during_silence_wait_finalizes() {
+        let sink = Arc::new(Sink::default());
+        let mut probs = vec![0.9; 20];
+        probs.extend(vec![0.0; 10]);
+        let mut p = Processor::new(Scripted(probs, 0), sink.clone());
+        let loud = vec![0.3f32; FRAME_SAMPLES];
+        for _ in 0..30 {
+            p.frame(&loud);
+        }
+        p.stop();
+        let log = sink.log.lock().unwrap();
+        assert_eq!(log.first().map(String::as_str), Some("start 1"));
+        assert_eq!(log.last().map(String::as_str), Some("end 1"));
+    }
+
+    #[test]
+    fn no_partials_during_silence_wait() {
+        let sink = Arc::new(Sink::default());
+        // 発話 20 フレーム → 無音 40 フレーム (無音待ち中に 0.8秒を超えても送らない)
+        let mut probs = vec![0.9; 20];
+        probs.extend(vec![0.0; 40]);
+        let mut p = Processor::new(Scripted(probs, 0), sink.clone());
+        let loud = vec![0.3f32; FRAME_SAMPLES];
+        for _ in 0..60 {
+            p.frame(&loud);
+        }
+        assert!(!sink
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.starts_with("partial")));
+    }
+
+    #[test]
+    fn partials_every_0_8s_of_audio_and_only_when_idle() {
+        let sink = Arc::new(Sink::default());
+        // 0.8秒 = 12800 サンプル = 25 フレーム
+        assert_eq!(PARTIAL_STEP_SAMPLES.div_ceil(FRAME_SAMPLES), 25);
+        let mut probs = vec![0.0; 5];
+        probs.extend(vec![0.9; 100]);
+        let mut p = Processor::new(Scripted(probs, 0), sink.clone());
+        let loud = vec![0.3f32; FRAME_SAMPLES];
+        for i in 0..105 {
+            // 3回目の要求時期 (音声 75 フレーム) は前の要求が処理中
+            sink.busy.store((70..80).contains(&i), Ordering::SeqCst);
+            p.frame(&loud);
+        }
+        let partials: Vec<String> = sink
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.starts_with("partial"))
+            .cloned()
+            .collect();
+        // 音声は pre-pad 5 フレーム + 発話。25 フレームごと、処理中の間は待って空いたら送る
         assert_eq!(
-            *sink.log.lock().unwrap(),
-            vec!["start 1", "end 1", "start 2", "discard 2"]
+            partials,
+            vec!["partial 1 25", "partial 1 50", "partial 1 81"]
         );
     }
 }

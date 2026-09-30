@@ -1,9 +1,9 @@
 //! アプリ全体の結線。設定・状態・録音・ASR・入力キューを持ち、Tauri の event を発行する。
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;
@@ -23,6 +23,7 @@ pub mod events {
     pub const STATUS_CHANGED: &str = "status-changed";
     pub const AUDIO_LEVEL: &str = "audio-level";
     pub const UTTERANCE_STARTED: &str = "utterance-started";
+    pub const UTTERANCE_PARTIAL: &str = "utterance-partial";
     pub const UTTERANCE_RESULT: &str = "utterance-result";
     pub const SETTINGS_CHANGED: &str = "settings-changed";
     pub const PERMISSIONS_CHANGED: &str = "permissions-changed";
@@ -32,6 +33,30 @@ pub mod events {
 pub const ENV_DEV_AUDIO_FILE: &str = "MUKUCHI_DEV_AUDIO_FILE";
 /// 開発用: `1` なら ASR の準備完了後に自動で音声入力をONにする (デバッグビルドのみ)
 pub const ENV_DEV_AUTO_LISTEN: &str = "MUKUCHI_DEV_AUTO_LISTEN";
+/// 開発用: `1` なら途中表示を送らない (確定までの遅延への影響を比べるため。デバッグビルドのみ)
+pub const ENV_DEV_NO_PARTIAL: &str = "MUKUCHI_DEV_NO_PARTIAL";
+
+/// 開発用: 設定するとそのアプリ (bundle id) が前面にある時だけ入力する。
+/// 自動テストで利用者のアプリに入力しないため (デバッグビルドのみ)
+pub const ENV_DEV_TARGET_BUNDLE: &str = "MUKUCHI_DEV_TARGET_BUNDLE";
+
+/// ON の間に ASR サーバーの死活を確かめる間隔
+const HEALTH_INTERVAL: Duration = Duration::from_secs(5);
+/// この回数続けて /health に失敗したら停止とみなす (推論中の一時的な遅れで誤判定しない)
+const HEALTH_FAILURES_TO_STOP: u32 = 2;
+
+pub fn dev_flag(name: &str) -> bool {
+    cfg!(debug_assertions) && std::env::var(name).as_deref() == Ok("1")
+}
+
+fn dev_target_bundle() -> Option<String> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var(ENV_DEV_TARGET_BUNDLE)
+        .ok()
+        .filter(|s| !s.is_empty())
+}
 
 #[derive(Clone, Serialize)]
 struct AudioLevel {
@@ -45,6 +70,26 @@ struct UtteranceStarted {
     id: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Utterance {
+    pub id: u64,
+    pub text: String,
+    pub stable_length: usize,
+}
+
+/// 途中表示の状態
+#[derive(Default)]
+struct PartialState {
+    /// 処理中の途中表示の要求 (発話 id)。同時に1つまで
+    in_flight: Option<u64>,
+    task: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// この id 以下の発話は確定処理に入ったか破棄された (遅れて届いた途中表示を出さない)
+    closed_upto: u64,
+    /// 直前の途中表示 (stableLength の計算用)
+    prev: Option<(u64, String)>,
+}
+
 pub struct Core {
     app: AppHandle,
     pub settings: SettingsStore,
@@ -53,6 +98,9 @@ pub struct Core {
     insert: Mutex<Option<InsertQueue>>,
     running: Mutex<Option<Running>>,
     next_id: AtomicU64,
+    partial: Mutex<PartialState>,
+    /// 応答待ちの確定リクエストの数。0 でない間は途中表示を送らない (ASR は直列のため確定を遅らせる)
+    finals_in_flight: AtomicUsize,
     /// set_listening の多重実行を防ぐ (マイク許可ダイアログ待ちの間に再度押された場合など)
     toggle_lock: tokio::sync::Mutex<()>,
 }
@@ -67,6 +115,8 @@ impl Core {
             insert: Mutex::new(None),
             running: Mutex::new(None),
             next_id: AtomicU64::new(0),
+            partial: Mutex::new(PartialState::default()),
+            finals_in_flight: AtomicUsize::new(0),
             toggle_lock: tokio::sync::Mutex::new(()),
         });
         let app = core.app.clone();
@@ -76,12 +126,18 @@ impl Core {
         core
     }
 
+    pub fn app(&self) -> &AppHandle {
+        &self.app
+    }
+
     /// 入力キューと ASR 接続を開始する。
     pub fn start(self: &Arc<Self>) -> Result<()> {
         let weak_cfg = Arc::downgrade(self);
         let weak_res = Arc::downgrade(self);
+        let app = self.app.clone();
+        let inserter = macos::MacInserter::new(move || resolve_v_keycode(&app));
         let queue = InsertQueue::spawn(
-            Arc::new(macos::MacInserter),
+            Arc::new(inserter),
             move || {
                 weak_cfg
                     .upgrade()
@@ -91,6 +147,7 @@ impl Core {
                             voice_commands_enabled: s.voice_commands_enabled,
                             voice_commands: s.voice_commands,
                             excluded_apps: s.excluded_apps,
+                            only_bundle_id: dev_target_bundle(),
                         }
                     })
                     .unwrap_or_default()
@@ -106,6 +163,10 @@ impl Core {
         let core = self.clone();
         tauri::async_runtime::spawn(async move { core.connect_asr().await });
         Ok(())
+    }
+
+    fn asr_client(&self) -> Option<Arc<HttpAsrClient>> {
+        self.asr.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     async fn connect_asr(self: Arc<Self>) {
@@ -145,11 +206,85 @@ impl Core {
         }
         *self.asr.write().unwrap_or_else(|p| p.into_inner()) = Some(client);
         self.state.set_asr_ready(true);
+        self.clone().spawn_health_monitor();
 
-        if cfg!(debug_assertions) && std::env::var(ENV_DEV_AUTO_LISTEN).as_deref() == Ok("1") {
+        if dev_flag(ENV_DEV_AUTO_LISTEN) {
             log::info!("{ENV_DEV_AUTO_LISTEN}=1 のため音声入力をONにする");
             if let Err(e) = self.set_listening(true).await {
                 log::error!("自動ONに失敗: {e:#}");
+            }
+        }
+    }
+
+    /// ON の間、ASR サーバーが落ちていないか定期的に確かめる。
+    fn spawn_health_monitor(self: Arc<Self>) {
+        tauri::async_runtime::spawn(async move {
+            let mut failures = 0u32;
+            loop {
+                tokio::time::sleep(HEALTH_INTERVAL).await;
+                if !self.state.is_listening() {
+                    failures = 0;
+                    continue;
+                }
+                let Some(client) = self.asr_client() else {
+                    continue;
+                };
+                match client.health().await {
+                    Ok(_) => failures = 0,
+                    Err(e) => {
+                        failures += 1;
+                        log::warn!("ASRサーバーの /health に失敗 ({failures}回目): {e:#}");
+                        if failures >= HEALTH_FAILURES_TO_STOP {
+                            failures = 0;
+                            self.asr_down(format!("{e:#}")).await;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// 文字起こしの失敗時: サーバーが落ちているかを確かめ、落ちていれば停止エラーにする。
+    fn check_asr_after_failure(self: &Arc<Self>) {
+        let core = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let Some(client) = core.asr_client() else {
+                return;
+            };
+            if let Err(e) = client.health().await {
+                core.asr_down(format!("{e:#}")).await;
+            }
+        });
+    }
+
+    async fn asr_down(self: &Arc<Self>, detail: String) {
+        if self.state.error().map(|e| e.code) == Some(ErrorCode::AsrStopped) {
+            return;
+        }
+        self.fail(AppError::asr_stopped(detail)).await;
+    }
+
+    /// エラーからの復旧 (restart_asr)。開発時はサーバーを process-compose が管理するため、
+    /// 応答するかを確かめ直すだけ。本番のプロセス再起動は P4。
+    pub async fn restart_asr(self: &Arc<Self>) -> Result<()> {
+        let Some(client) = self.asr_client() else {
+            if self.state.error().map(|e| e.code) == Some(ErrorCode::RuntimeMissing) {
+                return Err(anyhow!("実行環境とモデルが導入されていません"));
+            }
+            // まだ接続待ち (読み込み中)。準備ができれば自動で使えるようになる
+            return Ok(());
+        };
+        match client.health().await {
+            Ok(_) => {
+                log::info!("ASRサーバーの応答を確認。エラーを解除する");
+                if self.state.error().map(|e| e.code) == Some(ErrorCode::AsrStopped) {
+                    self.state.clear_error();
+                }
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("ASRサーバーが応答しません: {e:#}");
+                Err(anyhow!("文字起こしサーバーが応答しません"))
             }
         }
     }
@@ -166,7 +301,7 @@ impl Core {
     pub async fn set_listening(self: &Arc<Self>, on: bool) -> Result<()> {
         let _guard = self.toggle_lock.lock().await;
         if !on {
-            self.stop_capture();
+            self.stop_capture().await;
             self.state.set_listening(false);
             return Ok(());
         }
@@ -180,7 +315,23 @@ impl Core {
             }
             return Err(anyhow!("モデルを読み込んでいます。しばらくお待ちください"));
         }
+        // ASR の停止でOFFになった後は、サーバーが戻っているかを確かめてから再開する
+        if self.state.error().map(|e| e.code) == Some(ErrorCode::AsrStopped) {
+            if let Some(client) = self.asr_client() {
+                if let Err(e) = client.health().await {
+                    log::warn!("ASRサーバーが応答しないため再開しない: {e:#}");
+                    return Err(anyhow!("文字起こしサーバーが停止しています"));
+                }
+            }
+        }
         self.state.clear_error();
+
+        // 入力できない状態で聞き始めない (話した後に失敗するより、ONにする時点で知らせる)
+        if !macos::accessibility_trusted() {
+            let e = AppError::accessibility_denied();
+            self.state.set_error(e.clone());
+            return Err(anyhow!(e.message));
+        }
 
         let source = self.audio_source();
         if matches!(source, Source::Device(_)) {
@@ -215,25 +366,37 @@ impl Core {
         Ok(())
     }
 
-    /// 録音を止める。発話中のものは破棄され、確定処理中のものは入力まで続く。
-    fn stop_capture(&self) {
+    /// 録音を止める。話し終わりの無音待ちのものは確定し、話している最中のものは破棄する。
+    /// 確定処理中のものは入力まで続く。スレッドの終了待ちは async ランタイムの外で行う。
+    async fn stop_capture(&self) {
         let running = lock(&self.running).take();
         if let Some(r) = running {
-            r.stop();
+            if let Err(e) = tauri::async_runtime::spawn_blocking(move || r.stop()).await {
+                log::error!("録音の停止処理が異常終了しました: {e}");
+            }
         }
     }
 
     /// エラーで音声入力を止める。
-    fn fail(self: &Arc<Self>, error: AppError) {
+    async fn fail(self: &Arc<Self>, error: AppError) {
         log::error!("エラーのため音声入力をOFFにする: {}", error.message);
-        self.stop_capture();
+        let _guard = self.toggle_lock.lock().await;
+        self.stop_capture().await;
         self.state.set_error(error);
+    }
+
+    fn fail_later(self: &Arc<Self>, error: AppError) {
+        let core = self.clone();
+        tauri::async_runtime::spawn(async move { core.fail(error).await });
     }
 
     pub fn update_settings(self: &Arc<Self>, patch: &serde_json::Value) -> Result<Settings> {
         let before = self.settings.get();
         let next = self.settings.update(patch)?;
         let _ = self.app.emit(events::SETTINGS_CHANGED, &next);
+        if before.panel_position != next.panel_position {
+            crate::windows::on_settings_panel_position(&self.app, next.panel_position.clone());
+        }
         // マイクを変えたら録音をやり直す (感度・無音時間は処理スレッドが読み直す)
         if before.input_device_id != next.input_device_id && self.state.is_listening() {
             let core = self.clone();
@@ -266,12 +429,114 @@ impl Core {
                 core.state.refresh();
             });
         }
-        if result.error_code() == Some(ErrorCode::AccessibilityDenied) {
-            self.fail(AppError::accessibility_denied());
+        match result.error_code() {
+            Some(ErrorCode::AccessibilityDenied) => {
+                self.fail_later(AppError::accessibility_denied())
+            }
+            Some(ErrorCode::AsrStopped) => self.check_asr_after_failure(),
+            _ => {}
         }
     }
 
+    // ---- 途中表示 -------------------------------------------------------------
+
+    fn can_request_partial(&self) -> bool {
+        if dev_flag(ENV_DEV_NO_PARTIAL) {
+            return false;
+        }
+        lock(&self.partial).in_flight.is_none()
+            && self.finals_in_flight.load(Ordering::SeqCst) == 0
+            && self.asr_client().is_some()
+    }
+
+    fn request_partial(self: &Arc<Self>, id: u64, samples: Vec<f32>) {
+        let Some(client) = self.asr_client() else {
+            return;
+        };
+        let mut p = lock(&self.partial);
+        if id <= p.closed_upto || p.in_flight.is_some() {
+            return;
+        }
+        p.in_flight = Some(id);
+        let context = asr::vocabulary_context(&self.settings.get().vocabulary);
+        let core = self.clone();
+        let task = tauri::async_runtime::spawn(async move {
+            let started = Instant::now();
+            let secs = samples.len() as f64 / crate::vad::SAMPLE_RATE as f64;
+            let result = async {
+                let wav = audio::encode_wav_16k(&samples)?;
+                client.transcribe(wav, context).await
+            }
+            .await;
+            core.partial_done(id, result, secs, started);
+        });
+        p.task = Some(task);
+    }
+
+    fn partial_done(&self, id: u64, result: Result<String>, secs: f64, started: Instant) {
+        let mut p = lock(&self.partial);
+        if p.in_flight == Some(id) {
+            p.in_flight = None;
+            p.task = None;
+        }
+        // 確定処理に入った発話には反映しない (表示の巻き戻り防止)
+        if id <= p.closed_upto {
+            return;
+        }
+        let text = match result {
+            Ok(t) => t,
+            Err(e) => {
+                // 暫定値のため失敗は無視する (確定処理に任せる)
+                log::warn!("発話 {id} の途中表示に失敗: {e:#}");
+                return;
+            }
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        let prev = p
+            .prev
+            .as_ref()
+            .filter(|(pid, _)| *pid == id)
+            .map(|(_, t)| t);
+        let stable_length = prev.map_or(0, |prev| common_prefix_chars(prev, &text));
+        log::info!(
+            "発話 {id} の途中表示: 音声 {secs:.2}秒, {}文字, {}ms",
+            text.chars().count(),
+            started.elapsed().as_millis()
+        );
+        p.prev = Some((id, text.clone()));
+        drop(p);
+        let _ = self.app.emit(
+            events::UTTERANCE_PARTIAL,
+            Utterance {
+                id,
+                text,
+                stable_length,
+            },
+        );
+    }
+
+    /// 発話が確定処理に入った・破棄された。処理中の途中表示は取り消す (確定を待たせない)。
+    /// 取り消したかを返す。
+    fn close_partial(&self, id: u64) -> bool {
+        let mut p = lock(&self.partial);
+        p.closed_upto = p.closed_upto.max(id);
+        p.prev = None;
+        if p.in_flight.is_some_and(|i| i <= id) {
+            p.in_flight = None;
+            if let Some(t) = p.task.take() {
+                t.abort();
+            }
+            return true;
+        }
+        false
+    }
+
+    // ---- 確定 ---------------------------------------------------------------
+
     fn finalize(self: &Arc<Self>, id: u64, samples: Vec<f32>) {
+        let aborted_partial = self.close_partial(id);
         let (tx, rx) = oneshot::channel();
         let queue = lock(&self.insert).clone();
         let Some(queue) = queue else {
@@ -284,23 +549,63 @@ impl Core {
             self.state.finalizing_finished(false);
             return;
         }
-        let client = self.asr.read().unwrap_or_else(|p| p.into_inner()).clone();
+        let client = self.asr_client();
         let context = asr::vocabulary_context(&self.settings.get().vocabulary);
-        log::info!(
-            "発話 {id} を確定: {:.2}秒",
-            samples.len() as f64 / crate::vad::SAMPLE_RATE as f64
-        );
+        let secs = samples.len() as f64 / crate::vad::SAMPLE_RATE as f64;
+        log::info!("発話 {id} を確定: {secs:.2}秒 (途中表示の取り消し: {aborted_partial})");
+        self.finals_in_flight.fetch_add(1, Ordering::SeqCst);
+        let core = self.clone();
         // 確定リクエストはすぐ送る (入力順はキューが保証する)
         tauri::async_runtime::spawn(async move {
+            let started = Instant::now();
             let result = async {
                 let client = client.ok_or_else(|| anyhow!("ASRサーバーに接続していません"))?;
                 let wav = audio::encode_wav_16k(&samples)?;
                 client.transcribe(wav, context).await
             }
             .await;
+            core.finals_in_flight.fetch_sub(1, Ordering::SeqCst);
+            log::info!(
+                "発話 {id} の確定の文字起こし: {}ms ({})",
+                started.elapsed().as_millis(),
+                if result.is_ok() { "成功" } else { "失敗" }
+            );
             let _ = tx.send(result);
         });
     }
+}
+
+/// 2つの文字列の先頭から一致する長さ。フロントエンドが `String.prototype.slice` で分けるため
+/// UTF-16 のコード単位で数える (サロゲートペアの途中では切らない)。
+pub fn common_prefix_chars(a: &str, b: &str) -> usize {
+    a.chars()
+        .zip(b.chars())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x.len_utf16())
+        .sum()
+}
+
+/// 現在のキーボード配列で ⌘V になる keycode。TIS はメインスレッド専用のため、
+/// メインスレッドで調べて入力キューのスレッドで待つ (メインスレッドは入力キューを待たないので詰まらない)。
+fn resolve_v_keycode(app: &AppHandle) -> u16 {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let sent = app.run_on_main_thread(move || {
+        let r = objc2::MainThreadMarker::new()
+            .ok_or_else(|| anyhow!("メインスレッドではありません"))
+            .and_then(macos::keyboard::command_v_keycode);
+        let _ = tx.send(r);
+    });
+    let result = match sent {
+        Ok(()) => rx
+            .recv_timeout(Duration::from_millis(500))
+            .map_err(|_| anyhow!("応答がありません"))
+            .and_then(|r| r),
+        Err(e) => Err(anyhow!("メインスレッドに送れません: {e}")),
+    };
+    result.unwrap_or_else(|e| {
+        log::warn!("⌘V のキーを解決できないため ANSI の V を使う: {e:#}");
+        macos::keyboard::ANSI_V_KEYCODE
+    })
 }
 
 /// 処理スレッドからの通知を Core に中継する。Core が破棄された後は何もしない。
@@ -346,6 +651,16 @@ impl PipelineSink for Sink {
         }
     }
 
+    fn can_request_partial(&self) -> bool {
+        self.0.upgrade().is_some_and(|c| c.can_request_partial())
+    }
+
+    fn request_partial(&self, id: u64, audio: Vec<f32>) {
+        if let Some(c) = self.0.upgrade() {
+            c.request_partial(id, audio);
+        }
+    }
+
     fn utterance_ended(&self, id: u64, audio: Vec<f32>) {
         if let Some(c) = self.0.upgrade() {
             c.state.set_speaking(false);
@@ -356,6 +671,7 @@ impl PipelineSink for Sink {
     fn utterance_discarded(&self, id: u64) {
         if let Some(c) = self.0.upgrade() {
             log::info!("発話 {id} を破棄");
+            c.close_partial(id);
             c.state.set_speaking(false);
             let _ = c
                 .app
@@ -365,14 +681,44 @@ impl PipelineSink for Sink {
 
     fn capture_lost(&self, message: String) {
         if let Some(c) = self.0.upgrade() {
-            // 処理スレッド自身から stop (join) できないため、別スレッドで止める
-            tauri::async_runtime::spawn(async move {
-                c.fail(AppError::microphone_missing(message));
-            });
+            // 処理スレッド自身から stop (join) できないため、別タスクで止める
+            c.fail_later(AppError::microphone_missing(message));
         }
     }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stable_length_is_common_prefix() {
+        assert_eq!(common_prefix_chars("", "あいう"), 0);
+        assert_eq!(
+            common_prefix_chars("明日の打ち合わせ", "明日の打ち合わせは"),
+            8
+        );
+        assert_eq!(common_prefix_chars("明日の打ち", "明日は"), 2);
+        assert_eq!(common_prefix_chars("abc", "abc"), 3);
+        // サロゲートペアは2単位 (JS の length と同じ)
+        assert_eq!(common_prefix_chars("𠮷野家", "𠮷野屋"), 3);
+    }
+
+    #[test]
+    fn utterance_serializes_per_contract() {
+        let v = serde_json::to_value(Utterance {
+            id: 2,
+            text: "あ".into(),
+            stable_length: 1,
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "id": 2, "text": "あ", "stableLength": 1 })
+        );
+    }
 }

@@ -2,6 +2,13 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for all mukuchi windows",
-  "windows": ["panel", "settings", "setup"],
-  "permissions": ["core:default"]
+  "windows": [
+    "panel",
+    "settings",
+    "setup"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging"
+  ]
 }

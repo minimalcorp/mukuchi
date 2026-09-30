@@ -60,8 +60,12 @@ impl Segmenter {
         self.speaking
     }
 
-    /// 発話中の音声 (途中表示で使う。P2)
-    #[allow(dead_code)]
+    /// 話し終わりの無音待ちの途中か (直前のフレームが無音)
+    pub fn in_silence(&self) -> bool {
+        self.speaking && self.redemption > 0
+    }
+
+    /// 発話中の音声 (pre-pad を含む。途中表示で使う)
     pub fn current_audio(&self) -> Option<&[f32]> {
         self.speaking.then_some(self.audio.as_slice())
     }
@@ -116,11 +120,32 @@ impl Segmenter {
         None
     }
 
-    /// 発話中なら打ち切る (OFF時)。発話中だったかを返す。音声は破棄する。
+    /// 発話中なら打ち切る (デバイスの切り替え等)。発話中だったかを返す。音声は破棄する。
+    #[cfg(test)]
     pub fn abort(&mut self) -> bool {
         let was = self.speaking;
         self.reset();
         was
+    }
+
+    /// OFF・録音停止時の打ち切り。
+    ///
+    /// 話し終わりの無音待ちの間 (最後のフレームが無音) で、最短発話以上の音声があれば確定する (`Ended`)。
+    /// 話している最中なら破棄する (`Misfire`)。発話中でなければ `None`。
+    /// 無音待ちで止めた場合も利用者は話し終えているため、捨てずに入力する。
+    pub fn stop(&mut self) -> Option<SegmentEvent> {
+        if !self.speaking {
+            self.reset();
+            return None;
+        }
+        let in_silence_wait = self.redemption > 0;
+        let event = if in_silence_wait && self.last_voiced >= self.params.min_speech_frames {
+            self.finish()
+        } else {
+            SegmentEvent::Misfire
+        };
+        self.reset();
+        Some(event)
     }
 
     pub fn reset(&mut self) {
@@ -275,6 +300,40 @@ mod tests {
         assert!(seg.abort());
         assert!(!seg.is_speaking());
         assert!(!seg.abort());
+    }
+
+    #[test]
+    fn stop_during_silence_wait_finalizes() {
+        let mut seg = Segmenter::new(params());
+        // 発話 20 → 無音 10 (無音待ちの途中) で OFF
+        let probs = seq(&[(0.0, 5), (0.9, 20), (0.0, 10)]);
+        run(&mut seg, &probs, -20.0);
+        let Some(SegmentEvent::Ended { audio }) = seg.stop() else {
+            panic!("無音待ち中は確定する")
+        };
+        // pre-pad 5 + 発話 20 + 末尾 10 (残す末尾の上限 10 と同じ)
+        assert_eq!(audio.len(), (5 + 20 + 10) * FRAME_SAMPLES);
+        assert!(!seg.is_speaking());
+        assert_eq!(seg.stop(), None);
+    }
+
+    #[test]
+    fn stop_while_talking_or_too_short_discards() {
+        let mut seg = Segmenter::new(params());
+        run(&mut seg, &seq(&[(0.9, 20)]), -20.0);
+        assert_eq!(
+            seg.stop(),
+            Some(SegmentEvent::Misfire),
+            "話している最中は破棄"
+        );
+
+        let mut seg = Segmenter::new(params());
+        run(&mut seg, &seq(&[(0.9, 3), (0.0, 5)]), -20.0);
+        assert_eq!(
+            seg.stop(),
+            Some(SegmentEvent::Misfire),
+            "最短発話未満は破棄"
+        );
     }
 
     #[test]

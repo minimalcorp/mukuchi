@@ -3,7 +3,7 @@
 //! 個々の事実 (ON/OFF、ASR準備完了、発話中、確定処理中の件数、エラー) だけを保持し、
 //! `Phase` はそこから導出する。遷移のたびに購読者 (Tauri event・メニュー) へ通知する。
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -67,17 +67,21 @@ impl AppError {
             action: Some(ErrorAction::OpenMicrophone),
         }
     }
+    // 以下の detail (技術的な詳細・英語のエラー文) は表示せずログにだけ残す。
+    // 表示はメニューの1行・パネルのピルに収まる短い文言にする (デザイン 06)
     pub fn microphone_missing(detail: impl std::fmt::Display) -> Self {
+        log::warn!("マイクを使用できない: {detail}");
         Self {
             code: ErrorCode::MicrophoneMissing,
-            message: format!("マイクを使用できません ({detail})"),
+            message: "マイクが見つかりません".into(),
             action: Some(ErrorAction::SelectMicrophone),
         }
     }
     pub fn asr_stopped(detail: impl std::fmt::Display) -> Self {
+        log::warn!("文字起こしサーバーの停止: {detail}");
         Self {
             code: ErrorCode::AsrStopped,
-            message: format!("文字起こしサーバーが停止しています ({detail})"),
+            message: "文字起こしサーバーが停止しました".into(),
             action: Some(ErrorAction::RestartAsr),
         }
     }
@@ -89,9 +93,10 @@ impl AppError {
         }
     }
     pub fn insert_failed(detail: impl std::fmt::Display) -> Self {
+        log::warn!("入力の失敗: {detail}");
         Self {
             code: ErrorCode::InsertFailed,
-            message: format!("入力に失敗しました ({detail})"),
+            message: "入力に失敗しました".into(),
             action: None,
         }
     }
@@ -146,7 +151,7 @@ impl Facts {
     }
 }
 
-type Listener = Box<dyn Fn(&AppStatus) + Send + Sync>;
+type Listener = Arc<dyn Fn(&AppStatus) + Send + Sync>;
 
 pub struct StateManager {
     facts: Mutex<(Facts, Option<AppStatus>)>,
@@ -168,7 +173,7 @@ impl StateManager {
     }
 
     pub fn subscribe(&self, f: impl Fn(&AppStatus) + Send + Sync + 'static) {
-        lock(&self.listeners).push(Box::new(f));
+        lock(&self.listeners).push(Arc::new(f));
     }
 
     pub fn status(&self) -> AppStatus {
@@ -251,15 +256,19 @@ impl StateManager {
             f(&mut guard.0);
             let status = guard.0.status(Instant::now());
             if guard.1.as_ref() == Some(&status) {
-                None
+                false
             } else {
-                guard.1 = Some(status.clone());
-                Some(status)
+                guard.1 = Some(status);
+                true
             }
         };
-        // 購読者 (メニュー更新など) の中から再入しても詰まらないよう、ロック外で通知する
-        if let Some(status) = changed {
-            for l in lock(&self.listeners).iter() {
+        // 購読者の中から再入 (状態の変更・購読の追加) しても詰まらないよう、どのロックも持たずに通知する。
+        // 複数スレッドから同時に変更されると通知の順序が前後しうるため、渡すのは通知時点の最新の状態にする
+        // (最後に届く通知が必ず最新になる)
+        if changed {
+            let listeners: Vec<Listener> = lock(&self.listeners).clone();
+            let status = self.status();
+            for l in &listeners {
                 l(&status);
             }
         }
@@ -274,7 +283,6 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn phase_transitions() {
@@ -305,6 +313,22 @@ mod tests {
             ]
         );
         assert!(!s.is_listening());
+    }
+
+    #[test]
+    fn listener_can_reenter() {
+        let s = Arc::new(StateManager::new());
+        let s2 = s.clone();
+        s.subscribe(move |st| {
+            // 通知の中から状態を読み、購読を追加しても詰まらない
+            let _ = s2.status();
+            if st.phase == Phase::Off {
+                s2.subscribe(|_| {});
+            }
+        });
+        s.set_asr_ready(true);
+        s.set_listening(true);
+        assert_eq!(s.status().phase, Phase::Listening);
     }
 
     #[test]

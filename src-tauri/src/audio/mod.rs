@@ -6,7 +6,7 @@
 pub mod resampler;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -54,11 +54,13 @@ pub fn list_input_devices() -> Result<Vec<AudioDevice>> {
     Ok(out)
 }
 
-/// 録音の実体。drop すると録音を止める。
+/// 録音の実体。drop すると録音を止める (録音スレッドの終了を待つ)。
 pub struct Capture {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     pub sample_rate: u32,
+    /// 取りこぼし (Xrun) の回数。エラーコールバックでログを書かず、停止時にまとめて記録する
+    xruns: Arc<AtomicU64>,
 }
 
 impl Drop for Capture {
@@ -66,6 +68,10 @@ impl Drop for Capture {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+        let xruns = self.xruns.load(Ordering::Relaxed);
+        if xruns > 0 {
+            log::warn!("録音中の取りこぼし: {xruns}回");
         }
     }
 }
@@ -94,12 +100,12 @@ fn find_device(id: Option<&str>) -> Result<cpal::Device> {
         None => host
             .default_input_device()
             .context("入力デバイスが見つかりません"),
+        // デバイスIDは機器名を含みうるため、エラー文言 (ログ・画面) に出さない
         Some(id) => {
-            let parsed: cpal::DeviceId = id
-                .parse()
-                .map_err(|e| anyhow!("デバイスIDが不正: {id}: {e}"))?;
+            let parsed: cpal::DeviceId =
+                id.parse().map_err(|e| anyhow!("デバイスIDが不正: {e}"))?;
             host.device_by_id(&parsed)
-                .with_context(|| format!("選択したマイクが見つかりません: {id}"))
+                .context("選択したマイクが見つかりません")
         }
     }
 }
@@ -108,12 +114,14 @@ fn find_device(id: Option<&str>) -> Result<cpal::Device> {
 /// 専用スレッドで作成・保持し、停止フラグで破棄する。
 fn start_device(id: Option<String>, tx: Sender<AudioMsg>) -> Result<Capture> {
     let stop = Arc::new(AtomicBool::new(false));
+    let xruns = Arc::new(AtomicU64::new(0));
     let (ready_tx, ready_rx) = mpsc::channel::<Result<u32>>();
     let stop2 = stop.clone();
+    let xruns2 = xruns.clone();
     let thread = std::thread::Builder::new()
         .name("mukuchi-capture".into())
         .spawn(move || {
-            let stream = match build_stream(id.as_deref(), tx) {
+            let stream = match build_stream(id.as_deref(), tx, xruns2) {
                 Ok((stream, rate)) => {
                     let _ = ready_tx.send(Ok(rate));
                     stream
@@ -136,10 +144,15 @@ fn start_device(id: Option<String>, tx: Sender<AudioMsg>) -> Result<Capture> {
         stop,
         thread: Some(thread),
         sample_rate,
+        xruns,
     })
 }
 
-fn build_stream(id: Option<&str>, tx: Sender<AudioMsg>) -> Result<(cpal::Stream, u32)> {
+fn build_stream(
+    id: Option<&str>,
+    tx: Sender<AudioMsg>,
+    xruns: Arc<AtomicU64>,
+) -> Result<(cpal::Stream, u32)> {
     let device = find_device(id)?;
     let supported = device
         .default_input_config()
@@ -147,19 +160,25 @@ fn build_stream(id: Option<&str>, tx: Sender<AudioMsg>) -> Result<(cpal::Stream,
     let config = supported.config();
     let channels = config.channels as usize;
     let rate = config.sample_rate;
+    // 機器名はログに残さない (利用者の持ち物・名前を含むことがあるため)
     log::info!(
-        "録音開始: {device} {rate}Hz {channels}ch {:?}",
+        "録音開始: {} {rate}Hz {channels}ch {:?}",
+        if id.is_some() {
+            "選択したマイク"
+        } else {
+            "既定のマイク"
+        },
         supported.sample_format()
     );
     use cpal::SampleFormat as F;
     let stream = match supported.sample_format() {
-        F::F32 => build::<f32>(&device, config, channels, tx),
-        F::F64 => build::<f64>(&device, config, channels, tx),
-        F::I16 => build::<i16>(&device, config, channels, tx),
-        F::I32 => build::<i32>(&device, config, channels, tx),
-        F::I8 => build::<i8>(&device, config, channels, tx),
-        F::U8 => build::<u8>(&device, config, channels, tx),
-        F::U16 => build::<u16>(&device, config, channels, tx),
+        F::F32 => build::<f32>(&device, config, channels, tx, xruns),
+        F::F64 => build::<f64>(&device, config, channels, tx, xruns),
+        F::I16 => build::<i16>(&device, config, channels, tx, xruns),
+        F::I32 => build::<i32>(&device, config, channels, tx, xruns),
+        F::I8 => build::<i8>(&device, config, channels, tx, xruns),
+        F::U8 => build::<u8>(&device, config, channels, tx, xruns),
+        F::U16 => build::<u16>(&device, config, channels, tx, xruns),
         other => Err(anyhow!("未対応のサンプル形式: {other:?}")),
     }?;
     stream
@@ -173,6 +192,7 @@ fn build<T>(
     config: cpal::StreamConfig,
     channels: usize,
     tx: Sender<AudioMsg>,
+    xruns: Arc<AtomicU64>,
 ) -> Result<cpal::Stream>
 where
     T: SizedSample,
@@ -187,11 +207,17 @@ where
                 // 受信側が止まっている(OFF処理中)なら捨ててよい
                 let _ = tx.send(AudioMsg::Samples(mono));
             },
-            move |err| {
-                log::error!("録音エラー: {err}");
-                if matches!(err.kind(), cpal::ErrorKind::DeviceNotAvailable) {
+            move |err| match err.kind() {
+                // 頻発しうるため数えるだけにする (ログの書き込みで録音を遅らせない)
+                cpal::ErrorKind::Xrun => {
+                    xruns.fetch_add(1, Ordering::Relaxed);
+                }
+                // 切断、またはサンプルレート変更・AirPods のプロファイル切り替え等でストリームが無効になった。
+                // 処理スレッドが開き直しを試みる
+                cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated => {
                     let _ = err_tx.send(AudioMsg::Lost(err.to_string()));
                 }
+                _ => log::warn!("録音エラー: {err}"),
             },
             None,
         )
@@ -245,6 +271,7 @@ fn start_file(path: PathBuf, tx: Sender<AudioMsg>) -> Result<Capture> {
         stop,
         thread: Some(thread),
         sample_rate: rate,
+        xruns: Arc::new(AtomicU64::new(0)),
     })
 }
 

@@ -62,7 +62,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 - `POST /transcribe` — body: 16kHz/mono/16bit PCMのWAV (`Content-Type: audio/wav`)。query: `language` (既定 `Japanese`)、`context` (語彙ヒント、任意) → `200 {"text":"...","elapsed_ms":123}`
   - `elapsed_ms`: サーバーがbodyを受信し終えてから応答するまでの時間 (WAVデコード + 推論待ち + 推論)。ネットワーク転送は含まない
   - エラー: 不正なWAV/形式違い → `400`、body が 5MiB (約120秒分+余裕) を超える → `413`
-- 開発用 (デバッグビルドのみ): `MUKUCHI_DEV_AUDIO_FILE=<wav>` でマイクの代わりにWAVを実時間で流す (その後は無音)。`MUKUCHI_DEV_AUTO_LISTEN=1` でASR準備完了後に自動でONにする
+- 開発用 (デバッグビルドのみ): `MUKUCHI_DEV_AUDIO_FILE=<wav>` でマイクの代わりにWAVを実時間で流す (その後は無音)。`MUKUCHI_DEV_AUTO_LISTEN=1` でASR準備完了後に自動でONにする (セットアップ画面は開かない)。`MUKUCHI_DEV_TARGET_BUNDLE=<bundle id>` でそのアプリが前面の時だけ入力する (自動テストで他のアプリに入力しないため)。`MUKUCHI_DEV_NO_PARTIAL=1` で途中表示を送らない (遅延の比較用)。`MUKUCHI_ASR_URL` もデバッグビルドのみ有効で、ループバックの http のみ受け付ける
 - 推論は直列実行 (MLXはスレッド束縛のため、読み込み・ウォームアップ・全推論を専用の1スレッドで行う)。無音由来の定型ハルシネーション除外はサーバー側で行う
 - リアルタイムプレビューも同じ `/transcribe` を使う(専用APIは設けない)
 
@@ -94,7 +94,7 @@ type AppError = {
 type Utterance = {
   id: number;
   text: string;
-  stableLength: number;  // 先頭から確定扱いの文字数。以降はプレビューで薄く表示
+  stableLength: number;  // 先頭から確定扱いの長さ (UTF-16 コード単位 = JS の length/slice と同じ)。以降はプレビューで薄く表示
 };
 
 type UtteranceResult =
@@ -114,7 +114,7 @@ type Settings = {
   voiceCommands: { id: string; phrases: string[]; key: KeyCombo }[];
   vocabulary: string[];                   // ASR の context に空白区切りで渡す
   excludedApps: { bundleId: string; name: string }[];
-  panelPosition: { x: number; y: number; displayId: string } | null; // null=既定位置
+  panelPosition: { x: number; y: number; displayId: string } | null; // null=既定位置。x,y はpanelウィンドウの下端中央の、ディスプレイ左下からの位置 (pt、y上向き)。displayId は CGDirectDisplayID
   setupCompleted: boolean;
 };
 type KeyCombo = { key: "enter" | "tab" | "escape" | "backspace"; modifiers: ("cmd" | "shift" | "option" | "ctrl")[] };

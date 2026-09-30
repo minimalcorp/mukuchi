@@ -1,7 +1,10 @@
 //! ASRサーバーのクライアントとプロセス管理 (HTTP API は docs/architecture.md)。
 //!
-//! 開発時は環境変数 `MUKUCHI_ASR_URL` のサーバーに接続するだけで、自分では起動しない。
+//! 開発時 (デバッグビルドのみ) は環境変数 `MUKUCHI_ASR_URL` のサーバーに接続するだけで、自分では起動しない。
 //! 本番の起動 (空きポート・`uv run`・/health 待ち・自動再起動) は P4 で実装する。
+//!
+//! リクエストの URL には語彙ヒント (`context`) が含まれるため、reqwest のエラーは `without_url()` で
+//! URL を外してからログ・画面に出す。
 
 use std::future::Future;
 use std::pin::Pin;
@@ -43,6 +46,9 @@ impl HttpAsrClient {
         let http = reqwest::Client::builder()
             // ループバックへの接続にプロキシを使わない
             .no_proxy()
+            // サーバー (uvicorn) は5秒で待機中の接続を閉じる。閉じかけの接続を再利用して
+            // 失敗しないよう、それより早く手放す
+            .pool_idle_timeout(Duration::from_secs(2))
             .build()
             .context("HTTPクライアントを作成できません")?;
         Ok(Self {
@@ -63,10 +69,16 @@ impl HttpAsrClient {
             .timeout(Duration::from_secs(3))
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .context("ASRサーバーに接続できません")?
             .error_for_status()
+            .map_err(reqwest::Error::without_url)
             .context("ASRサーバーの /health がエラー")?;
-        let h: HealthResponse = res.json().await.context("/health の応答が不正")?;
+        let h: HealthResponse = res
+            .json()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("/health の応答が不正")?;
         if h.status != "ok" {
             anyhow::bail!("ASRサーバーの状態: {}", h.status);
         }
@@ -94,13 +106,25 @@ impl AsrClient for HttpAsrClient {
                 .timeout(Duration::from_secs(120))
                 .send()
                 .await
+                .map_err(reqwest::Error::without_url)
                 .context("ASRサーバーに接続できません")?;
             let status = res.status();
             if !status.is_success() {
-                let body = res.text().await.unwrap_or_default();
+                // 本文はサーバーのエラー詳細 (WAV形式違い等)。念のため長さを制限する
+                let body: String = res
+                    .text()
+                    .await
+                    .unwrap_or_default()
+                    .chars()
+                    .take(200)
+                    .collect();
                 anyhow::bail!("ASRサーバーがエラーを返しました: {status} {body}");
             }
-            let r: TranscribeResponse = res.json().await.context("/transcribe の応答が不正")?;
+            let r: TranscribeResponse = res
+                .json()
+                .await
+                .map_err(reqwest::Error::without_url)
+                .context("/transcribe の応答が不正")?;
             log::info!(
                 "文字起こし: {bytes}B, サーバー {}ms, 往復 {}ms",
                 r.elapsed_ms.unwrap_or(0),
@@ -111,12 +135,41 @@ impl AsrClient for HttpAsrClient {
     }
 }
 
-/// 接続先の決定。開発時は環境変数、本番はサーバーを起動する (P4)。
+/// 接続先の決定。開発時 (デバッグビルド) は環境変数、本番はサーバーを起動する (P4)。
 pub fn resolve_endpoint() -> Option<String> {
-    std::env::var(ENV_ASR_URL).ok().filter(|s| !s.is_empty())
+    // 本番ビルドでは環境変数を見ない (音声と語彙ヒントを外部へ送らせないため)
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let url = std::env::var(ENV_ASR_URL).ok().filter(|s| !s.is_empty())?;
+    match loopback_http_url(&url) {
+        Ok(u) => Some(u),
+        Err(e) => {
+            log::error!("{ENV_ASR_URL} を無視する: {e:#}");
+            None
+        }
+    }
     // TODO(P4): 本番は空きポートを選び、データディレクトリの venv で
     // `mukuchi-asr --port <port> --exit-on-stdin-eof` を起動して /health を待つ。
     // 異常終了時は3回まで自動再起動し、失敗したら asr_stopped にする。
+}
+
+/// ループバック (127.0.0.0/8・::1・localhost) の http URL だけを受け付ける。
+fn loopback_http_url(s: &str) -> Result<String> {
+    let url = reqwest::Url::parse(s).context("URLが不正")?;
+    if url.scheme() != "http" {
+        anyhow::bail!("http 以外のスキーム: {}", url.scheme());
+    }
+    let ok = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => false,
+    };
+    if !ok {
+        anyhow::bail!("ループバック以外のホスト");
+    }
+    Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
 /// 語彙ヒントを ASR の context に渡す形 (空白区切り) にする。
@@ -133,6 +186,36 @@ pub fn vocabulary_context(vocabulary: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_loopback_urls_are_accepted() {
+        assert_eq!(
+            loopback_http_url("http://127.0.0.1:18765/").unwrap(),
+            "http://127.0.0.1:18765"
+        );
+        assert!(loopback_http_url("http://localhost:1").is_ok());
+        assert!(loopback_http_url("http://[::1]:1").is_ok());
+        assert!(loopback_http_url("http://example.com:18765").is_err());
+        assert!(loopback_http_url("http://192.168.1.2:18765").is_err());
+        assert!(loopback_http_url("https://127.0.0.1:1").is_err());
+        assert!(loopback_http_url("nonsense").is_err());
+    }
+
+    #[test]
+    fn errors_do_not_contain_query() {
+        // context (語彙ヒント) を含む URL がエラー文言に出ないこと
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = HttpAsrClient::new("http://127.0.0.1:9").unwrap();
+        let err = rt
+            .block_on(client.transcribe(vec![0; 10], Some("ひみつの語彙".into())))
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(!msg.contains("127.0.0.1"), "{msg}");
+        assert!(!msg.contains("context"), "{msg}");
+    }
 
     #[test]
     fn vocabulary_joined_with_spaces() {

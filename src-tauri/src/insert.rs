@@ -103,6 +103,8 @@ pub struct InsertConfig {
     pub voice_commands_enabled: bool,
     pub voice_commands: Vec<VoiceCommand>,
     pub excluded_apps: Vec<ExcludedApp>,
+    /// 開発時の自動テスト用: 指定したアプリが前面にある時だけ入力する (他のアプリに誤って入力しない)
+    pub only_bundle_id: Option<String>,
 }
 
 /// 確定待ちの発話。`result` には ASR の結果 (または失敗) が届く。
@@ -170,10 +172,12 @@ pub fn handle_text(
     }
     let app = backend.frontmost_app();
     let app_name = app.as_ref().map(|a| a.name.clone()).unwrap_or_default();
-    let excluded = app
-        .as_ref()
-        .and_then(|a| a.bundle_id.as_deref())
-        .is_some_and(|b| cfg.excluded_apps.iter().any(|e| e.bundle_id == b));
+    let bundle = app.as_ref().and_then(|a| a.bundle_id.as_deref());
+    let excluded = bundle.is_some_and(|b| cfg.excluded_apps.iter().any(|e| e.bundle_id == b))
+        || cfg
+            .only_bundle_id
+            .as_deref()
+            .is_some_and(|only| bundle != Some(only));
     if excluded {
         return UtteranceResult::SkippedExcluded {
             id,
@@ -259,6 +263,7 @@ mod tests {
                 bundle_id: "com.example.secret".into(),
                 name: "Secret".into(),
             }],
+            only_bundle_id: None,
         }
     }
 
@@ -343,6 +348,13 @@ mod tests {
             handle_text(3, "こんにちは", &untrusted, &cfg()).error_code(),
             Some(ErrorCode::AccessibilityDenied)
         );
+
+        let mut c = cfg();
+        c.only_bundle_id = Some("com.example.other".into());
+        assert!(matches!(
+            handle_text(5, "こんにちは", &mock, &c),
+            UtteranceResult::SkippedExcluded { .. }
+        ));
 
         let mut c = cfg();
         c.voice_commands_enabled = false;

@@ -51,6 +51,7 @@ docs/design/lp-handoff/
 
 # Playwright (スクリーンショットは目視確認用で管理しない)
 apps/desktop/e2e/screenshots/
+apps/web/e2e/screenshots/
 test-results/
 playwright-report/
 

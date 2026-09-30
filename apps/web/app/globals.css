@@ -1,0 +1,152 @@
+@import "tailwindcss";
+
+/*
+ * Minimal Portal DS のトークン (docs/design/lp-handoff/project/_ds の tokens) を CSS 変数として置き、
+ * Tailwind のテーマはそれを参照する。値の正は DS 側なので、ここでは名前だけを Tailwind に渡す。
+ * LP のデザインにダークモードの表示はないため、ライトのみ。
+ */
+:root {
+  color-scheme: light;
+
+  --blue-50: #eef2ff;
+  --blue-500: #3b5bdb;
+  --blue-600: #2f49b8;
+  --blue-700: #273c95;
+
+  --gray-0: #ffffff;
+  --gray-50: #f5f7fa;
+  --gray-100: #eceff4;
+  --gray-200: #dde2ea;
+  --gray-300: #c4ccd8;
+  --gray-400: #98a2b3;
+  --gray-500: #6b7686;
+  --gray-600: #4d5666;
+  --gray-800: #262b35;
+  --gray-900: #14171d;
+
+  --green-50: #e6f6ef;
+  --green-600: #0c7150;
+  --green-700: #095940;
+
+  --text-strong: var(--gray-900);
+  --text-body: var(--gray-800);
+  --text-muted: var(--gray-500);
+  --text-subtle: var(--gray-400);
+  --text-inverse: var(--gray-0);
+  --text-link: var(--blue-600);
+  --text-link-hover: var(--blue-700);
+  --text-success: var(--green-600);
+
+  --border-subtle: var(--gray-100);
+  --border-default: var(--gray-200);
+  --border-strong: var(--gray-300);
+  --border-focus: var(--blue-500);
+
+  --action-primary: var(--blue-500);
+  --action-primary-hover: var(--blue-600);
+  --surface-hover: var(--gray-50);
+
+  --duration-fast: 120ms;
+  --duration-normal: 180ms;
+}
+
+@theme inline {
+  /* Tailwind 既定のパレットは使わない (DS 以外の色が紛れ込まないように) */
+  --color-*: initial;
+  --color-white: var(--gray-0);
+  --color-transparent: transparent;
+  --color-current: currentColor;
+  --color-blue-50: var(--blue-50);
+  --color-blue-500: var(--blue-500);
+  --color-blue-600: var(--blue-600);
+  --color-gray-0: var(--gray-0);
+  --color-gray-50: var(--gray-50);
+  --color-gray-100: var(--gray-100);
+  --color-gray-200: var(--gray-200);
+  --color-gray-300: var(--gray-300);
+  --color-gray-400: var(--gray-400);
+  --color-gray-600: var(--gray-600);
+  --color-gray-900: var(--gray-900);
+  --color-green-50: var(--green-50);
+  --color-green-700: var(--green-700);
+
+  /* 意味で使う色 (text-strong / border-line など) */
+  --color-strong: var(--text-strong);
+  --color-body: var(--text-body);
+  --color-muted: var(--text-muted);
+  --color-subtle: var(--text-subtle);
+  --color-link: var(--text-link);
+  --color-link-hover: var(--text-link-hover);
+  --color-success: var(--text-success);
+  --color-line-subtle: var(--border-subtle);
+  --color-line: var(--border-default);
+  --color-line-strong: var(--border-strong);
+  --color-focus: var(--border-focus);
+  --color-primary: var(--action-primary);
+  --color-primary-hover: var(--action-primary-hover);
+  --color-hover: var(--surface-hover);
+}
+
+/* DS と同じ名前の変数 (--font-sans など) は Tailwind のテーマ変数そのものとして定義する (static で常に出力) */
+@theme static {
+  --shadow-*: initial;
+  --shadow-xs: 0 1px 1px rgba(20, 23, 29, 0.04);
+  --shadow-sm: 0 1px 2px rgba(20, 23, 29, 0.06), 0 1px 3px rgba(20, 23, 29, 0.05);
+  --shadow-md: 0 2px 4px rgba(20, 23, 29, 0.06), 0 4px 12px rgba(20, 23, 29, 0.07);
+
+  --font-*: initial;
+  --font-sans:
+    "IBM Plex Sans", "IBM Plex Sans JP", system-ui, -apple-system, "Hiragino Kaku Gothic ProN",
+    "Yu Gothic", Meiryo, sans-serif;
+  --font-jp:
+    "IBM Plex Sans JP", "IBM Plex Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo,
+    sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: var(--gray-0);
+  /* デザイン (LP) は和文を先に指定している。DS の --font-sans は欧文が先 */
+  font-family: var(--font-jp);
+  font-size: 14px;
+  line-height: 1.6;
+  font-feature-settings: "palt" 1;
+  color: var(--text-body);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+  }
+}

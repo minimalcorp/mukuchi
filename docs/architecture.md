@@ -40,7 +40,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 | 配布 | Developer ID署名 + 公証の .dmg。Mac App Storeは対象外 | サンドボックスではCGEventPost不可、ダウンロードしたPython実行環境の実行はガイドライン2.5.2違反、非公開API (`_setPreventsActivation`) は審査で却下、アプリ内アンインストール不可のため (2026-09-30 再確認) |
 | 実行環境の導入 | アプリは軽量に保ち、初回セットアップでuv(同梱)がPython・依存・モデルを導入 | |
 | アンインストール | 設定 > ストレージ の「完全にアンインストール」+ `apps/desktop/scripts/uninstall.sh`。「実行環境とモデルのみ削除」も提供 | |
-| 開発環境 | Nix flakes devShell + Makefile + process-compose。monorepo (`apps/desktop`、LP は `apps/web` 予定) で JS/TS は pnpm workspace、Rust は Cargo (`apps/desktop/src-tauri` 単独)、Python は uv | [monorepo-plan.md](plans/monorepo-plan.md) |
+| 開発環境 | Nix flakes devShell + Makefile + process-compose。monorepo (`apps/desktop`、LP は `apps/web`。LP は SST (`sst.config.ts`) で AWS に公開) で JS/TS は pnpm workspace、Rust は Cargo (`apps/desktop/src-tauri` 単独)、Python は uv | [monorepo-plan.md](plans/monorepo-plan.md) |
 | 作らない機能 | キーボードショートカット、押している間だけ録音するモード、文字起こし履歴、入力完了時の効果音、「取り消し」音声での破棄 | 2026-09-30 決定 |
 
 ## 識別子・パス

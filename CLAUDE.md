@@ -32,19 +32,23 @@ monorepo。JS/TS の依存はルートの pnpm workspace (`pnpm-workspace.yaml`�
 
 | コマンド | 内容 |
 |---|---|
-| `make up` / `make down` / `make restart` | 開発環境の起動(全アプリ、セットアップ込み) / 停止 / 再起動 |
-| `make up-desktop` | desktop (asr + tauri dev) だけを起動 (process-compose の namespace `desktop`) |
+| `make up` / `make down` / `make restart` | 開発環境の起動(desktop + web、セットアップ込み) / 停止 / 再起動 |
+| `make up-desktop` / `make up-web` | desktop (asr + tauri dev) / web (LP の vite dev、http://127.0.0.1:5174/) だけを起動 (process-compose の namespace `desktop` / `web`。片方の起動中に別の `up-*` は不可。`make down` してから) |
 | `make reset [PROVISION=1] [ALL=1] [PERMISSIONS=1]` | 停止して dev の設定・WebKit/Caches 等を消し初回起動の状態に (models/・実行環境・導入記録・ログは残すのでセットアップのダウンロードは完了済みで表示される。`PROVISION=1` で導入記録を消しダウンロード・導入をやり直す。`ALL=1` で実行環境も消す。`PERMISSIONS=1` で `tccutil reset All <devのID>` と権限の案内) |
 | `make up-fresh [PROVISION=1] [ALL=1]` | `reset` して `MUKUCHI_DEV_SHOW_SETUP=1` で起動 (セットアップ画面の確認用。この起動のみ) |
-| `make ps` / `make logs [s=<name>]` | プロセス状態 / ログ追従 |
+| `make ps` / `make logs [s=<name>]` | プロセス状態・ASR の /health・web の応答 / ログ追従 (`s=asr\|app\|web`) |
+| `make lint` / `make test` | 全アプリの lint・型検査 (JS/TS・`sst.config.ts`・cargo fmt/clippy・ruff) / テスト (Playwright・cargo test・pytest)。CI と同じ検査 |
 | `make setup` | pnpm install (workspace)・uv sync・モデル取得 (`up` から自動実行)。`MUKUCHI_HF_SEED=<HF_HOME>` で既存HFキャッシュから複製 |
 | `make build` | 本番用 .dmg (Developer ID署名 + Hardened Runtime + 公証 + staple)。証明書・公証の資格情報が必要 ([docs/release.md](docs/release.md)) |
 | `make build-local` | ad-hoc署名の .app (手元確認用)。同梱物 (uv・asr-server) は `apps/desktop/scripts/prepare-bundle-resources.sh` が用意する |
 | `make dmg-local` | `build-local` + 署名なしの .dmg (dmg ウィンドウの見た目の確認用。公証しない) |
 | `apps/desktop/scripts/uninstall.sh [--dev] [--dry-run]` | 完全アンインストール (既定は確認付き。`--dry-run` で対象の表示のみ) |
 | `make verify` / `make clean` | 署名・公証の検証 (ad-hoc なら Gatekeeper・公証の項目は SKIP。`build*` の最後にも実行) / 生成物削除 (devデータは残す) |
+| `make web-build` | web の静的ビルド (`apps/web/build/client`) |
+| `make web-deploy` | web を本番へ `sst deploy --stage production` (通常は main の CI 成功後に `.github/workflows/deploy-web.yml`。手元では AWS の認証情報と `MUKUCHI_WEB_CERT_ARN` が必要) |
 | `make help` | ターゲット一覧 |
 | `pnpm lint` / `pnpm build` / `pnpm test` (`apps/desktop` で実行) | desktop のフロントエンドの lint / 型チェック+ビルド / Playwright (スクリーンショットは `apps/desktop/e2e/screenshots/`) |
+| `pnpm lint` / `pnpm typecheck` / `pnpm build` / `pnpm test` (`apps/web` で実行) | web の lint+prettier / 型検査 / 静的ビルド / Playwright (chromium) |
 
 `make` はnix devShell外で実行された場合 `nix develop -c` 経由で実行される。flake はgit管理下のファイルしか見ないため、`flake.nix` 等の新規ファイルは `git add` してから使う。
 開発ビルドは `apps/desktop/src-tauri/tauri.dev.conf.json` を重ねて dev のバンドルID (`com.minimalcorp.mukuchi.dev`) で起動する (`apps/desktop` で `pnpm run tauri:dev`)。

@@ -20,8 +20,11 @@ else
 export MUKUCHI_DEV_DATA := $(HOME)/Library/Application Support/com.minimalcorp.mukuchi.dev
 ASR_PORT := 18765
 ASR_HEALTH := http://127.0.0.1:$(ASR_PORT)/health
-# 開発時に LISTEN するポート: asr-server / vite (strictPort)
-DEV_PORTS := $(ASR_PORT) 1420
+# web (apps/web) の vite dev。ポートは apps/web/vite.config.ts (strictPort)、待ち受けアドレスは process-compose.yaml
+WEB_PORT := 5174
+WEB_URL := http://127.0.0.1:$(WEB_PORT)/
+# 開発時に LISTEN するポート: asr-server / desktop の vite (strictPort) / web の vite (strictPort)
+DEV_PORTS := $(ASR_PORT) 1420 $(WEB_PORT)
 
 # UDS モード (TCP 8080 を使わない)。ソケットは固定パスにして別シェルからも操作できるようにする。
 # macOS の UDS パス上限 (sun_path 104 バイト、NUL 込み) を超える場合は /tmp の短いパスに逃がす。
@@ -34,6 +37,7 @@ endif
 PC := process-compose -U -u "$(PC_SOCK)" -L "$(PC_DIR)/process-compose.log"
 DESKTOP := apps/desktop
 DESKTOP_SCRIPTS := $(DESKTOP)/scripts
+WEB := apps/web
 
 # 開発用ポートを LISTEN しているプロセス (process-compose がクラッシュした後の残骸など) を表示する。残っていれば真
 define dev_port_leftover
@@ -44,7 +48,7 @@ pids=$$(for p in $(DEV_PORTS); do lsof -nP -ti tcp:$$p -sTCP:LISTEN; done 2>/dev
 }
 endef
 
-.PHONY: help up up-desktop down restart reset up-fresh ps logs setup build build-local dmg-local verify clean
+.PHONY: help up up-desktop up-web down restart reset up-fresh ps logs setup lint test build build-local dmg-local verify web-build web-deploy clean
 
 help: ## ターゲット一覧
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -59,15 +63,21 @@ define pc_up
 	fi; \
 	rm -f "$(PC_SOCK)"; \
 	if $(dev_port_leftover); then echo "error: 起動できない (make down で確認)"; exit 1; fi; \
-	$(PC) up -D $(1) && echo "started: make ps / make logs [s=asr|app]"
+	$(PC) up -D $(1) && echo "started: make ps / make logs [s=asr|app|web]"
 endef
 
-# process-compose.yaml の namespace: desktop (asr・app)。web を足す時は namespace web を加え、up-web を同じ形で作る
-up: setup ## 開発環境を起動 (全アプリ、セットアップ込み、バックグラウンド)
+# process-compose.yaml の namespace: desktop (asr・app)、web (web)。
+# 片方だけ起動中に別の up-* を実行しても "already running" になる (make down してから起動し直す)
+up: setup ## 開発環境を起動 (desktop + web、セットアップ込み、バックグラウンド)
 	$(call pc_up)
 
 up-desktop: setup ## desktop (asr + tauri dev) だけを起動
 	$(call pc_up,-n desktop)
+
+# web は JS の依存だけあればよいので、モデル取得等を含む setup は通さない
+up-web: ## web (LP の vite dev) だけを起動
+	@pnpm install --dir "$(CURDIR)"
+	$(call pc_up,-n web)
 
 # 本体プロセスの終了と開発用ポートの解放まで待つ (最大30秒)。restart の up が "already running" や
 # ポート競合にならないように。v1.122 の down は子プロセス停止後に戻るが、バージョン差や
@@ -104,9 +114,10 @@ up-fresh: ## reset してセットアップ画面ありで起動 (MUKUCHI_DEV_SH
 	@$(MAKE) --no-print-directory reset
 	@MUKUCHI_DEV_SHOW_SETUP=1 $(MAKE) --no-print-directory up
 
-ps: ## プロセス状態と ASR /health
+ps: ## プロセス状態と ASR /health・web の応答
 	@$(PC) process list -o wide 2>/dev/null || echo "process-compose: not running"
 	@printf 'asr /health: '; curl -fs --max-time 3 $(ASR_HEALTH) && echo || echo "not responding"
+	@printf 'web $(WEB_URL): '; curl -fs -o /dev/null --max-time 3 $(WEB_URL) && echo ok || echo "not responding"
 
 logs: ## ログ追従 (s=<name> で個別)
 ifdef s
@@ -117,6 +128,20 @@ endif
 
 setup: ## pnpm install / uv sync / モデル取得
 	@$(DESKTOP_SCRIPTS)/setup.sh
+
+# CI (.github/workflows/ci.yml) の各 job と同じ検査。依存・同梱物は make setup で用意済みの前提
+lint: ## 全アプリの lint・型検査 (JS/TS・sst.config.ts・cargo fmt/clippy・ruff)
+	pnpm run lint
+	pnpm run typecheck
+	cargo fmt --manifest-path $(DESKTOP)/src-tauri/Cargo.toml --check
+	cargo clippy --manifest-path $(DESKTOP)/src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+	cd $(DESKTOP)/asr-server && uv run --frozen ruff check . && uv run --frozen ruff format --check .
+
+# Playwright のブラウザ (desktop: webkit、web: chromium) は pnpm exec playwright install で入れておく
+test: ## 全アプリのテスト (Playwright・cargo test・pytest)
+	pnpm run test
+	cargo test --manifest-path $(DESKTOP)/src-tauri/Cargo.toml --locked
+	cd $(DESKTOP)/asr-server && uv run --frozen pytest -q
 
 # 署名・公証・.dmg 作成・検証は apps/desktop/scripts/build-macos.sh / verify-macos.sh (手順・資格情報は docs/release.md)
 build: ## 本番用 .dmg (Developer ID 署名 + 公証 + staple)
@@ -131,9 +156,18 @@ dmg-local: ## ad-hoc 署名の .app + 署名なしの .dmg (ウィンドウの�
 verify: ## 署名・公証の検証 (ad-hoc なら Gatekeeper・公証の項目は SKIP)
 	@$(DESKTOP_SCRIPTS)/verify-macos.sh
 
+web-build: ## web の静的ビルド (apps/web/build/client)
+	pnpm run web:build
+
+# 通常は main の CI 成功後に .github/workflows/deploy-web.yml が行う。手元から実行する場合は AWS の認証情報と
+# MUKUCHI_WEB_CERT_ARN (us-east-1 の ACM 証明書 ARN) が必要
+web-deploy: ## web を本番 (mukuchi.minimalcorp.com) へデプロイ (sst deploy --stage production)
+	pnpm run web:deploy
+
 # 起動中に .process-compose (ソケット) を消すと make down で止められなくなるため先に停止する
 clean: ## 生成物を削除 (モデル等の dev データは残す)
 	-@$(MAKE) --no-print-directory down
-	rm -rf $(DESKTOP)/dist $(DESKTOP)/src-tauri/target $(DESKTOP)/src-tauri/bundle-resources node_modules apps/*/node_modules "$(PC_DIR)"
+	rm -rf $(DESKTOP)/dist $(DESKTOP)/src-tauri/target $(DESKTOP)/src-tauri/bundle-resources \
+	  $(WEB)/build $(WEB)/.react-router .sst node_modules apps/*/node_modules "$(PC_DIR)"
 
 endif

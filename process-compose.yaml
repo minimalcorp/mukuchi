@@ -1,6 +1,6 @@
 # 開発環境: asr-server の /health 応答(モデル読み込み完了)を待ってから tauri dev を起動する。
 # 起動・停止は Makefile 経由 (make up / make down)。UDS モードで TCP ポートを使わない。
-# アプリごとに namespace を分ける (make up-desktop は -n desktop)。web を足す時は namespace web のプロセスを加える。
+# アプリごとに namespace を分ける (desktop: asr・app、web: web。make up-desktop / make up-web は -n で片方だけ起動)。
 # working_dir はこのファイル (リポジトリ直下) からの相対パス
 version: "0.5"
 
@@ -53,6 +53,29 @@ processes:
     depends_on:
       asr:
         condition: process_healthy
+    shutdown:
+      signal: 15
+      timeout_seconds: 10
+
+  web:
+    namespace: web
+    working_dir: ./apps/web
+    # vite は既定で localhost を [::1] だけで待ち受けるため、readiness probe・make ps と同じ 127.0.0.1 に固定する
+    # (ブラウザの http://localhost:5174 も IPv4 に落ちて開ける)。ポートは vite.config.ts (strictPort)
+    command: pnpm run dev --host 127.0.0.1
+    readiness_probe:
+      http_get:
+        host: 127.0.0.1
+        port: 5174
+        path: /
+        scheme: http
+      initial_delay_seconds: 2
+      period_seconds: 2
+      timeout_seconds: 5
+      failure_threshold: 30
+    availability:
+      restart: on_failure
+      max_restarts: 3
     shutdown:
       signal: 15
       timeout_seconds: 10

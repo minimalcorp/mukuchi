@@ -1,4 +1,5 @@
-# 開発タスク。devShell 外で実行された場合は nix develop -c で自身を再実行する。
+# 開発タスク (リポジトリ全体の入口)。devShell 外で実行された場合は nix develop -c で自身を再実行する。
+# desktop (apps/desktop: Tauri + asr-server) のスクリプトは apps/desktop/scripts/ にある。
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
@@ -31,6 +32,8 @@ ifneq ($(shell [ $$(printf '%s' '$(PC_SOCK)' | wc -c) -le 103 ] && echo ok),ok)
 PC_SOCK := /tmp/mukuchi-pc-$(shell printf '%s' '$(CURDIR)' | shasum | cut -c1-12).sock
 endif
 PC := process-compose -U -u "$(PC_SOCK)" -L "$(PC_DIR)/process-compose.log"
+DESKTOP := apps/desktop
+DESKTOP_SCRIPTS := $(DESKTOP)/scripts
 
 # 開発用ポートを LISTEN しているプロセス (process-compose がクラッシュした後の残骸など) を表示する。残っていれば真
 define dev_port_leftover
@@ -41,21 +44,30 @@ pids=$$(for p in $(DEV_PORTS); do lsof -nP -ti tcp:$$p -sTCP:LISTEN; done 2>/dev
 }
 endef
 
-.PHONY: help up down restart reset up-fresh ps logs setup build build-local dmg-local verify clean
+.PHONY: help up up-desktop down restart reset up-fresh ps logs setup build build-local dmg-local verify clean
 
 help: ## ターゲット一覧
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-12s %s\n", $$1, $$2}'
 
 # 応答しないソケットは process-compose クラッシュ後の残骸なので消す。
-# 開発用ポートの残骸プロセスは勝手に kill せず、表示して失敗させる
-up: setup ## 開発環境を起動 (セットアップ込み、バックグラウンド)
+# 開発用ポートの残骸プロセスは勝手に kill せず、表示して失敗させる。
+# $(1): process-compose up に渡す追加引数 (namespace の指定。空なら全て)
+define pc_up
 	@mkdir -p "$(PC_DIR)"
 	@if $(PC) process list >/dev/null 2>&1; then \
 	  echo "already running (make ps / make down)"; exit 0; \
 	fi; \
 	rm -f "$(PC_SOCK)"; \
 	if $(dev_port_leftover); then echo "error: 起動できない (make down で確認)"; exit 1; fi; \
-	$(PC) up -D && echo "started: make ps / make logs [s=asr|app]"
+	$(PC) up -D $(1) && echo "started: make ps / make logs [s=asr|app]"
+endef
+
+# process-compose.yaml の namespace: desktop (asr・app)。web を足す時は namespace web を加え、up-web を同じ形で作る
+up: setup ## 開発環境を起動 (全アプリ、セットアップ込み、バックグラウンド)
+	$(call pc_up)
+
+up-desktop: setup ## desktop (asr + tauri dev) だけを起動
+	$(call pc_up,-n desktop)
 
 # 本体プロセスの終了と開発用ポートの解放まで待つ (最大30秒)。restart の up が "already running" や
 # ポート競合にならないように。v1.122 の down は子プロセス停止後に戻るが、バージョン差や
@@ -85,7 +97,7 @@ restart: down up ## 再起動
 # (PROVISION=1 で導入記録、ALL=1 で実行環境と導入記録、PERMISSIONS=1 で TCC も消す)
 reset: ## dev の設定・WebKit データを消して初回起動の状態に (PROVISION=1 / ALL=1 / PERMISSIONS=1)
 	@$(MAKE) --no-print-directory down
-	@ALL="$(ALL)" PROVISION="$(PROVISION)" PERMISSIONS="$(PERMISSIONS)" scripts/dev-reset.sh
+	@ALL="$(ALL)" PROVISION="$(PROVISION)" PERMISSIONS="$(PERMISSIONS)" $(DESKTOP_SCRIPTS)/dev-reset.sh
 
 # MUKUCHI_DEV_SHOW_SETUP は今回起動する process-compose (→ app) の環境にだけ渡す。次の make up/restart には残らない
 up-fresh: ## reset してセットアップ画面ありで起動 (MUKUCHI_DEV_SHOW_SETUP=1)
@@ -103,25 +115,25 @@ else
 	@tail -n 200 -F "$(PC_DIR)/all.log"
 endif
 
-setup: ## npm install / uv sync / モデル取得
-	@scripts/setup.sh
+setup: ## pnpm install / uv sync / モデル取得
+	@$(DESKTOP_SCRIPTS)/setup.sh
 
-# 署名・公証・.dmg 作成・検証は scripts/build-macos.sh / scripts/verify-macos.sh (手順・資格情報は docs/release.md)
+# 署名・公証・.dmg 作成・検証は apps/desktop/scripts/build-macos.sh / verify-macos.sh (手順・資格情報は docs/release.md)
 build: ## 本番用 .dmg (Developer ID 署名 + 公証 + staple)
-	@scripts/build-macos.sh
+	@$(DESKTOP_SCRIPTS)/build-macos.sh
 
 build-local: ## ad-hoc 署名の .app (手元確認用)
-	@scripts/build-macos.sh --local
+	@$(DESKTOP_SCRIPTS)/build-macos.sh --local
 
 dmg-local: ## ad-hoc 署名の .app + 署名なしの .dmg (ウィンドウの見た目の確認用)
-	@scripts/build-macos.sh --local-dmg
+	@$(DESKTOP_SCRIPTS)/build-macos.sh --local-dmg
 
 verify: ## 署名・公証の検証 (ad-hoc なら Gatekeeper・公証の項目は SKIP)
-	@scripts/verify-macos.sh
+	@$(DESKTOP_SCRIPTS)/verify-macos.sh
 
 # 起動中に .process-compose (ソケット) を消すと make down で止められなくなるため先に停止する
 clean: ## 生成物を削除 (モデル等の dev データは残す)
 	-@$(MAKE) --no-print-directory down
-	rm -rf dist src-tauri/target src-tauri/bundle-resources node_modules "$(PC_DIR)"
+	rm -rf $(DESKTOP)/dist $(DESKTOP)/src-tauri/target $(DESKTOP)/src-tauri/bundle-resources node_modules apps/*/node_modules "$(PC_DIR)"
 
 endif

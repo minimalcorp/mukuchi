@@ -10,8 +10,6 @@ export default tseslint.config(
       "dist",
       "src-tauri",
       "asr-server",
-      "spikes",
-      "docs",
       "node_modules",
       "playwright-report",
       "test-results",

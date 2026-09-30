@@ -47,6 +47,9 @@
         packages = [
           rust
           pkgs.nodejs_24
+          # JS/TS の依存は pnpm workspace で管理する。ルート package.json の packageManager をこの版に揃える
+          # (違う版だと pnpm が指定の版を取りに行くため)
+          pkgs.pnpm
           pkgs.uv
           pkgs.python312
           pkgs.process-compose

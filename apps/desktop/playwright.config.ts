@@ -13,7 +13,7 @@ export default defineConfig({
   },
   projects: [{ name: "webkit", use: { browserName: "webkit" } }],
   webServer: {
-    command: "npm run dev",
+    command: "pnpm run dev",
     url: "http://localhost:1420",
     reuseExistingServer: true,
     timeout: 60_000,

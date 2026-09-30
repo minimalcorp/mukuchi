@@ -1,5 +1,5 @@
 /*
- * 開発用モック (npm run dev のブラウザ表示・Playwright 用)。本番ビルドには含まれない。
+ * 開発用モック (pnpm run dev のブラウザ表示・Playwright 用)。本番ビルドには含まれない。
  * @tauri-apps/api/mocks で IPC とイベントを差し替え、?window= と ?mock= で画面・状態を選ぶ。
  * シナリオ一覧は src/mock/scenarios.ts。
  * &anchor=<top|bottom>-<left|center|right> で panel のアンカー (get_panel_anchor の値) を指定する。

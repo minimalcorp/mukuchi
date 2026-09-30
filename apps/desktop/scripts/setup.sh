@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # 開発環境のセットアップ。make setup から devShell 内で実行される。
 # 初回はモデル(約4GB)を取得するため、make up のヘルスチェック待ちがタイムアウトしないよう事前に済ませる。
+# 作業ディレクトリは apps/desktop。JS の依存はリポジトリ直下の pnpm workspace でまとめて入れる
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+repo="$(cd ../.. && pwd)"
 
 : "${MUKUCHI_DEV_DATA:=$HOME/Library/Application Support/com.minimalcorp.mukuchi.dev}"
 : "${MUKUCHI_MODEL:=neosophie/Qwen3-ASR-1.7B-JA}"
@@ -11,9 +13,18 @@ export HF_HOME="$MUKUCHI_DEV_DATA/models"
 export UV_CACHE_DIR="$MUKUCHI_DEV_DATA/cache"
 mkdir -p "$HF_HOME" "$UV_CACHE_DIR"
 
-echo "==> npm install"
-if [ ! -d node_modules ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
-  npm install
+echo "==> pnpm install (workspace)"
+# pnpm が最後に入れた時の lock (node_modules/.pnpm/lock.yaml) より lock・マニフェストが新しい時だけ入れ直す
+pnpm_stale() {
+  local stamp="$repo/node_modules/.pnpm/lock.yaml" f
+  [ -f "$stamp" ] || return 0
+  for f in "$repo"/pnpm-lock.yaml "$repo"/pnpm-workspace.yaml "$repo"/package.json "$repo"/apps/*/package.json; do
+    [ "$f" -nt "$stamp" ] && return 0
+  done
+  return 1
+}
+if pnpm_stale; then
+  pnpm install --dir "$repo"
 else
   echo "up to date"
 fi

@@ -384,7 +384,7 @@ mod tests {
     /// リポジトリの smoke WAV (git 管理外) があれば使い、なければ macOS の `say` で作る。
     fn speech_wav(name: &str, text: &str) -> Option<Vec<f32>> {
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../spikes/asr-bench/data/smoke")
+            .join("../../../spikes/asr-bench/data/smoke")
             .join(format!("{name}.wav"));
         let path = if repo.exists() {
             repo

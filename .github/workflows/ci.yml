@@ -1,6 +1,7 @@
 # PR の検査。job の name は main の ruleset の required status checks と一致させる (変えたら ruleset も直す)。
 # required にする job には paths フィルタを付けない (スキップされると pending のまま残るため)。
 # 手元の make と同じ道具で動かすため、どの job も flake の devShell (nix develop) の中で実行する。
+# nix develop はサブディレクトリからでも上位の flake.nix (リポジトリ直下) を見つける。
 name: CI
 
 on:
@@ -20,6 +21,9 @@ jobs:
     # MLX・Core Audio 等の都合で対象は Apple Silicon の macOS のみ (flake も aarch64-darwin のみ)
     runs-on: macos-15
     timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/desktop
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -31,8 +35,8 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            src-tauri/target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'src-tauri/Cargo.lock') }}
+            apps/desktop/src-tauri/target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'apps/desktop/src-tauri/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
       # tauri-build は bundle.resources (asr-server/ 等) と frontendDist を要求する。
       # テストでは画面を使わないため frontendDist は空のディレクトリでよい
@@ -49,6 +53,9 @@ jobs:
     name: Frontend (lint, build, e2e)
     runs-on: macos-15
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps/desktop
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,24 +64,28 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.npm
+            ~/Library/pnpm/store
             ~/Library/Caches/ms-playwright
-          key: npm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
-          restore-keys: npm-${{ runner.os }}-${{ runner.arch }}-
-      - name: npm ci
-        run: nix develop -c npm ci
+          key: pnpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-${{ runner.arch }}-
+      # workspace 全体 (リポジトリ直下の pnpm-lock.yaml) を入れる
+      - name: pnpm install
+        run: nix develop -c pnpm install --frozen-lockfile
       - name: lint
-        run: nix develop -c npm run lint
+        run: nix develop -c pnpm run lint
       - name: build
-        run: nix develop -c npm run build
+        run: nix develop -c pnpm run build
       # Tauri の WebView (WKWebView) に近い WebKit で、モック (src/mock) の画面を確認する
       - name: Playwright (webkit)
-        run: nix develop -c bash -c 'npx playwright install webkit && npx playwright test'
+        run: nix develop -c bash -c 'pnpm exec playwright install webkit && pnpm exec playwright test'
 
   asr-server:
     name: ASR server (ruff, pytest)
     runs-on: macos-15
     timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps/desktop/asr-server
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -83,13 +94,12 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/uv
-          key: uv-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('asr-server/uv.lock') }}
+          key: uv-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/asr-server/uv.lock') }}
           restore-keys: uv-${{ runner.os }}-${{ runner.arch }}-
       - name: uv sync
-        run: nix develop -c uv sync --project asr-server --frozen
-      # nix develop はリポジトリ直下 (flake.nix のある場所) で実行する
+        run: nix develop -c uv sync --frozen
       - name: ruff
-        run: nix develop -c bash -c 'cd asr-server && uv run --frozen ruff check . && uv run --frozen ruff format --check .'
+        run: nix develop -c bash -c 'uv run --frozen ruff check . && uv run --frozen ruff format --check .'
       # test_convert は MLX (Metal) を使う
       - name: pytest
-        run: nix develop -c bash -c 'cd asr-server && uv run --frozen pytest -q'
+        run: nix develop -c uv run --frozen pytest -q

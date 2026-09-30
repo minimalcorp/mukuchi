@@ -10,7 +10,7 @@
 # 再生成: ImageMagick 7 (magick) が必要。 ./generate.sh
 set -euo pipefail
 cd "$(dirname "$0")"
-src=../../../assets/brand/macos
+src=../../../../../assets/brand/macos
 
 # 点の位置・大きさ (pt、左上原点)。右下の角に寄せる
 DOT_CX=15

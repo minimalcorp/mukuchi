@@ -1,13 +1,13 @@
 # 署名・公証済み .dmg を作り、下書きの GitHub Release に添付する (手動実行)。
 # 手順・secret の作り方は docs/release.md。
 #
-# job を2つに分ける (scripts/build-macos.sh の --build-only / --sign-only):
-#   build … npm ci・cargo で署名なしの .app と、dmgbuild で .dmg のテンプレート (背景・アイコン位置。.app なし) を作る。
-#           npm・cargo・uv の依存 (postinstall・build.rs 等の第三者のコード) が動くため
+# job を2つに分ける (apps/desktop/scripts/build-macos.sh の --build-only / --sign-only):
+#   build … pnpm install・cargo で署名なしの .app と、dmgbuild で .dmg のテンプレート (背景・アイコン位置。.app なし) を作る。
+#           pnpm・cargo・uv の依存 (postinstall・build.rs 等の第三者のコード) が動くため
 #           secret を一切渡さない (environment も付けない)。両方を tar にして artifact で渡す
 #   sign  … Environment "production-release" (Required reviewers で承認制) で動き、Apple の secret はここにだけ渡す。
 #           依存を入れず、ビルドもしない。受け取った .app を Apple のツールだけで署名・公証し、テンプレートに入れて .dmg にする
-#           (テンプレートは入れる前に scripts/check-dmg-layout.py で余計なファイルがないことを確かめる)。
+#           (テンプレートは入れる前に apps/desktop/scripts/check-dmg-layout.py で余計なファイルがないことを確かめる)。
 #           ビルドした本体を実行する検証 (verify-macos.sh の --print-uv-path) は資格情報を片付けた後に行う
 # 同じ job の別 step にしないのは、ビルド中に起動されたプロセスが job の終わりまで残り、後の step の secret や
 # 解錠したキーチェーンに触れうるため (runner は job の終わりにプロセスを片付ける)
@@ -43,13 +43,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
-      - name: npm ci
-        run: nix develop -c npm ci
+      - name: pnpm install
+        run: nix develop -c pnpm install --frozen-lockfile
       - name: Build (.app, unsigned + .dmg template)
-        run: nix develop -c scripts/build-macos.sh --build-only
+        run: nix develop -c apps/desktop/scripts/build-macos.sh --build-only
       # artifact は zip になり symlink・実行権限が崩れるため tar にしてから渡す
       - name: Pack .app and .dmg template
-        run: tar -C src-tauri/target/aarch64-apple-darwin/release/bundle -czf "$RUNNER_TEMP/mukuchi-app.tar.gz" macos/mukuchi.app dmg-template/mukuchi.dmg
+        run: tar -C apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle -czf "$RUNNER_TEMP/mukuchi-app.tar.gz" macos/mukuchi.app dmg-template/mukuchi.dmg
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mukuchi-app-unsigned
@@ -67,7 +67,7 @@ jobs:
       contents: write # 下書きの Release の作成
     timeout-minutes: 150
     steps:
-      # scripts/ を build job の作業ツリーではなく同じコミットから取り直す (ビルド中に書き換えられたものを使わない)
+      # apps/desktop/scripts/ を build job の作業ツリーではなく同じコミットから取り直す (ビルド中に書き換えられたものを使わない)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -78,7 +78,7 @@ jobs:
       - name: Unpack .app and .dmg template
         run: |
           set -euo pipefail
-          dir=src-tauri/target/aarch64-apple-darwin/release/bundle
+          dir=apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle
           mkdir -p "$dir"
           tar -C "$dir" -xzf "$RUNNER_TEMP/mukuchi-app.tar.gz" macos/mukuchi.app dmg-template/mukuchi.dmg
 
@@ -116,7 +116,7 @@ jobs:
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8" scripts/build-macos.sh --sign-only
+        run: APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8" apps/desktop/scripts/build-macos.sh --sign-only
 
       # 検証 (ビルドした本体を実行する) の前に資格情報を片付ける
       - name: Clean up signing materials
@@ -126,7 +126,7 @@ jobs:
           rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/cert.p12"
 
       - name: Verify
-        run: scripts/verify-macos.sh
+        run: apps/desktop/scripts/verify-macos.sh
 
       # 下書きで作る (公開は人が確認してから行う)。タグは公開時に target のコミットに作られる
       - name: Create draft release
@@ -134,9 +134,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          app=src-tauri/target/aarch64-apple-darwin/release/bundle/macos/mukuchi.app
+          app=apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/mukuchi.app
           version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
-          dmg="src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/mukuchi_${version}_aarch64.dmg"
+          dmg="apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/mukuchi_${version}_aarch64.dmg"
           (cd "$(dirname "$dmg")" && shasum -a 256 "$(basename "$dmg")" > "$(basename "$dmg").sha256")
           if gh release view "v$version" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "::error::v$version の Release が既にある。version を上げるか既存の下書きを消す"; exit 1

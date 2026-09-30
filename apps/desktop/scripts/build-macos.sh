@@ -9,10 +9,10 @@
 #   scripts/build-macos.sh --build-only  署名なしの .app と .dmg のテンプレートを作るだけ (資格情報を見ない・要らない)
 #   scripts/build-macos.sh --sign-only   既存の .app を署名 → 公証・staple → テンプレートに入れて .dmg 作成・署名 → 公証・staple。
 #                                        Apple のツール (codesign/notarytool/stapler/hdiutil) と標準ライブラリだけの
-#                                        python3 (check-dmg-layout.py) だけを使い、npm・cargo・uv の依存・ビルドした本体を
+#                                        python3 (check-dmg-layout.py) だけを使い、pnpm・cargo・uv の依存・ビルドした本体を
 #                                        実行しない。検証は呼び出し側で行う
 #
-# build と sign を分ける理由: npm・cargo の依存 (postinstall・build.rs 等の第三者のコード) を資格情報がある場所で
+# build と sign を分ける理由: pnpm・cargo の依存 (postinstall・build.rs 等の第三者のコード) を資格情報がある場所で
 # 動かさないため。CI (release.yml) では別 job にし、署名 job は依存を入れずに .app だけを受け取る。
 # 検証 (verify-macos.sh) はビルドした本体を実行するため、CI では資格情報を片付けてから行う。
 #
@@ -40,7 +40,9 @@
 #         ~/.config/mukuchi/notary.env があれば読み込む (未設定の変数だけ上記の変数を設定するファイル)
 set -euo pipefail
 
+# root は apps/desktop。ロゴ・dmg 背景 (assets/brand) はリポジトリ直下にあり desktop と web で共有する
 root="$(cd "$(dirname "$0")/.." && pwd)"
+repo="$(cd "$root/../.." && pwd)"
 cd "$root"
 
 mode=release
@@ -132,7 +134,7 @@ resolve_notary() {
 
 # node_modules が無いと tauri build が分かりにくいエラーで止まるため先に確かめる
 if [ "$mode" != sign-only ] && [ ! -x node_modules/.bin/tauri ]; then
-  die "node_modules/.bin/tauri がない。先に npm ci (CI) か make setup (手元) を実行する"
+  die "node_modules/.bin/tauri がない。先に pnpm install --frozen-lockfile (CI) か make setup (手元) を実行する"
 fi
 
 if [ "$mode" = release ] || [ "$mode" = sign-only ]; then
@@ -154,7 +156,7 @@ if [ "$mode" != sign-only ]; then
   # 署名は下で自前で行う。Tauri が公証を試みないよう (--no-sign で署名ごと飛ばすが念のため) 資格情報を渡さない
   env -u APPLE_CERTIFICATE -u APPLE_CERTIFICATE_PASSWORD -u APPLE_SIGNING_IDENTITY \
       -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID -u APPLE_API_KEY -u APPLE_API_ISSUER -u APPLE_API_KEY_PATH \
-    npm run tauri build -- --target "$TARGET" --bundles app --no-sign
+    pnpm exec tauri build --target "$TARGET" --bundles app --no-sign
 
   [ -d "$APP" ] || die "$APP ができていない"
   # 前回の .dmg は古い .app を含むため消す (make verify が今回の .app と食い違う dmg を検証しないように)
@@ -178,7 +180,7 @@ make_dmg_template() {
   # -cathidpicheck は 2x がちょうど2倍の大きさかも確かめる。dmgbuild にも @2x を探して同じことをする機能があるが、
   # 同じディレクトリの他のファイルを拾わないよう自前でまとめて --no-hidpi で渡す
   bg="$tmp/background.tiff"
-  /usr/bin/tiffutil -cathidpicheck "$root/assets/brand/dmg/background.png" "$root/assets/brand/dmg/background@2x.png" -out "$bg" >/dev/null
+  /usr/bin/tiffutil -cathidpicheck "$repo/assets/brand/dmg/background.png" "$repo/assets/brand/dmg/background@2x.png" -out "$bg" >/dev/null
   rm -rf "$(dirname "$DMG_TEMPLATE")"
   mkdir -p "$(dirname "$DMG_TEMPLATE")"
   # dmgbuild は /usr/bin/hdiutil・SetFile (ボリュームアイコンの属性) を呼ぶ。SetFile は xcrun 経由のため

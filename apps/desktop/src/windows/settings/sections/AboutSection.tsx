@@ -4,8 +4,9 @@ import { AppLogo } from "@/components/app/app-logo";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { commands, runCommand, type AppInfo } from "@/lib/ipc";
-// アプリ本体のライセンス。オフラインで表示できるようバンドルに含める
-import licenseText from "../../../../LICENSE?raw";
+// アプリ本体のライセンス (リポジトリ直下の LICENSE)。オフラインで表示できるようバンドルに含める。
+// dev サーバーは pnpm-workspace.yaml のあるリポジトリ直下を server.fs.allow の既定に含めるため読める
+import licenseText from "../../../../../../LICENSE?raw";
 import { Card } from "./common";
 
 export function AboutSection() {

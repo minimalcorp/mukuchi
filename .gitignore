@@ -1,17 +1,22 @@
-# Node / Vite
+# Node / Vite / React Router (apps/web)
 node_modules
 dist
+.react-router
+apps/web/build
 dist-ssr
 *.local
 *.log
 
 # Rust / Tauri
-src-tauri/target
-src-tauri/gen/schemas
-# 同梱物の取得・展開先 (scripts/prepare-bundle-resources.sh)
-src-tauri/bundle-resources
-src-tauri/bundle-resources.tmp
+apps/desktop/src-tauri/target
+apps/desktop/src-tauri/gen/schemas
+# 同梱物の取得・展開先 (apps/desktop/scripts/prepare-bundle-resources.sh)
+apps/desktop/src-tauri/bundle-resources
+apps/desktop/src-tauri/bundle-resources.tmp
 .build-cache
+
+# SST (web のデプロイ)
+.sst
 
 # Nix / direnv
 result
@@ -42,9 +47,10 @@ __pycache__
 
 # Claude Design handoff (社内デザインシステムを含むため公開しない)
 docs/design/handoff/
+docs/design/lp-handoff/
 
 # Playwright (スクリーンショットは目視確認用で管理しない)
-e2e/screenshots/
+apps/desktop/e2e/screenshots/
 test-results/
 playwright-report/
 

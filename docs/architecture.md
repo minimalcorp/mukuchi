@@ -37,7 +37,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 | ログイン時に起動 | `SMAppService.mainAppService` (macOS 13+) で登録。登録・解除するのは利用者の操作の時だけ: セットアップ完了時 (その時点の launchAtLogin に揃える) と、完了後に設定を切り替えた時。セットアップ完了前の変更は保存のみ。登録後の status が `enabled` でなければ保存せずエラー (承認待ちなら「ログイン項目」を開く案内)。起動時は登録・解除せず、システム設定での変更 (オフ・削除・オン) を設定に取り込む。開発ビルドはセットアップ完了時・起動時の処理をせず、設定画面で切り替えた時だけ登録・解除する | status の意味は SDK の SMAppService.h: 利用者がシステム設定でオフにすると `requiresApproval`、解除済みは `notRegistered`。起動時に status から推測して登録し直すと利用者の選択を上書きするため | tauri-plugin-autostart の macOS 実装は LaunchAgent (plist をアプリ外に置く) か AppleScript (自動化の許可が要る) のみのため使わない |
 | Dock | 通常は非表示(Accessory)。設定・セットアップウィンドウ表示中のみ表示(Regular) | |
 | 再度の起動 | 起動中に Finder・Spotlight・Launchpad から開くと (macOS の Reopen) 設定を開く (セットアップ未完了ならセットアップ)。2つ目のプロセス (実行ファイルの直接起動・`open -n`) は `tauri-plugin-single-instance` で既存プロセスに知らせて終了し、同じく設定を開く | メニューバーのアイコンがノッチに隠れ Dock にも出ないと、設定・終了に辿れないため。LaunchServices 経由の起動は2つ目を立てず Reopen になるが、直接起動は防げない |
-| 配布 | Developer ID署名 + 公証の .dmg。Mac App Storeは対象外 | サンドボックスではCGEventPost不可 |
+| 配布 | Developer ID署名 + 公証の .dmg。Mac App Storeは対象外 | サンドボックスではCGEventPost不可、ダウンロードしたPython実行環境の実行はガイドライン2.5.2違反、非公開API (`_setPreventsActivation`) は審査で却下、アプリ内アンインストール不可のため (2026-09-30 再確認) |
 | 実行環境の導入 | アプリは軽量に保ち、初回セットアップでuv(同梱)がPython・依存・モデルを導入 | |
 | アンインストール | 設定 > ストレージ の「完全にアンインストール」+ `scripts/uninstall.sh`。「実行環境とモデルのみ削除」も提供 | |
 | 開発環境 | Nix flakes devShell + Makefile + process-compose | |

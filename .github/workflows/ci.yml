@@ -4,19 +4,17 @@
 # nix develop はサブディレクトリからでも上位の flake.nix (リポジトリ直下) を見つける。
 # web の job は macOS 固有の道具を使わないため ubuntu で動かす (flake は aarch64-darwin のみ)。
 # Node は flake と同じ 24、pnpm はルート package.json の packageManager の版を使う。
-# main への push でも動かし、成功したら deploy-web.yml (workflow_run) が LP をデプロイする。
+# main への push では動かさない (以前は LP の自動デプロイのために動かしていた。デプロイは release.yml の手動実行のみ。
+# main に入るのは required checks を通った PR と release.yml の版上げコミット (版の行だけ))。
 name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# main への push は取り消さない (取り消された run の変更は deploy-web.yml でデプロイされなくなるため)
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -132,6 +130,9 @@ jobs:
         run: pnpm run typecheck
       - name: build
         run: pnpm run web:build
+      # リリース用の版上げスクリプト (scripts/bump-version.mjs。release.yml が使う)
+      - name: Release scripts (node --test)
+        run: node --test scripts/*.test.mjs
       - name: Playwright (chromium)
         working-directory: apps/web
         run: pnpm exec playwright install --with-deps chromium && pnpm exec playwright test

@@ -1,7 +1,7 @@
 /* eslint-disable-next-line @typescript-eslint/triple-slash-reference -- SST の雛形どおり (型は `sst install` が生成する) */
 /// <reference path="./.sst/platform/config.d.ts" />
 
-// LP (apps/web) を AWS へ公開する。本番のデプロイは .github/workflows/deploy-web.yml (手元からは make web-deploy)。
+// LP (apps/web) を AWS へ公開する。本番のデプロイは .github/workflows/release.yml の手動実行 (target=web。手元からは make web-deploy)。
 export default $config({
   app(input) {
     return {
@@ -24,7 +24,7 @@ export default $config({
     const certArn = process.env.MUKUCHI_WEB_CERT_ARN;
     if (isProduction && !certArn) {
       throw new Error(
-        "MUKUCHI_WEB_CERT_ARN が未設定: production には us-east-1 の ACM 証明書 ARN が必要 (GitHub Environment production の変数)",
+        "MUKUCHI_WEB_CERT_ARN が未設定: production には us-east-1 の ACM 証明書 ARN が必要 (GitHub Environment production-web の変数)",
       );
     }
 

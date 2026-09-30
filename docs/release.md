@@ -67,44 +67,97 @@ notarytool で使えるのは **Team キー** のみ (Individual キーは notar
   ```
   (API キーの変数が1つでもあればプロファイルより優先する)
 
-### 3. GitHub Actions (`.github/workflows/release.yml`) の secret
+### 3. GitHub Actions (`.github/workflows/release.yml`) の secret・変数
 
-Environment `production-release` (Required reviewers で承認制。作成は `.claude/plans/github-setup.md`) の secret に登録する。repo secret にはしない。
+Environment はどちらも Required reviewers (承認制) と deployment branch policy `main` のみ。値は Environment の secret・変数に登録し、repo secret にはしない (承認された job だけが読める)。作成は `.claude/plans/github-setup.md`。
+
+| Environment | 用途 | secret | 変数 |
+|---|---|---|---|
+| `production-desktop` | desktop の署名・公証・公開 | `APPLE_CERTIFICATE` `APPLE_CERTIFICATE_PASSWORD` `APPLE_API_KEY` `APPLE_API_ISSUER` `APPLE_API_KEY_P8` `RELEASE_DEPLOY_KEY` | - |
+| `production-web` | web のデプロイ・版上げの push | `RELEASE_DEPLOY_KEY` | `AWS_DEPLOY_ROLE_ARN` `AWS_REGION` `MUKUCHI_WEB_CERT_ARN` |
+
+- `RELEASE_DEPLOY_KEY`: 書き込み可の Deploy key の秘密鍵 (両 Environment に同じもの)。main の ruleset の bypass に Deploy key を入れ、版上げコミットとタグを push する
+- AWS の OIDC 用 IAM ロールの信頼ポリシーの `sub` は `repo:minimalcorp/mukuchi:environment:production-web` (手順は `.claude/plans/aws-web-deploy-setup.md`)
+
+Apple の secret の登録:
 
 1. キーチェーンアクセス > ログイン > 自分の証明書 で Developer ID Application の項目 (秘密鍵を含む) を書き出して `.p12` にする (パスワードを付ける)
 2. 登録:
    ```sh
    R=minimalcorp/mukuchi
-   base64 -i DeveloperID.p12 | gh secret set APPLE_CERTIFICATE -R $R --env production-release
-   gh secret set APPLE_CERTIFICATE_PASSWORD -R $R --env production-release   # .p12 のパスワード (対話入力)
-   gh secret set APPLE_API_KEY -R $R --env production-release                # キーID
-   gh secret set APPLE_API_ISSUER -R $R --env production-release             # Issuer ID
-   gh secret set APPLE_API_KEY_P8 -R $R --env production-release < ~/.config/mukuchi/AuthKey_XXXX.p8
+   base64 -i DeveloperID.p12 | gh secret set APPLE_CERTIFICATE -R $R --env production-desktop
+   gh secret set APPLE_CERTIFICATE_PASSWORD -R $R --env production-desktop   # .p12 のパスワード (対話入力)
+   gh secret set APPLE_API_KEY -R $R --env production-desktop                # キーID
+   gh secret set APPLE_API_ISSUER -R $R --env production-desktop             # Issuer ID
+   gh secret set APPLE_API_KEY_P8 -R $R --env production-desktop < ~/.config/mukuchi/AuthKey_XXXX.p8
    ```
 3. 書き出した `.p12` は削除する
 
 ## リリース手順
 
-### 手元で作る
+リリース・デプロイは Actions > Release > Run workflow (Branch: **main**) の手動実行だけで行う (main への push では何もデプロイしない)。入力は `target` (`desktop` | `web`) と `bump` (`patch` | `minor` | `major`)。同時に1つだけ動く (`undeploy-web.yml` も同じ group)。
 
-1. `apps/desktop/src-tauri/tauri.conf.json` の `version` を上げる
-2. `make build` (公証の待ち時間を含め数分〜。`make verify` まで自動で行う)
-3. 別のユーザーアカウント (または別の Mac) で .dmg をダウンロード相当 (quarantine 付き) で開き、セットアップから音声入力まで通ることを確認する (実マイクでの確認は人が行う)
+### 版とタグ
 
-### GitHub Actions で作る
+| target | 版を持つファイル (すべて同じ版にそろえる) | タグ |
+|---|---|---|
+| desktop | `apps/desktop/src-tauri/tauri.conf.json` (.app の版の元)、`apps/desktop/src-tauri/Cargo.toml` の `[package]`、`apps/desktop/src-tauri/Cargo.lock` の mukuchi、`apps/desktop/package.json` | `desktop-v<X.Y.Z>` |
+| web | `apps/web/package.json` | `web-v<X.Y.Z>` |
 
-1. `apps/desktop/src-tauri/tauri.conf.json` の `version` (`X.Y.Z` のみ。プレリリースは不可) を上げた変更を main に入れる
-2. Actions > Release > Run workflow (main)
-   - job `Build unsigned .app` (secret なし): version を読んでタグ `v<version>` を決め、同じタグ・Release が既にあれば止める (このトークンでは下書きが見えないため公開済みのみ) → Kyoko の有無を確認 → `pnpm install --frozen-lockfile` → `build-macos.sh --build-only`。.app と .dmg テンプレートを artifact で渡す
-   - job `Sign and notarize (.dmg)`: `production-release` の承認後、下書きを含めて同じタグの Release がないことを再確認 → 証明書を一時キーチェーンに入れて `build-macos.sh --sign-only` → 資格情報を削除 → `verify-macos.sh`
-3. 下書きの Release `v<version>` を確認してから公開する。添付は4つ (中身は同じ .dmg):
+- 版は `X.Y.Z` のみ (プレリリースは Latest にならず LP の固定 URL が指さないため扱わない)。手で上げない。main にある版が「最後に出した版」になる
+- `scripts/bump-version.mjs <desktop|web> <patch|minor|major> [--dry-run]` が版の行だけを書き換える (Node の標準ライブラリのみ。テストは `node --test scripts/*.test.mjs`、`make test` と CI に含む)
+- `scripts/release-commit.sh` がその版上げをコミットする。作者・日時を固定するため、同じ開始コミットからなら別の job で作っても同じコミット ID になる。これで「ビルド・デプロイしたソース = push するコミット」を ID の一致で確かめる (desktop は .app に埋め込むコミットの短縮ハッシュもこのコミット)
+- `scripts/release-push.sh` が版上げコミットと注釈付きタグを main へ `git push --atomic` する。main が run の開始時 (`github.sha`) から進んでいたら **rebase せずに止める** (ビルドしたソースと main・タグがずれないように)。その場合は Release を最初から実行し直す (版は同じ番号がもう一度選ばれる)
+- ビルド・署名・公証・検証・デプロイのどれかが失敗したら、コミット・タグは push されない
+
+### desktop
+
+jobs: `prepare` → `build` → `sign` (承認1) → `publish-desktop` (承認2)
+
+1. `Prepare`: main 以外からの実行を止める → 版上げコミットをローカルで作る → 同じタグ・公開済みの Release があれば止める
+2. `Build unsigned .app` (secret なし): Kyoko の有無を確認 → 同じ版上げコミットを作る (ID を確認) → `pnpm install --frozen-lockfile` → `build-macos.sh --build-only`。.app と .dmg テンプレートを artifact で渡す
+3. `Sign and notarize (.dmg)` (`production-desktop`、承認): .app の版を確認 → 証明書を一時キーチェーンに入れて `build-macos.sh --sign-only` → 資格情報を削除 → `verify-macos.sh` → 添付を用意して artifact `mukuchi-dmg-signed` (7日保存) にする。添付は4つ (中身は同じ .dmg):
    - `mukuchi_<version>_aarch64.dmg` と `.sha256`
    - `mukuchi_aarch64.dmg` と `.sha256` (LP の固定 URL 用)
-4. 公開時に「Set as the latest release」を有効にする。LP は `https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg` を使い、これは公開済み・非プレリリースの Latest の Release の添付を返す ([Linking to releases](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)、[Get the latest release](https://docs.github.com/en/rest/releases/releases#get-the-latest-release): 下書き・プレリリースは Latest にならない)。公開後 `curl -sIL <URL> | grep -i '^location'` で新しいタグを指すことを確かめる
+4. `Publish desktop` (`production-desktop`、承認。Deploy Key で checkout し、第三者のパッケージを入れない):
+   1. sha256 を確認 → 同じ版上げコミットを作る (ID を確認) → main が開始時のままでタグがないことを確認
+   2. 下書きの Release `desktop-v<version>` を作って4つを添付する (下書きはタグを作らない。アップロードの失敗はここで起き、main は変わらない)
+   3. 版上げコミットとタグを push (失敗したら下書きを消して止める。公開されない)
+   4. 下書きを公開して Latest にし、`releases/latest` がこのタグであることを確かめる
 
-同じ version で作り直す場合は、下書きの Release を削除してから再実行する (タグは公開時に作られるため下書きだけならタグは残らない)。
+公開後の確認: LP は `https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg` を使い、これは公開済み・非プレリリースの Latest の Release の添付を返す ([Linking to releases](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)、[Get the latest release](https://docs.github.com/en/rest/releases/releases#get-the-latest-release))。`curl -sIL <URL> | grep -i '^location'` で新しいタグを指すことを確かめる。
 
-#### verify.wav の音声 (Kyoko)
+LP の表示 (`apps/web/app/lib/site.ts` の `VERSION`・`DMG_SIZE`) は自動では変わらない。desktop の公開後に PR で直し (サイズは添付の実測。`gh release view desktop-v<version> --json assets --jq '.assets[]|[.name,.size]|@tsv'`)、main に入れてから web をリリースする。
+
+### web
+
+jobs: `prepare` → `deploy-web` (承認1) → `publish-web` (承認2)
+
+1. `Prepare`: desktop と同じ
+2. `Deploy web` (`production-web`、承認): 同じ版上げコミットを作る (ID を確認) → `pnpm install --frozen-lockfile` → OIDC で AWS のロール → main が開始時のままか確認 → `sst deploy --stage production`
+3. `Publish web` (`production-web`、承認。Deploy Key): 同じ版上げコミットを作る → main が開始時のままでタグ `web-v<version>` がないことを確認 → push。GitHub Release は作らない
+
+残るずれ: `deploy-web` の確認から `publish-web` の push までの間 (2回目の承認待ちを含む) に main が進むと、デプロイは済んだが版上げ・タグは push されない (`publish-web` が止まる)。その時は Release (web) を実行し直す。前回と同じ版番号で、新しい main をデプロイしてタグを付ける (前回のデプロイは記録に残らない)。
+
+### 承認が2回ある理由
+
+Environment の Required reviewers は job ごとに承認を求める。Deploy Key を読む publish の job を、第三者のコード (pnpm・cargo の依存、ビルドした本体、sst) が動いた job と分けている (起動されたプロセスは job の終わりまで残りうるため、同じ job で鍵を読むと盗まれうる)。1回目 (sign / deploy-web) がリリースの判断、2回目 (publish) は結果を見て公開・push する確認。
+
+### 失敗した時
+
+| 失敗した所 | 状態 | 対処 |
+|---|---|---|
+| prepare・build・sign・deploy-web | main・タグ・Release は変わらない (web の deploy 中の失敗はデプロイが途中の可能性あり) | 原因を直して実行し直す |
+| publish-desktop の push まで (main が進んだ等) | main・タグは変わらない。下書きは消す | 実行し直す |
+| publish-desktop の公開 (push 後) | main・タグは push 済み。下書きの Release が残る | 下書き `desktop-v<version>` を確認して手で公開し、Latest にする |
+| publish-web の push (main が進んだ等) | デプロイ済み・main・タグは変わらない | 実行し直す (上の「残るずれ」) |
+
+### 手元で作る (確認用。タグ・Release は作らない)
+
+1. `make build` (公証の待ち時間を含め数分〜。`make verify` まで自動で行う)。版は main のまま (版を変えたい時は `node scripts/bump-version.mjs desktop patch` をコミットせずに使う)
+2. 別のユーザーアカウント (または別の Mac) で .dmg をダウンロード相当 (quarantine 付き) で開き、セットアップから音声入力まで通ることを確認する (実マイクでの確認は人が行う)
+
+### verify.wav の音声 (Kyoko)
 
 `apps/desktop/scripts/make-verify-wav.sh` は `say -v Kyoko` で検証用音声を作る。GitHub の macOS ランナーに Kyoko が入っているかは公式に記載がなく、追加音声が入っていないという報告がある ([actions/runner-images#12320](https://github.com/actions/runner-images/issues/12320)、not planned で閉じられた)。build job は最初に `say -v '?'` で確かめ、無ければ使える音声の一覧を出して止まる。その場合の代わり (選んでから実装する):
 

@@ -13,15 +13,16 @@ on:
 permissions:
   contents: read
 
+# Release (release.yml) と同時に動かさない
 concurrency:
-  group: deploy-web
+  group: release
   cancel-in-progress: false
 
 jobs:
   remove:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: production
+    environment: production-web
     permissions:
       id-token: write # AWS の OIDC 用
       contents: read

@@ -138,8 +138,9 @@ lint: ## 全アプリの lint・型検査 (JS/TS・sst.config.ts・cargo fmt/cli
 	cd $(DESKTOP)/asr-server && uv run --frozen ruff check . && uv run --frozen ruff format --check .
 
 # Playwright のブラウザ (desktop: webkit、web: chromium) は pnpm exec playwright install で入れておく
-test: ## 全アプリのテスト (Playwright・cargo test・pytest)
+test: ## 全アプリのテスト (Playwright・cargo test・pytest・リリース用スクリプト)
 	pnpm run test
+	node --test scripts/*.test.mjs
 	cargo test --manifest-path $(DESKTOP)/src-tauri/Cargo.toml --locked
 	cd $(DESKTOP)/asr-server && uv run --frozen pytest -q
 
@@ -159,7 +160,8 @@ verify: ## 署名・公証の検証 (ad-hoc なら Gatekeeper・公証の項目�
 web-build: ## web の静的ビルド (apps/web/build/client)
 	pnpm run web:build
 
-# 通常は main の CI 成功後に .github/workflows/deploy-web.yml が行う。手元から実行する場合は AWS の認証情報と
+# 本番のデプロイは通常 .github/workflows/release.yml (手動実行、target=web。版上げ・タグ付き) で行う。
+# 手元から実行する場合 (版・タグは変えない) は AWS の認証情報と
 # MUKUCHI_WEB_CERT_ARN (us-east-1 の ACM 証明書 ARN) が必要
 web-deploy: ## web を本番 (mukuchi.minimalcorp.com) へデプロイ (sst deploy --stage production)
 	pnpm run web:deploy

@@ -10,7 +10,7 @@
 | ASRサーバー | `apps/desktop/asr-server` (desktop に同梱する部品。`scripts/` からの相対パスが保てる) |
 | web の技術 | tech (tech.minimalcorp.com) と同じ: React Router v8 の事前生成 (静的サイト) + Vite + Tailwind v4 |
 | 公開 | SST v4 (`sst.aws.Router` + `StaticSite`) で AWS へ。ドメイン `mukuchi.minimalcorp.com`。DNS は別アカウントの Route53 で手動登録、証明書は us-east-1 の ACM を事前発行 (tech と同じ方式) |
-| デプロイ | GitHub Actions。承認制の Environment `production` + OIDC で AWS のロールを引き受ける |
+| デプロイ | GitHub Actions。承認制の Environment `production-web` + OIDC で AWS のロールを引き受ける |
 
 ## ディレクトリ構成
 
@@ -103,14 +103,14 @@ async run() {
 }
 ```
 
-- `.github/workflows/deploy-web.yml`: main の CI 成功後または手動実行 → Environment `production` の承認 → OIDC で AWS ロールを引き受け → `sst deploy --stage production`。`apps/web` か `sst.config.ts` に変更がある時だけ動かす
+- (廃止。現在は `.github/workflows/release.yml` の手動実行 target=web。docs/release.md) `.github/workflows/deploy-web.yml`: main の CI 成功後または手動実行 → Environment `production-web` の承認 → OIDC で AWS ロールを引き受け → `sst deploy --stage production`。`apps/web` か `sst.config.ts` に変更がある時だけ動かす
 - tech の `undeploy.yml` にならい、手動の撤去用ワークフローも用意する
 
 ### あなたの作業が必要なこと (デプロイの前に)
 
 1. ACM (us-east-1) で `mukuchi.minimalcorp.com` の証明書を発行し、DNS 検証のレコードを Route53 (別アカウント) に登録する
 2. デプロイ先の AWS アカウントに、GitHub OIDC 用の IAM ロールを作る (tech の `AWS_DEPLOY_ROLE_ARN` と同じ方式。SST のデプロイ権限)
-3. GitHub の Environment `production` に変数 `AWS_DEPLOY_ROLE_ARN`・`AWS_REGION`・`MUKUCHI_WEB_CERT_ARN` を登録する
+3. GitHub の Environment `production-web` に変数 `AWS_DEPLOY_ROLE_ARN`・`AWS_REGION`・`MUKUCHI_WEB_CERT_ARN` を登録する
 4. 初回デプロイ後、表示される CloudFront のドメインへの CNAME/ALIAS を Route53 に登録する
 
 手元での hello world の確認 (`make up` で web が表示される、`make web-build` が通る) までは、これらがなくても進められる。

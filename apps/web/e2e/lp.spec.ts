@@ -85,7 +85,19 @@ const DEMO_CYCLE_MS = DEMO_SCRIPT.reduce((sum, st) => sum + st.ms, 0);
 async function expectStableDemo(page: Page) {
   await page.clock.install();
   await page.goto("/");
-  await page.evaluate(() => document.fonts.ready);
+  // 開発サーバーでは、ハイドレーション後に React Router が開発時だけの critical CSS を外す。
+  // その時に @font-face が読み直されて一時的に代替フォントで描画され、後続の位置がずれる。
+  // 時計を止めているので外れるまで進め、フォントを読み終えてから計測する (本番の出力には無い)
+  const criticalCss = page.locator("[data-react-router-critical-css]");
+  for (let i = 0; i < 100 && (await criticalCss.count()) > 0; i++) {
+    await page.clock.runFor(100);
+  }
+  await expect(criticalCss).toHaveCount(0);
+  await page.evaluate(() => {
+    // レイアウトを確定させて、外れた後に必要になったフォントの読み込みを始めさせる
+    void document.body.offsetHeight;
+    return document.fonts.ready;
+  });
   const demo = page.getByTestId("demo");
   await expect(demo).toBeVisible();
 

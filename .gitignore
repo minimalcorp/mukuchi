@@ -39,8 +39,6 @@ __pycache__
 
 # 録音データ
 *.wav
-# 初回セットアップの検証用音声 (合成音声。scripts/make-verify-wav.sh で作成)
-!src-tauri/resources/verify.wav
 
 # Claude Design handoff (社内デザインシステムを含むため公開しない)
 docs/design/handoff/

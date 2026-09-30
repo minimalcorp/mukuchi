@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# 初回セットアップの verify で使う検証用音声 (src-tauri/resources/verify.wav) を作り直す。
-# 生成物はリポジトリに入れる (macOS の音声は環境で差があり、ビルドごとに作ると内容が変わりうるため)。
+# 初回セットアップの verify で使う検証用音声 (「確認します。」の合成音声、16kHz/mono/s16) を作る。
+# 使い方: make-verify-wav.sh <出力先.wav> [文章]
+# 生成物はリポジトリに入れない。scripts/prepare-bundle-resources.sh が .build-cache/ に一度だけ作り
+# (以後は使い回し。作り直すたびに内容が変わって dev の再ビルドが走らないように)、bundle-resources/ にコピーする。
 # 合成音声のみで、人の録音は含まない。
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/.." && pwd)"
-out="$root/src-tauri/resources/verify.wav"
-text="${1:-確認します。}"
+out="${1:?出力先の .wav を指定してください}"
+text="${2:-確認します。}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 

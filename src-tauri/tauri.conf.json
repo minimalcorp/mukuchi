@@ -31,7 +31,7 @@
       "../THIRD_PARTY_NOTICES": "THIRD_PARTY_NOTICES",
       "resources/silero/LICENSE": "licenses/silero-vad-LICENSE",
       "bundle-resources/asr-server": "asr-server",
-      "resources/verify.wav": "verify.wav"
+      "bundle-resources/verify.wav": "verify.wav"
     },
     "macOS": {
       "minimumSystemVersion": "13.0",

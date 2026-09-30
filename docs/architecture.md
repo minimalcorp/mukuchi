@@ -33,7 +33,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 | 入力しないアプリ | 登録したアプリが前面にある間は入力しない(パネルに「このアプリには入力しません」) | デザインの任意提案Aを採用 |
 | メニューバー | macOS標準のメニュー(NSMenu)。状態・エラーは文字の行、復旧はメニュー項目で表す。アイコンは状態別のテンプレート画像(エラー時のみ赤点付きの非テンプレート画像) | デザインの進捗バー・色付き表示は標準メニューで再現できないため |
 | 常時表示パネル | フォーカスを奪わないパネル(NSPanel, non-activating。`tauri-nspanel`)。既定は画面下中央(Dockの上16px)、ドラッグで移動し位置を記憶。前面ウィンドウのあるディスプレイに表示。ピルはディスプレイの visibleFrame (Dock・メニューバーを除く) に収める。記憶するのは利用者のドラッグだけ(ディスプレイの取り外し等でシステムが動かした位置は記憶しない) | |
-| ログイン時に起動 | `SMAppService.mainAppService` (macOS 13+) で登録。本番ビルドは起動時・セットアップ完了時に設定へ揃える(システム設定で利用者がオフにした場合は設定をオフに合わせる)。開発ビルドは設定画面で明示的に切り替えた時だけ登録・解除する | tauri-plugin-autostart の macOS 実装は LaunchAgent (plist をアプリ外に置く) か AppleScript (自動化の許可が要る) のみのため使わない |
+| ログイン時に起動 | `SMAppService.mainAppService` (macOS 13+) で登録。登録・解除するのは利用者の操作の時だけ: セットアップ完了時 (その時点の launchAtLogin に揃える) と、完了後に設定を切り替えた時。セットアップ完了前の変更は保存のみ。登録後の status が `enabled` でなければ保存せずエラー (承認待ちなら「ログイン項目」を開く案内)。起動時は登録・解除せず、システム設定での変更 (オフ・削除・オン) を設定に取り込む。開発ビルドはセットアップ完了時・起動時の処理をせず、設定画面で切り替えた時だけ登録・解除する | status の意味は SDK の SMAppService.h: 利用者がシステム設定でオフにすると `requiresApproval`、解除済みは `notRegistered`。起動時に status から推測して登録し直すと利用者の選択を上書きするため | tauri-plugin-autostart の macOS 実装は LaunchAgent (plist をアプリ外に置く) か AppleScript (自動化の許可が要る) のみのため使わない |
 | Dock | 通常は非表示(Accessory)。設定・セットアップウィンドウ表示中のみ表示(Regular) | |
 | 配布 | Developer ID署名 + 公証の .dmg。Mac App Storeは対象外 | サンドボックスではCGEventPost不可 |
 | 実行環境の導入 | アプリは軽量に保ち、初回セットアップでuv(同梱)がPython・依存・モデルを導入 | |
@@ -113,7 +113,7 @@ type UtteranceResult =
   | { kind: "failed"; id: number; text: string; error: AppError };
 
 type Settings = {
-  launchAtLogin: boolean;                 // 既定 true。変更時に SMAppService で登録・解除し、失敗したら保存せずエラー (開発ビルドの挙動は「決定事項」)
+  launchAtLogin: boolean;                 // 既定 true。セットアップ完了前は保存のみで complete_setup で反映。完了後の変更は SMAppService で登録・解除し、有効にならなければ保存せずエラー。起動時にシステム設定での変更を取り込む (「決定事項」)
   inputDeviceId: string | null;           // null=システム既定。選択したマイクがつながっていない間は設定を残したままシステム既定で録音し、つながったら戻す
   vadSensitivity: number;                 // 0..100 既定 60
   silenceMs: number;                      // 300..3000 既定 1300 (話の途中の間で分割しないため長め)
@@ -158,7 +158,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `list_input_devices` | → `AudioDevice[]` | マイク選択 |
 | `get_permissions` | → `Permissions` | 権限表示(setupでは1秒ごとに再取得) |
 | `request_microphone` | → `Permissions` | マイク許可ダイアログを出す |
-| `open_system_settings` | `{ pane: "microphone" \| "accessibility" }` → `()` | システム設定を開く |
+| `open_system_settings` | `{ pane: "microphone" \| "accessibility" \| "login_items" }` → `()` | システム設定を開く。`login_items` はログイン項目 (`SMAppService.openSystemSettingsLoginItems`。launchAtLogin を ON にできなかった時の案内用) |
 | `restart_asr` | → `()` | エラーからの復旧 |
 | `get_provisioning_status` | → `ProvisioningStatus` | |
 | `start_provisioning` / `pause_provisioning` | → `()` | ダウンロード開始・再開 / 一時停止 |
@@ -171,7 +171,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `get_app_info` | → `AppInfo` | |
 | `open_settings` | `{ category?: SettingsCategory }` → `()` | 設定ウィンドウを開く(開いていれば前面に出し `settings-navigate` を送る)。エラー復旧から該当カテゴリを開く |
 | `set_panel_size` | `{ width: number; height: number }` → `()` | panelの描画内容(影の余白込み)の大きさ。Rustはpanelウィンドウをこの大きさにし、下端中央を基準位置に保つ(透明部分がクリックを奪わないようにするため) |
-| `complete_setup` | → `()` | セットアップ完了(setupウィンドウを閉じる) |
+| `complete_setup` | → `()` | セットアップ完了。launchAtLogin をログイン項目に反映し (本番ビルドのみ。登録できなければ launchAtLogin を false にして完了する)、setupウィンドウを閉じる |
 | `open_setup` | → `()` | セットアップウィンドウを開く(エラー `start_setup` の復旧・実行環境の再導入) |
 
 #### events (Rust → 全ウィンドウ)

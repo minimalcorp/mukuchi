@@ -4,7 +4,7 @@
 //! トップレベルのキー単位の部分更新 (`Partial<Settings>`) で受ける。
 
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -193,6 +193,9 @@ impl Settings {
 pub struct SettingsStore {
     path: PathBuf,
     current: RwLock<Settings>,
+    /// 更新同士を直列にする。外部への反映 (ログイン項目の登録等) の間も読み出しを止めないよう、
+    /// `current` の書き込みロックとは分ける
+    writer: Mutex<()>,
 }
 
 impl SettingsStore {
@@ -219,6 +222,7 @@ impl SettingsStore {
         Self {
             path,
             current: RwLock::new(settings),
+            writer: Mutex::new(()),
         }
     }
 
@@ -231,13 +235,30 @@ impl SettingsStore {
 
     /// 部分更新して保存する。保存に失敗した場合はメモリ上の値も更新しない。
     pub fn update(&self, patch: &serde_json::Value) -> Result<Settings> {
-        let mut guard = match self.current.write() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        let next = guard.apply_patch(patch)?;
-        write_atomic(&self.path, &next)?;
-        *guard = next.clone();
+        self.update_with(patch, |_, _| Ok(()), |_| {})
+    }
+
+    /// 部分更新を 検証 → `apply` (アプリ外への反映) → 保存 の順に行う。
+    /// 検証に失敗したら `apply` を呼ばず、`apply` が失敗したら保存しない。
+    /// 保存に失敗したら `apply` の戻り値を `rollback` に渡して反映を取り消させる。
+    pub fn update_with<R>(
+        &self,
+        patch: &serde_json::Value,
+        apply: impl FnOnce(&Settings, &Settings) -> Result<R>,
+        rollback: impl FnOnce(R),
+    ) -> Result<Settings> {
+        let _writer = self.writer.lock().unwrap_or_else(|p| p.into_inner());
+        let before = self.get();
+        let next = before.apply_patch(patch)?;
+        let applied = apply(&before, &next)?;
+        if let Err(e) = write_atomic(&self.path, &next) {
+            rollback(applied);
+            return Err(e);
+        }
+        match self.current.write() {
+            Ok(mut g) => *g = next.clone(),
+            Err(p) => *p.into_inner() = next.clone(),
+        }
         Ok(next)
     }
 }
@@ -334,6 +355,54 @@ mod tests {
         let broken = SettingsStore::load(path.clone());
         assert_eq!(broken.get(), Settings::default());
         assert!(path.with_extension("json.broken").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_with_validates_before_apply_and_rolls_back_on_save_failure() {
+        let dir = std::env::temp_dir().join(format!(
+            "mukuchi-settings-test-rollback-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SettingsStore::load(dir.join("settings.json"));
+
+        // 検証エラーなら反映しない
+        let mut applied = false;
+        let r = store.update_with(
+            &json!({ "nope": 1 }),
+            |_, _| {
+                applied = true;
+                Ok(())
+            },
+            |_| {},
+        );
+        assert!(r.is_err());
+        assert!(!applied);
+
+        // 反映に失敗したら保存しない
+        let r = store.update_with(
+            &json!({ "launchAtLogin": false }),
+            |_, _| anyhow::bail!("登録できない"),
+            |_: ()| {},
+        );
+        assert!(r.is_err());
+        assert!(store.get().launch_at_login);
+
+        // 保存に失敗したら取り消す (保存先にディレクトリを置いて rename を失敗させる)
+        let blocked = dir.join("blocked");
+        std::fs::create_dir_all(blocked.join("settings.json").join("x")).unwrap();
+        let store = SettingsStore::load(blocked.join("settings.json"));
+        let mut rolled_back = None;
+        let r = store.update_with(
+            &json!({ "launchAtLogin": false }),
+            |before, next| Ok((before.launch_at_login, next.launch_at_login)),
+            |v| rolled_back = Some(v),
+        );
+        assert!(r.is_err());
+        assert_eq!(rolled_back, Some((true, false)));
+        assert!(store.get().launch_at_login);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -163,11 +163,7 @@ pub fn open_setup(app: AppHandle) -> CmdResult<()> {
 
 #[tauri::command]
 pub fn complete_setup(app: AppHandle, core: State<'_, Arc<Core>>) -> CmdResult<()> {
-    core.inner()
-        .update_settings(&serde_json::json!({ "setupCompleted": true }))
-        .map_err(err)?;
-    // セットアップ完了時点の「ログイン時に起動」を反映する (本番ビルドのみ)
-    crate::apply_launch_at_login(core.inner());
+    core.inner().complete_setup().map_err(err)?;
     windows::close_setup(&app).map_err(err)
 }
 

@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
 
-use crate::asr::{self, AsrClient, HttpAsrClient};
+use crate::asr::{self, AsrClient, HttpAsrClient, Transcript};
 use crate::audio::{self, Source};
 use crate::insert::{InsertConfig, InsertQueue, Job, UtteranceResult};
 use crate::macos::{self, MicAuthorization};
@@ -99,6 +99,8 @@ impl PartialCost {
         Self::BASE_MS + self.ms_per_sec * secs
     }
 
+    /// 実測を取り込む。`elapsed_ms` はサーバーの処理時間 (`elapsed_ms`)。往復時間を使うと、
+    /// 取り消した途中表示 (応答を待たない) を学習できず、HTTP の揺らぎも混ざるため
     pub fn observe(&mut self, secs: f64, elapsed_ms: f64) {
         let per_sec = (elapsed_ms - Self::BASE_MS).max(0.0) / secs.max(0.5);
         self.ms_per_sec = self.ms_per_sec * 0.7 + per_sec * 0.3;
@@ -123,7 +125,6 @@ impl Default for PartialCost {
 struct PartialState {
     /// 処理中の途中表示の要求 (発話 id)。同時に1つまで
     in_flight: Option<u64>,
-    task: Option<tauri::async_runtime::JoinHandle<()>>,
     /// この id 以下の発話は確定処理に入ったか破棄された (遅れて届いた途中表示を出さない)
     closed_upto: u64,
     /// 直前の途中表示 (stableLength の計算用)
@@ -488,17 +489,34 @@ impl Core {
     /// - voiceCommandsEnabled / voiceCommands / excludedApps: 入力キューが発話ごとに読む
     /// - vocabulary: 途中表示・確定のリクエストごとに読む
     /// - panelPosition: パネルを動かす (ここ)
-    /// - launchAtLogin: ログイン項目を登録・解除する (ここ。失敗したら保存しない)
-    /// - setupCompleted: 起動時にセットアップを出すかの判定だけに使う
+    /// - launchAtLogin: ログイン項目を登録・解除する (ここ。`login_item_change`)。登録・解除できなければ保存しない。
+    ///   セットアップ完了前は値を保存するだけで、セットアップ完了時に反映する
+    /// - setupCompleted: 起動時にセットアップを出すかの判定と、ログイン項目の反映の時期に使う
+    ///
+    /// 順序は 検証 → ログイン項目 → 保存。保存に失敗したらログイン項目を元に戻す。
     pub fn update_settings(self: &Arc<Self>, patch: &serde_json::Value) -> Result<Settings> {
         let before = self.settings.get();
-        if let Some(want) = patch.get("launchAtLogin").and_then(|v| v.as_bool()) {
-            if want != before.launch_at_login {
-                // 利用者の明示的な操作。開発ビルドでも登録する (autostart.rs)
-                crate::autostart::set_enabled(want)?;
-            }
-        }
-        let next = self.settings.update(patch)?;
+        let next = self.settings.update_with(
+            patch,
+            |before, next| {
+                let Some(target) = login_item_change(before, next, cfg!(debug_assertions)) else {
+                    return Ok(None);
+                };
+                let was_enabled = crate::autostart::status() == crate::autostart::Status::Enabled;
+                crate::autostart::set_enabled(target)?;
+                Ok(Some((target, was_enabled)))
+            },
+            |applied| {
+                if let Some((target, was_enabled)) = applied {
+                    if target != was_enabled {
+                        log::warn!("設定を保存できないため、ログイン項目を元に戻す");
+                        if let Err(e) = crate::autostart::set_enabled(was_enabled) {
+                            log::warn!("ログイン項目を元に戻せません: {e:#}");
+                        }
+                    }
+                }
+            },
+        )?;
         let _ = self.app.emit(events::SETTINGS_CHANGED, &next);
         if before.panel_position != next.panel_position {
             crate::windows::on_settings_panel_position(&self.app, next.panel_position.clone());
@@ -508,6 +526,24 @@ impl Core {
             tauri::async_runtime::spawn(async move { core.restart_capture().await });
         }
         Ok(next)
+    }
+
+    /// セットアップ完了。ここで初めて「ログイン時に起動」を反映する (`login_item_change`)。
+    /// ログイン項目を登録できなくてもセットアップは完了させ、その場合は設定を OFF にする
+    /// (利用者は後で設定画面から ON にし直せる。失敗の理由はそこで表示される)。
+    pub fn complete_setup(self: &Arc<Self>) -> Result<()> {
+        match self.update_settings(&serde_json::json!({ "setupCompleted": true })) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                log::warn!("セットアップ完了時にログイン項目を反映できません: {e:#}");
+                // ログイン項目には触れず設定だけ保存する
+                let next = self.settings.update(
+                    &serde_json::json!({ "setupCompleted": true, "launchAtLogin": false }),
+                )?;
+                let _ = self.app.emit(events::SETTINGS_CHANGED, &next);
+                Ok(())
+            }
+        }
     }
 
     /// 録音の取り込み元がマイクか (開発用の WAV 入力でないか)
@@ -569,7 +605,8 @@ impl Core {
         p.in_flight = Some(id);
         let context = asr::vocabulary_context(&self.settings.get().vocabulary);
         let core = self.clone();
-        let task = tauri::async_runtime::spawn(async move {
+        // 取り消しても応答までは待つ (推論時間を学習するため。close_partial)
+        tauri::async_runtime::spawn(async move {
             let started = Instant::now();
             let secs = samples.len() as f64 / crate::vad::SAMPLE_RATE as f64;
             let result = async {
@@ -579,31 +616,34 @@ impl Core {
             .await;
             core.partial_done(id, result, secs, started);
         });
-        p.task = Some(task);
     }
 
-    fn partial_done(&self, id: u64, result: Result<String>, secs: f64, started: Instant) {
+    fn partial_done(&self, id: u64, result: Result<Transcript>, secs: f64, started: Instant) {
         let mut p = lock(&self.partial);
         if p.in_flight == Some(id) {
             p.in_flight = None;
-            p.task = None;
         }
+        let text = match result {
+            Ok(t) => {
+                // 取り消した (確定処理に入った) 発話の分も推論時間は実測として使う
+                let ms = t
+                    .server_ms
+                    .map_or_else(|| started.elapsed().as_secs_f64() * 1000.0, |ms| ms as f64);
+                p.cost.observe(secs, ms);
+                t.text
+            }
+            Err(e) => {
+                // 暫定値のため失敗は無視する (確定処理に任せる)
+                if id > p.closed_upto {
+                    log::warn!("発話 {id} の途中表示に失敗: {e:#}");
+                }
+                return;
+            }
+        };
         // 確定処理に入った発話には反映しない (表示の巻き戻り防止)
         if id <= p.closed_upto {
             return;
         }
-        let text = match result {
-            Ok(t) => {
-                p.cost
-                    .observe(secs, started.elapsed().as_secs_f64() * 1000.0);
-                t
-            }
-            Err(e) => {
-                // 暫定値のため失敗は無視する (確定処理に任せる)
-                log::warn!("発話 {id} の途中表示に失敗: {e:#}");
-                return;
-            }
-        };
         if text.trim().is_empty() {
             return;
         }
@@ -632,21 +672,19 @@ impl Core {
         drop(p);
     }
 
-    /// 発話が確定処理に入った・破棄された。処理中の途中表示の応答待ちをやめる (結果は捨てる)。
-    /// 取り消したかを返す。
+    /// 発話が確定処理に入った・破棄された。以後その発話の途中表示は出さず、次の途中表示を送れるようにする。
+    /// 処理中の途中表示を取り消したかを返す。
     ///
     /// 注意: 応答待ちをやめても ASR サーバー側の推論は止まらない (推論は直列のため、確定はその推論の
     /// 終了を待つ)。影響を抑えるため、途中表示は話し終わりの判定までに終わる見込みの時だけ送り
-    /// (`PartialCost`)、長い発話 (`PARTIAL_MAX_SAMPLES` 以上) では送らない
+    /// (`PartialCost`)、長い発話 (`PARTIAL_MAX_SAMPLES` 以上) では送らない。
+    /// 取り消した要求も応答は受け取り、推論時間の学習に使う (結果の表示は捨てる。`partial_done`)
     fn close_partial(&self, id: u64) -> bool {
         let mut p = lock(&self.partial);
         p.closed_upto = p.closed_upto.max(id);
         p.prev = None;
         if p.in_flight.is_some_and(|i| i <= id) {
             p.in_flight = None;
-            if let Some(t) = p.task.take() {
-                t.abort();
-            }
             return true;
         }
         false
@@ -680,7 +718,7 @@ impl Core {
             let result = async {
                 let client = client.ok_or_else(|| anyhow!("ASRサーバーに接続していません"))?;
                 let wav = audio::encode_wav_16k(&samples)?;
-                client.transcribe(wav, context).await
+                client.transcribe(wav, context).await.map(|t| t.text)
             }
             .await;
             core.finals_in_flight.fetch_sub(1, Ordering::SeqCst);
@@ -692,6 +730,24 @@ impl Core {
             let _ = tx.send(result);
         });
     }
+}
+
+/// 設定の変更でログイン項目をどうするか (登録なら `Some(true)`、解除なら `Some(false)`)。
+/// - セットアップ完了前は何もしない (導入途中のアプリを登録しない。値は保存だけする)
+/// - セットアップ完了時: その時点の launchAtLogin に揃える (前のインストールの登録が残っていても
+///   セットアップでの選択を優先する)。開発ビルドでは行わない (開発中のバイナリを黙って登録しないため)
+/// - 完了後に launchAtLogin が切り替わった時: 利用者の明示的な操作なので開発ビルドでも行う
+pub fn login_item_change(before: &Settings, next: &Settings, dev_build: bool) -> Option<bool> {
+    if !next.setup_completed {
+        return None;
+    }
+    if before.launch_at_login != next.launch_at_login {
+        return Some(next.launch_at_login);
+    }
+    if !before.setup_completed && !dev_build {
+        return Some(next.launch_at_login);
+    }
+    None
 }
 
 /// 2つの文字列の先頭から一致する長さ。フロントエンドが `String.prototype.slice` で分けるため
@@ -850,6 +906,51 @@ mod tests {
         }
         assert!((c.estimate_ms(10.0) - 2150.0).abs() < 20.0);
         assert!(!c.fits(10.0, 1300));
+    }
+
+    #[test]
+    fn login_item_applied_only_after_setup() {
+        let s = |setup_completed, launch_at_login| Settings {
+            setup_completed,
+            launch_at_login,
+            ..Settings::default()
+        };
+        // セットアップ完了前は保存だけ
+        assert_eq!(
+            login_item_change(&s(false, true), &s(false, false), false),
+            None
+        );
+        assert_eq!(
+            login_item_change(&s(false, false), &s(false, true), true),
+            None
+        );
+        // セットアップ完了時に反映 (本番のみ)
+        assert_eq!(
+            login_item_change(&s(false, true), &s(true, true), false),
+            Some(true)
+        );
+        assert_eq!(
+            login_item_change(&s(false, false), &s(true, false), false),
+            Some(false)
+        );
+        assert_eq!(
+            login_item_change(&s(false, true), &s(true, true), true),
+            None
+        );
+        // 完了後の切り替えは開発ビルドでも反映
+        assert_eq!(
+            login_item_change(&s(true, true), &s(true, false), true),
+            Some(false)
+        );
+        assert_eq!(
+            login_item_change(&s(true, false), &s(true, true), false),
+            Some(true)
+        );
+        // 変更なし
+        assert_eq!(
+            login_item_change(&s(true, true), &s(true, true), false),
+            None
+        );
     }
 
     #[test]

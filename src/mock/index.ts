@@ -49,8 +49,9 @@ export function installMock(params: URLSearchParams) {
   let levelTimer: ReturnType<typeof setInterval> | null = null;
   let provisioningTimer: ReturnType<typeof setInterval> | null = null;
 
-  const setStatus = (patch: Partial<AppStatus>) => {
-    db.status = { ...db.status, ...patch };
+  // Rust と同じく状態を変えるたびに seq を増やす
+  const setStatus = (patch: Partial<Omit<AppStatus, "seq">>) => {
+    db.status = { ...db.status, ...patch, seq: db.status.seq + 1 };
     fire("status-changed", db.status);
   };
 
@@ -155,6 +156,7 @@ export function installMock(params: URLSearchParams) {
           // システム設定で許可した想定。1.5 秒後に許可済みにする (setup の 1 秒ごとの再取得で反映される)
           setTimeout(() => {
             const pane = a.pane as string;
+            if (pane === "login_items") return;
             db.permissions =
               pane === "accessibility"
                 ? { ...db.permissions, accessibility: true }
@@ -234,7 +236,7 @@ export type MockApi = {
   fail: Record<string, string>;
   /** Tauri の invoke (他ウィンドウからの command 呼び出しを再現する) */
   invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
-  setStatus: (patch: Partial<AppStatus>) => void;
+  setStatus: (patch: Partial<Omit<AppStatus, "seq">>) => void;
   fire: typeof fire;
   started: (id: number) => void;
   partial: (u: Utterance) => void;

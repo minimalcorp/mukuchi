@@ -2,7 +2,7 @@
  * モックのシナリオ。URL の ?window=<panel|settings|setup>&mock=<名前> で選ぶ。
  * setup は &step=<1-5>、settings は &category=<カテゴリ> も併用できる。
  */
-import type { AppError } from "@/lib/ipc";
+import type { AppError, AppStatus } from "@/lib/ipc";
 import type { MockApi } from "./index";
 import { GB, provisioning, type MockDb } from "./data";
 
@@ -33,8 +33,13 @@ const P4_COMMANDS = [
 const TEXT = "明日の打ち合わせは十時からに変更してください。";
 const THRESHOLD = 0.55;
 
+/** シナリオの初期状態。Rust と同じく状態を変えるたびに seq を増やす */
+const setStatus = (db: MockDb, s: Omit<AppStatus, "seq">) => {
+  db.status = { ...s, seq: db.status.seq + 1 };
+};
+
 const listening = (db: MockDb, level = 0.18) => {
-  db.status = { phase: "listening", loadingProgress: null, error: null };
+  setStatus(db, { phase: "listening", loadingProgress: null, error: null });
   db.level = { level, threshold: THRESHOLD, speech: level >= THRESHOLD };
 };
 
@@ -54,7 +59,7 @@ const errorScenario = (key: string): Scenario => ({
   name: `error-${key}`,
   description: `エラー: ${ERRORS[key].code}`,
   setup: (db) => {
-    db.status = { phase: "error", loadingProgress: null, error: ERRORS[key] };
+    setStatus(db, { phase: "error", loadingProgress: null, error: ERRORS[key] });
   },
 });
 
@@ -105,7 +110,7 @@ const PANEL: Scenario[] = [
     description: "操作できるデモ。「音声入力をオン」を押すと発話を流す",
     live: true,
     setup: (db) => {
-      db.status = { phase: "off", loadingProgress: null, error: null };
+      setStatus(db, { phase: "off", loadingProgress: null, error: null });
       db.levelStream = true;
       db.level = { level: 0.14, threshold: THRESHOLD, speech: false };
       db.onListen = liveLoop;
@@ -116,14 +121,14 @@ const PANEL: Scenario[] = [
     name: "loading",
     description: "モデル読み込み中 64%",
     setup: (db) => {
-      db.status = { phase: "loading", loadingProgress: 0.64, error: null };
+      setStatus(db, { phase: "loading", loadingProgress: 0.64, error: null });
     },
   },
   {
     name: "loading-indeterminate",
     description: "モデル読み込み中 (進捗不明)",
     setup: (db) => {
-      db.status = { phase: "loading", loadingProgress: null, error: null };
+      setStatus(db, { phase: "loading", loadingProgress: null, error: null });
     },
   },
   { name: "idle", description: "オン・待機中 (しきい値未満)", setup: (db) => listening(db) },
@@ -348,14 +353,14 @@ const SETTINGS: Scenario[] = [
     name: "loading",
     description: "モデル読み込み中",
     setup: (db) => {
-      db.status = { phase: "loading", loadingProgress: 0.64, error: null };
+      setStatus(db, { phase: "loading", loadingProgress: 0.64, error: null });
     },
   },
   {
     name: "asr-stopped",
     description: "文字起こしサーバー停止",
     setup: (db) => {
-      db.status = { phase: "error", loadingProgress: null, error: ERRORS.asr };
+      setStatus(db, { phase: "error", loadingProgress: null, error: ERRORS.asr });
     },
   },
   {
@@ -363,14 +368,14 @@ const SETTINGS: Scenario[] = [
     description: "P4 の command と restart_asr が未実装 (ASR 停止中)",
     unimplemented: [...P4_COMMANDS, "restart_asr"],
     setup: (db) => {
-      db.status = { phase: "error", loadingProgress: null, error: ERRORS.asr };
+      setStatus(db, { phase: "error", loadingProgress: null, error: ERRORS.asr });
     },
   },
   {
     name: "runtime-missing",
     description: "実行環境とモデルなし",
     setup: (db) => {
-      db.status = { phase: "error", loadingProgress: null, error: ERRORS.runtime };
+      setStatus(db, { phase: "error", loadingProgress: null, error: ERRORS.runtime });
       db.provisioning = provisioning("idle");
     },
   },

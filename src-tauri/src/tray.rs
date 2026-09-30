@@ -162,7 +162,7 @@ pub fn setup(app: &AppHandle, core: &Arc<Core>) -> Result<()> {
     Ok(())
 }
 
-/// メニューバーの外観 (明暗) の変化を反映する。見回り (1秒ごと) から呼ぶ。
+/// メニューバーの外観 (明暗) の変化を反映する。エラー表示中だけ見回り (1秒ごと) から呼ぶ。
 /// 変更通知 (KVO) を使わずポーリングにするのは、エラー表示中にしか影響せず、確認も軽いため
 pub fn refresh_appearance(app: &AppHandle) {
     if let Some(state) = app.try_state::<Arc<TrayState>>() {

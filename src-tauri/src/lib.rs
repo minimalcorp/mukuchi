@@ -109,11 +109,12 @@ pub fn run() {
     });
 }
 
-/// 起動時にログイン項目を設定に揃える (本番ビルドのみ。autostart.rs)。
-pub(crate) fn apply_launch_at_login(core: &Arc<Core>) {
+/// 起動時に、システム設定でのログイン項目の変更を設定に取り込む (本番ビルドのみ。autostart.rs)。
+/// 起動時には登録・解除をしない。
+fn apply_launch_at_login(core: &Arc<Core>) {
     let s = core.settings.get();
     if let Some(actual) = autostart::reconcile(s.launch_at_login, s.setup_completed) {
-        log::info!("ログイン項目がシステム設定でオフにされているため設定を合わせる");
+        log::info!("ログイン項目がシステム設定で変更されているため設定を合わせる: {actual}");
         // 登録・解除はせず設定だけ揃える (update_settings は登録操作を伴うため使わない)
         match core
             .settings
@@ -149,7 +150,11 @@ fn spawn_watcher(core: Arc<Core>) {
                 last = now;
             }
             windows::refresh_panel_position(core.app());
-            tray::refresh_appearance(core.app());
+            // 外観 (ライト/ダーク) で変わるのはエラー時の非テンプレート画像だけ
+            // (テンプレート画像はシステムが色を合わせる)。エラー中だけ見直す
+            if core.state.status().phase == state::Phase::Error {
+                tray::refresh_appearance(core.app());
+            }
         }
     });
 }

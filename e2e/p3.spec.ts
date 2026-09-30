@@ -80,12 +80,63 @@ test("settings: 保存に失敗したら値を戻し、操作の近くにエラ�
   await mock(page, `api.fail.update_settings = "ログイン項目を登録できませんでした";`);
   const sw = page.getByRole("switch", { name: "ログイン時に起動" });
   await sw.click();
-  await expect(page.getByRole("alert")).toHaveText("ログイン項目を登録できませんでした");
+  await expect(page.getByRole("alert")).toContainText("ログイン項目を登録できませんでした");
   await expect(sw).toBeChecked();
   // 次に成功したらエラーを消す
   await mock(page, `delete api.fail.update_settings;`);
   await sw.click();
   await expect(sw).not.toBeChecked();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+const APPROVAL_ERROR =
+  "ログイン時に起動するには承認が必要です。システム設定 > 一般 > ログイン項目 で mukuchi をオンにしてください";
+
+test("settings: ログイン時に起動をオンにできなければエラーとログイン項目を開くボタンを出す", async ({ page }) => {
+  await open(page, "window=settings&mock=default&category=general", SETTINGS);
+  const sw = page.getByRole("switch", { name: "ログイン時に起動" });
+  // オフにしてからオンで失敗させる (承認待ち)
+  await sw.click();
+  await expect(sw).not.toBeChecked();
+  await mock(page, `api.fail.update_settings = ${JSON.stringify(APPROVAL_ERROR)};`);
+  await sw.click();
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText(APPROVAL_ERROR);
+  await expect(sw).not.toBeChecked();
+  await page.screenshot({ path: "e2e/screenshots/settings-launch-at-login-error.png" });
+  await alert.getByRole("button", { name: "システム設定を開く" }).click();
+  await expect.poll(async () => (await calls(page, "open_system_settings")).map((c) => c.args)).toEqual([
+    { pane: "login_items" },
+  ]);
+});
+
+test("settings: update_settings が未実装ならログイン項目を開くボタンを出さない", async ({ page }) => {
+  await open(page, "window=settings&mock=default&category=general&unimplemented=update_settings", SETTINGS);
+  await page.getByRole("switch", { name: "ログイン時に起動" }).click();
+  await expect(page.getByRole("alert")).toContainText("この版では変更できません");
+  await expect(page.getByRole("button", { name: "システム設定を開く" })).toHaveCount(0);
+});
+
+test("setup: 完了画面でログイン時に起動をオンにできなければエラーとログイン項目を開くボタンを出す", async ({ page }) => {
+  await open(page, "window=setup&mock=done", { width: 640, height: 520 });
+  const sw = page.getByRole("switch", { name: "ログイン時に起動" });
+  await expect(sw).toBeChecked();
+  await sw.click();
+  await expect(sw).not.toBeChecked();
+  await mock(page, `api.fail.update_settings = ${JSON.stringify(APPROVAL_ERROR)};`);
+  await sw.click();
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText(APPROVAL_ERROR);
+  await expect(sw).not.toBeChecked();
+  await page.screenshot({ path: "e2e/screenshots/setup-launch-at-login-error.png" });
+  await alert.getByRole("button", { name: "システム設定を開く" }).click();
+  await expect.poll(async () => (await calls(page, "open_system_settings")).map((c) => c.args)).toEqual([
+    { pane: "login_items" },
+  ]);
+  // 次に成功したらエラーを消す
+  await mock(page, `delete api.fail.update_settings;`);
+  await sw.click();
+  await expect(sw).toBeChecked();
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
@@ -333,6 +384,17 @@ test("panel: seq が前回より小さい status-changed は捨てる", async ({
   await expect(page.getByText("待機中")).toBeVisible();
   await mock(page, `api.fire("status-changed", { phase: "off", loadingProgress: null, error: null, seq: 6 });`);
   await expect(page.getByRole("button", { name: "音声入力をオン" })).toBeVisible();
+});
+
+test("mock: status を変えるたびに seq を増やす", async ({ page }) => {
+  await open(page, "window=panel&mock=off", PANEL);
+  const seq = () => page.evaluate(() => (window as unknown as { __mukuchiMock: { db: { status: { seq: number } } } }).__mukuchiMock.db.status.seq);
+  const before = await seq();
+  await page.getByRole("button", { name: "音声入力をオン" }).click();
+  await expect(page.getByText("待機中")).toBeVisible();
+  await expect.poll(seq).toBe(before + 1);
+  await mock(page, `api.setStatus({ phase: "speaking" });`);
+  await expect.poll(seq).toBe(before + 2);
 });
 
 test("panel: 未知のエラーコードは Rust のメッセージをそのまま出す", async ({ page }) => {

@@ -3,6 +3,7 @@
 //! 個々の事実 (ON/OFF、ASR準備完了、発話中、確定処理中の件数、エラー) だけを保持し、
 //! `Phase` はそこから導出する。遷移のたびに購読者 (Tauri event・メニュー) へ通知する。
 
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -180,8 +181,10 @@ pub struct StateManager {
     /// 事実と、最後に計算した状態 (通番付き)
     facts: Mutex<(Facts, AppStatus)>,
     listeners: Mutex<Vec<Listener>>,
-    /// 通知の送り手を1つにする。値は最後に通知した通番
-    notify: Mutex<u64>,
+    /// 通知の依頼数。0 でなければ送り手がいる (`deliver`)
+    pending: AtomicUsize,
+    /// 最後に通知した通番 (送り手だけが読み書きする)
+    last_sent: AtomicU64,
 }
 
 impl Default for StateManager {
@@ -197,7 +200,8 @@ impl StateManager {
         Self {
             facts: Mutex::new((facts, status)),
             listeners: Mutex::new(Vec::new()),
-            notify: Mutex::new(0),
+            pending: AtomicUsize::new(0),
+            last_sent: AtomicU64::new(0),
         }
     }
 
@@ -300,29 +304,55 @@ impl StateManager {
 
     /// 購読者へ最新の状態を通知する。
     ///
-    /// 複数スレッドから同時に変更されても通知が古い状態で終わらないよう、送り手を1つにする:
-    /// ロックを取れなかった (他のスレッドが通知中、または通知の中からの再入) 場合は何もせず、
-    /// 通知中のスレッドが通知後に最新の通番を見直して送る。通知は通番の昇順になり、最後は必ず最新になる。
+    /// 複数スレッドから同時に変更されても通知が古い状態で終わらないよう、送り手を1つにする。
+    /// `pending` は通知の依頼数で、0 から増やしたスレッドが送り手になる。他のスレッド (通知の中からの
+    /// 再入を含む) は依頼数を増やすだけで戻り、送り手が代わりに最新の状態を送る。
+    /// 送り手は1回送るごとに、送る前に見た依頼数を引き、その間に増えていれば送り直す。
+    /// 判断と「降りる」が同じ1つの不可分操作 (fetch_sub) なので、降りる直前に来た依頼を取りこぼさない
+    /// (mutex の try_lock 方式では、判断してからロックを離すまでに来た依頼を失っていた)。
     /// 購読者の中から状態の変更・購読の追加をしても詰まらない (facts・listeners のロックは持たずに呼ぶ)
     fn deliver(&self) {
-        loop {
-            let mut last = match self.notify.try_lock() {
-                Ok(g) => g,
-                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => return,
-            };
-            let status = self.status();
-            if status.seq <= *last {
-                return;
-            }
-            *last = status.seq;
-            let listeners: Vec<Listener> = lock(&self.listeners).clone();
-            for l in &listeners {
-                l(&status);
-            }
-            // ロックを離してから見直す: 通知中に変更したスレッドは try_lock に失敗して戻っているため
+        if self.pending.fetch_add(1, Ordering::AcqRel) != 0 {
+            return;
         }
+        // 購読者が panic しても送り手の役を解放し、以後の通知を止めない
+        let reset = ResetOnPanic(&self.pending);
+        loop {
+            // 依頼数を読んでから状態を読む: ここまでの依頼を出したスレッドの変更は必ず見える
+            let requested = self.pending.load(Ordering::Acquire);
+            let status = self.status();
+            if status.seq > self.last_sent.load(Ordering::Relaxed) {
+                self.last_sent.store(status.seq, Ordering::Relaxed);
+                let listeners: Vec<Listener> = lock(&self.listeners).clone();
+                for l in &listeners {
+                    l(&status);
+                }
+            }
+            release_window();
+            let before = self.pending.fetch_sub(requested, Ordering::AcqRel);
+            if before == requested {
+                break;
+            }
+        }
+        std::mem::forget(reset);
     }
+}
+
+/// 送り手が panic で抜けた時に依頼数を 0 に戻す (次の変更で新しい送り手が立つように)
+struct ResetOnPanic<'a>(&'a AtomicUsize);
+
+impl Drop for ResetOnPanic<'_> {
+    fn drop(&mut self) {
+        self.0.store(0, Ordering::Release);
+    }
+}
+
+/// テスト用: 送り手が「新しい通番はない」と判断してから送り手を降りるまでの間を広げ、
+/// 取りこぼしの競合を再現しやすくする
+#[inline]
+fn release_window() {
+    #[cfg(test)]
+    std::thread::sleep(Duration::from_micros(20));
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -451,6 +481,49 @@ mod tests {
             let seen = seen.lock().unwrap();
             assert!(seen.windows(2).all(|w| w[0].seq < w[1].seq));
             assert_eq!(seen.last(), Some(&s.status()));
+        }
+    }
+
+    /// 通知中のスレッドが「新しい通番はない」と判断してから送り手を降りるまでの間に、他のスレッドが
+    /// 変更して通知を諦める、という取りこぼしが起きないこと。多数のスレッドを barrier で同時に
+    /// 走らせ、毎回必ず通番が増える変更 (メッセージの異なるエラー) を繰り返す
+    #[test]
+    fn no_lost_wakeup_under_contention() {
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 20;
+        for round in 0..300 {
+            let s = Arc::new(StateManager::new());
+            let seen = Arc::new(Mutex::new(Vec::<u64>::new()));
+            let seen2 = seen.clone();
+            s.subscribe(move |st| {
+                std::thread::yield_now();
+                seen2.lock().unwrap().push(st.seq);
+            });
+            let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+            let threads: Vec<_> = (0..THREADS)
+                .map(|t| {
+                    let s = s.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        for i in 0..PER_THREAD {
+                            s.set_error(AppError {
+                                code: ErrorCode::InsertFailed,
+                                message: format!("{t}-{i}"),
+                                action: None,
+                            });
+                        }
+                    })
+                })
+                .collect();
+            for t in threads {
+                t.join().unwrap();
+            }
+            let latest = s.status().seq;
+            assert_eq!(latest, (THREADS * PER_THREAD) as u64);
+            let seen = seen.lock().unwrap();
+            assert!(seen.windows(2).all(|w| w[0] < w[1]), "round {round}");
+            assert_eq!(seen.last(), Some(&latest), "round {round}");
         }
     }
 

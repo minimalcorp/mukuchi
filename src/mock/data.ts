@@ -63,7 +63,7 @@ export function provisioning(stage: ProvisioningStatus["stage"], modelDone = 0.9
 
 export function createDb(): MockDb {
   return {
-    status: { phase: "off", loadingProgress: null, error: null },
+    status: { phase: "off", loadingProgress: null, error: null, seq: 0 },
     settings: structuredClone(DEFAULT_SETTINGS),
     permissions: { microphone: "granted", accessibility: true },
     provisioning: provisioning("done"),

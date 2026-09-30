@@ -1,5 +1,6 @@
 import { Switch } from "@/components/ui/switch";
-import { Card, FieldError, type SectionProps } from "./common";
+import { LaunchAtLoginError } from "@/components/app/launch-at-login-error";
+import { Card, type SectionProps } from "./common";
 
 export function GeneralSection({ settings, update, errors }: SectionProps) {
   return (
@@ -15,7 +16,7 @@ export function GeneralSection({ settings, update, errors }: SectionProps) {
           />
         </div>
       </Card>
-      <FieldError message={errors.launchAtLogin} />
+      <LaunchAtLoginError message={errors.launchAtLogin} />
     </section>
   );
 }

@@ -17,10 +17,18 @@ pub const ENV_ASR_URL: &str = "MUKUCHI_ASR_URL";
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
+/// 文字起こしの結果
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transcript {
+    pub text: String,
+    /// サーバーが報告した処理時間 (受信完了から応答まで。推論待ちを含む)。古いサーバーでは無い
+    pub server_ms: Option<u64>,
+}
+
 /// 文字起こしクライアント。テストや別実装に差し替えられるようにtraitにする。
 pub trait AsrClient: Send + Sync {
-    /// 16kHz/mono/16bit の WAV を送り、認識結果の文字列を返す。
-    fn transcribe(&self, wav: Vec<u8>, context: Option<String>) -> BoxFuture<Result<String>>;
+    /// 16kHz/mono/16bit の WAV を送り、認識結果を返す。
+    fn transcribe(&self, wav: Vec<u8>, context: Option<String>) -> BoxFuture<Result<Transcript>>;
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,7 +95,7 @@ impl HttpAsrClient {
 }
 
 impl AsrClient for HttpAsrClient {
-    fn transcribe(&self, wav: Vec<u8>, context: Option<String>) -> BoxFuture<Result<String>> {
+    fn transcribe(&self, wav: Vec<u8>, context: Option<String>) -> BoxFuture<Result<Transcript>> {
         let this = self.clone();
         Box::pin(async move {
             let mut query: Vec<(&str, String)> = vec![("language", "Japanese".to_string())];
@@ -130,7 +138,10 @@ impl AsrClient for HttpAsrClient {
                 r.elapsed_ms.unwrap_or(0),
                 started.elapsed().as_millis()
             );
-            Ok(r.text)
+            Ok(Transcript {
+                text: r.text,
+                server_ms: r.elapsed_ms,
+            })
         })
     }
 }

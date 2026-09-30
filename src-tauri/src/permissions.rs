@@ -47,12 +47,16 @@ pub async fn request_microphone() -> Permissions {
 pub enum Pane {
     Microphone,
     Accessibility,
+    /// 一般 > ログイン項目 (ログイン項目の承認待ちからの復旧)
+    LoginItems,
 }
 
 pub fn open_system_settings(pane: Pane) -> Result<()> {
     let anchor = match pane {
         Pane::Microphone => "Privacy_Microphone",
         Pane::Accessibility => "Privacy_Accessibility",
+        // Apple が用意している API で開く (URL スキームは公開されていないため)
+        Pane::LoginItems => return crate::autostart::open_login_items_settings(),
     };
     macos::open_url(&format!(
         "x-apple.systempreferences:com.apple.preference.security?{anchor}"

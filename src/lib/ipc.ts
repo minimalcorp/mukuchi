@@ -31,15 +31,17 @@ export type AppError = {
   action: AppErrorAction | null;
 };
 
+/** login_items: launchAtLogin を ON にできなかった時 (承認待ち等) の案内用 */
+export type SystemSettingsPane = "microphone" | "accessibility" | "login_items";
+
 export type AppStatus = {
   phase: Phase;
   loadingProgress: number | null;
   error: AppError | null;
   /**
-   * 状態の通し番号 (Rust が遷移ごとに増やす)。届く順序が前後しても古い状態で上書きしないために使う。
-   * Rust が付けていない版もあるため任意 (無ければ届いた順に反映する)
+   * 状態の通し番号 (Rust が遷移ごとに増やす)。届く順序が前後しても古い状態で上書きしないために使う
    */
-  seq?: number;
+  seq: number;
 };
 
 export type Utterance = {
@@ -178,7 +180,7 @@ export const commands = {
   listInputDevices: () => call<AudioDevice[]>("list_input_devices"),
   getPermissions: () => call<Permissions>("get_permissions"),
   requestMicrophone: () => call<Permissions>("request_microphone"),
-  openSystemSettings: (pane: "microphone" | "accessibility") => call<void>("open_system_settings", { pane }),
+  openSystemSettings: (pane: SystemSettingsPane) => call<void>("open_system_settings", { pane }),
   restartAsr: () => call<void>("restart_asr"),
   getProvisioningStatus: () => call<ProvisioningStatus>("get_provisioning_status"),
   startProvisioning: () => call<void>("start_provisioning"),
@@ -300,15 +302,12 @@ export function subscribeWithInitial<E extends EventName>(
 /**
  * AppStatus.seq が前回反映したものより小さい状態を捨てる apply を作る。
  * event と get_status の応答、複数の event の届く順序が前後しても古い状態に戻さないため。
- * seq の無い状態 (seq 未対応の Rust) は常に反映する。
  */
 export function latestStatusOnly(apply: (s: AppStatus) => void): (s: AppStatus) => void {
   let last: number | null = null;
   return (s) => {
-    if (typeof s.seq === "number") {
-      if (last != null && s.seq < last) return;
-      last = s.seq;
-    }
+    if (last != null && s.seq < last) return;
+    last = s.seq;
     apply(s);
   };
 }

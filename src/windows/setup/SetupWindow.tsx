@@ -36,6 +36,7 @@ import {
   useUnimplemented,
 } from "@/lib/hooks";
 import { Unimplemented } from "@/components/app/unimplemented";
+import { LaunchAtLoginError } from "@/components/app/launch-at-login-error";
 import { commands, runCommand, subscribeEvents, type Permissions, type ProvisioningStatus } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 
@@ -489,7 +490,7 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
 /* ---------- 5. 完了 ---------- */
 
 function DoneStep() {
-  const [settings, update] = useSettings();
+  const [settings, update, settingsErrors] = useSettings();
   const completeUnimplemented = useUnimplemented("complete_setup");
   return (
     <>
@@ -510,6 +511,7 @@ function DoneStep() {
           disabled={!settings}
           onCheckedChange={(v) => update({ launchAtLogin: v })}
         />
+        <LaunchAtLoginError message={settingsErrors.launchAtLogin} />
       </StepBody>
       <StepFooter>
         <Unimplemented active={completeUnimplemented}>

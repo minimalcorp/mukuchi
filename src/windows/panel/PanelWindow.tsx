@@ -368,8 +368,9 @@ function ListeningPanel({ anchor, isOn, expanded, items }: {
         className={cn(
           "flex flex-col select-none border border-line-default bg-surface-card [grid-area:1/1]",
           // ピル (240px) → 展開 (440px) は 180ms・標準イージング。文字の追加はアニメーションさせない
-          "transition-[width,border-radius,box-shadow] duration-[180ms] ease-standard",
-          expanded ? "rounded-[14px] shadow-lg" : "rounded-[18px] shadow-md",
+          // 角丸は展開しても待機中のピルと同じ 18px に揃える (デザインは展開時 14px だが、形が変わって見えるため利用者の要望で統一)
+          "rounded-[18px] transition-[width,box-shadow] duration-[180ms] ease-standard",
+          expanded ? "shadow-lg" : "shadow-md",
         )}
         style={{ width: expanded ? CARD_WIDTH.expanded : CARD_WIDTH.pill }}
       >

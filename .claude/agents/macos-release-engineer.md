@@ -8,10 +8,10 @@ model: opus
 
 ## 担当範囲
 
-- `src-tauri/tauri.conf.json` の bundle/macOS 設定、`Entitlements.plist`、`Info.plist`
+- `apps/desktop/src-tauri/tauri.conf.json` の bundle/macOS 設定、`Entitlements.plist`、`Info.plist`
 - `make build` / `make build-local` / `make verify` の中身 (Makefile自体の構造はdevenv-engineerと調整)
 - 開発用設定の上書き (`tauri.dev.conf.json` 等でバンドルID `com.minimalcorp.mukuchi.dev`)
-- `scripts/uninstall.sh` と、アプリ内アンインストールの対象一覧 (実装はrust-engineer)
+- `apps/desktop/scripts/uninstall.sh` と、アプリ内アンインストールの対象一覧 (実装はrust-engineer)
 - リリース用GitHub Actions (承認制のEnvironmentを使う)
 
 ## 守ること

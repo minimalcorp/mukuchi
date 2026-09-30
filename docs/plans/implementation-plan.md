@@ -21,7 +21,7 @@
 実装方針:
 - 1つのViteアプリで、ウィンドウのlabelごとに画面を出し分ける (`getCurrentWindow().label`)
 - Tailwind + shadcn/ui をMinimal Portalのトークン(色・角丸・影・モーション)で上書きする。押下は0.5px沈み込み、モーション120ms (DSに従う)
-- 状態はすべて Rust の events を購読して反映する。`src/lib/ipc.ts` に型付きラッパーを集約
+- 状態はすべて Rust の events を購読して反映する。`apps/desktop/src/lib/ipc.ts` に型付きラッパーを集約
 - Rust側が未実装でも画面を作れるよう、`@tauri-apps/api/mocks` の `mockIPC` を使ったモックと、Playwright で各画面を確認できる状態を用意する
 
 ## 2. 音声入力の体験 (tsunagi の音声入力に準拠)
@@ -73,11 +73,11 @@ UI と Rust は architecture.md のインターフェースを境界に並行し
 | フェーズ | 内容 | 担当 | 完了条件 |
 |---|---|---|---|
 | P1 中核の流れ | audio / vad / pipeline(最終結果のみ) / asr(開発用の接続) / insert / state / 最小限のtray(ON/OFF・終了)。音声コマンド・入力しないアプリを含む | rust-engineer | `make up` 後、メニューバーからONにして話すと、前面のアプリ(テキストエディット等)に発話ごとに入力される。「確定」でEnterが送られる。VAD・コマンド判定・入力キューの単体テストが通る |
-| P1' UI基盤と全画面 (並行) | デザイントークン・フォント・shadcn/ui の導入、panel / setup / settings の全画面をモックIPCで実装 | frontend-engineer | 全画面・全状態がモックで表示でき、Playwright で各画面を確認できる。`npm run build` が通る |
+| P1' UI基盤と全画面 (並行) | デザイントークン・フォント・shadcn/ui の導入、panel / setup / settings の全画面をモックIPCで実装 | frontend-engineer | 全画面・全状態がモックで表示でき、Playwright で各画面を確認できる。`pnpm run build` が通る |
 | P1'' モデル | 配布用の8bit日本語モデルの用意(既存の変換済みモデルが mlx-qwen3-asr で読めるか、または自前で量子化して置くか)と、fp16との精度比較 | asr-server-engineer | spikes/asr-bench で fp16 と同等の精度を確認し、採用モデルを決める |
 | P2 パネルとプレビュー | panel の NSPanel 化、audio-level、リアルタイムプレビュー、状態遷移を実データで接続。tray の状態表示・エラー表示 | rust-engineer + frontend-engineer | 話している途中の文字がパネルに出て、話し終わると入力される。エラー(アクセシビリティ未許可、ASR停止、マイク切断)が表示され復旧できる |
 | P3 設定 | settings の全カテゴリを実データで接続(マイク選択・感度・無音時間・音声コマンド・語彙ヒント・入力しないアプリ・権限・ログイン時に起動) | 両者 | 設定変更が即座に動作へ反映され、再起動後も保持される |
-| P4 セットアップと配布準備 | provisioning(uv同梱・Python・依存・モデル)、setup の実データ接続、ストレージ・削除・アンインストール、`scripts/uninstall.sh` | rust-engineer + frontend-engineer + macos-release-engineer | 何も入っていない状態から、セットアップ → 動作テスト → 常駐まで通る。アンインストールで対象がすべて消える |
+| P4 セットアップと配布準備 | provisioning(uv同梱・Python・依存・モデル)、setup の実データ接続、ストレージ・削除・アンインストール、`apps/desktop/scripts/uninstall.sh` | rust-engineer + frontend-engineer + macos-release-engineer | 何も入っていない状態から、セットアップ → 動作テスト → 常駐まで通る。アンインストールで対象がすべて消える |
 | P5 リリース | 署名・公証 (`make build`)、Info.plist の権限説明文、entitlements、Hardened Runtime 下での動作確認 | macos-release-engineer | 公証済み .dmg を別ユーザー環境で入れて、セットアップから使用まで通る |
 
 ## 5. 未確定・要検証
@@ -85,5 +85,5 @@ UI と Rust は architecture.md のインターフェースを境界に並行し
 - 8bit日本語モデルの入手方法と精度 (P1'')
 - `tauri-nspanel` の Tauri 2.x 最新版との互換性と、パネル上のボタンをクリックしても前面アプリのフォーカスが移らないこと (P2 の最初に検証)
 - モデル読み込みの進捗(%)は mlx-qwen3-asr から取得できない可能性がある。取れない場合は不定の表示にする
-- ログイン時に起動: SMAppService に決定 (P3)。`scripts/uninstall.sh` で本体を消した後に BTM の記録が残るかは未検証 (P4)
+- ログイン時に起動: SMAppService に決定 (P3)。`apps/desktop/scripts/uninstall.sh` で本体を消した後に BTM の記録が残るかは未検証 (P4)
 - リアルタイムプレビュー時の GPU 負荷と、最終結果までの遅延への影響 (P2 で計測: 開発用WAV 6発話で、確定の文字起こし時間は途中表示あり/なしで差なし (例 12.8秒の発話 812ms / 813ms)。途中表示は1回平均 377ms・最大 857ms。GPU 負荷は未計測)

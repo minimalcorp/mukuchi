@@ -64,7 +64,7 @@
 ```bash
 cd spikes/asr-bench
 scripts/make_tts.sh                                   # data/tts に100発話
-HF_HOME=<neosophie取得済みのHF_HOME> uv run --project ../../asr-server mukuchi-asr-convert --out models/ja-8bit --bits 8
+HF_HOME=<neosophie取得済みのHF_HOME> uv run --project ../../apps/desktop/asr-server mukuchi-asr-convert --out models/ja-8bit --bits 8
 #   同様に --bits 8 --encoder-bits 16 → models/ja-8bit-enc16、--bits 4 --encoder-bits 8 → models/ja-4bit-enc8
 HF_HOME=$PWD/models/hf uvx --from huggingface_hub hf download ultragtx/Qwen3-ASR-1.7B-JA-8bit
 scripts/run_models.sh data/tts results-models         # → results-models/report.md

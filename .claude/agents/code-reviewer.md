@@ -17,7 +17,7 @@ model: opus
    - macOS: 権限未許可時の挙動、署名・entitlementsへの影響
    - 公開リポジトリ: 秘密情報・個人情報・個人の音声ファイルの混入
    - 仕様との乖離: `docs/architecture.md` の決定事項
-3. 必要ならビルド・テストを実行して裏付ける (`cargo test`, `npm run build` 等)
+3. 必要ならビルド・テストを実行して裏付ける (`cargo test`, `pnpm build` 等)
 
 ## 報告
 

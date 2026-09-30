@@ -16,28 +16,36 @@ macOS常駐の音声入力アプリ。ショートカットでON/OFFし、ONの�
 
 | パス | 内容 | 担当subagent |
 |---|---|---|
-| `src/` | フロントエンド (React + TypeScript + Vite) | frontend-engineer |
-| `src-tauri/` | Tauri v2 / Rust (録音・VAD・ショートカット・入力・ASRサーバー管理) | rust-engineer |
-| `asr-server/` | ASRサーバー (Python + MLX, uv管理) | asr-server-engineer |
-| `flake.nix`, `Makefile`, `process-compose.yaml`, `scripts/` | 開発環境・タスク | devenv-engineer |
+monorepo。JS/TS の依存はルートの pnpm workspace (`pnpm-workspace.yaml`・`pnpm-lock.yaml`)、Rust は Cargo (`apps/desktop/src-tauri` 単独)、Python は uv。計画は [docs/plans/monorepo-plan.md](docs/plans/monorepo-plan.md)。
+
+| パス | 内容 | 担当subagent |
+|---|---|---|
+| `apps/desktop/src/` | フロントエンド (React + TypeScript + Vite) | frontend-engineer |
+| `apps/desktop/src-tauri/` | Tauri v2 / Rust (録音・VAD・ショートカット・入力・ASRサーバー管理) | rust-engineer |
+| `apps/desktop/asr-server/` | ASRサーバー (Python + MLX, uv管理) | asr-server-engineer |
+| `flake.nix`, `Makefile`, `process-compose.yaml`, `package.json`, `pnpm-workspace.yaml`, `apps/desktop/scripts/`, `.github/workflows/` | 開発環境・タスク・CI | devenv-engineer |
 | 署名・公証・entitlements・配布・アンインストール | | macos-release-engineer |
+| `assets/brand/` | ロゴ・アイコン・dmg 背景 (desktop と web で共有) | - |
 | `spikes/` | 検証用コード(本体から参照しない) | - |
 
 ## コマンド
 
 | コマンド | 内容 |
 |---|---|
-| `make up` / `make down` / `make restart` | 開発環境の起動(セットアップ込み) / 停止 / 再起動 |
+| `make up` / `make down` / `make restart` | 開発環境の起動(全アプリ、セットアップ込み) / 停止 / 再起動 |
+| `make up-desktop` | desktop (asr + tauri dev) だけを起動 (process-compose の namespace `desktop`) |
 | `make reset [PROVISION=1] [ALL=1] [PERMISSIONS=1]` | 停止して dev の設定・WebKit/Caches 等を消し初回起動の状態に (models/・実行環境・導入記録・ログは残すのでセットアップのダウンロードは完了済みで表示される。`PROVISION=1` で導入記録を消しダウンロード・導入をやり直す。`ALL=1` で実行環境も消す。`PERMISSIONS=1` で `tccutil reset All <devのID>` と権限の案内) |
 | `make up-fresh [PROVISION=1] [ALL=1]` | `reset` して `MUKUCHI_DEV_SHOW_SETUP=1` で起動 (セットアップ画面の確認用。この起動のみ) |
 | `make ps` / `make logs [s=<name>]` | プロセス状態 / ログ追従 |
-| `make setup` | npm install・uv sync・モデル取得 (`up` から自動実行)。`MUKUCHI_HF_SEED=<HF_HOME>` で既存HFキャッシュから複製 |
+| `make setup` | pnpm install (workspace)・uv sync・モデル取得 (`up` から自動実行)。`MUKUCHI_HF_SEED=<HF_HOME>` で既存HFキャッシュから複製 |
 | `make build` | 本番用 .dmg (Developer ID署名 + Hardened Runtime + 公証 + staple)。証明書・公証の資格情報が必要 ([docs/release.md](docs/release.md)) |
-| `make build-local` | ad-hoc署名の .app (手元確認用)。同梱物 (uv・asr-server) は `scripts/prepare-bundle-resources.sh` が用意する |
+| `make build-local` | ad-hoc署名の .app (手元確認用)。同梱物 (uv・asr-server) は `apps/desktop/scripts/prepare-bundle-resources.sh` が用意する |
 | `make dmg-local` | `build-local` + 署名なしの .dmg (dmg ウィンドウの見た目の確認用。公証しない) |
-| `scripts/uninstall.sh [--dev] [--dry-run]` | 完全アンインストール (既定は確認付き。`--dry-run` で対象の表示のみ) |
+| `apps/desktop/scripts/uninstall.sh [--dev] [--dry-run]` | 完全アンインストール (既定は確認付き。`--dry-run` で対象の表示のみ) |
 | `make verify` / `make clean` | 署名・公証の検証 (ad-hoc なら Gatekeeper・公証の項目は SKIP。`build*` の最後にも実行) / 生成物削除 (devデータは残す) |
 | `make help` | ターゲット一覧 |
+| `pnpm lint` / `pnpm build` / `pnpm test` (`apps/desktop` で実行) | desktop のフロントエンドの lint / 型チェック+ビルド / Playwright (スクリーンショットは `apps/desktop/e2e/screenshots/`) |
 
 `make` はnix devShell外で実行された場合 `nix develop -c` 経由で実行される。flake はgit管理下のファイルしか見ないため、`flake.nix` 等の新規ファイルは `git add` してから使う。
-開発ビルドは `src-tauri/tauri.dev.conf.json` を重ねて dev のバンドルID (`com.minimalcorp.mukuchi.dev`) で起動する (`npm run tauri:dev`)。
+開発ビルドは `apps/desktop/src-tauri/tauri.dev.conf.json` を重ねて dev のバンドルID (`com.minimalcorp.mukuchi.dev`) で起動する (`apps/desktop` で `pnpm run tauri:dev`)。
+pnpm は devShell の版 (ルート `package.json` の `packageManager` と一致させる) を使う。npm・npx は使わない。

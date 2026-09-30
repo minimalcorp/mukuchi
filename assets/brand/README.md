@@ -10,10 +10,10 @@
 | `web/apple-touch-icon.png` | iOS ホーム画面用 180px (白背景) |
 | `web/android-chrome-{192,512}.png`, `web/maskable-512x512.png` | PWA manifest 用 |
 | `macos/AppIcon_1024.png`, `macos/AppIcon.icns` | アプリアイコンの元 (1024px、Apple のグリッド相当の余白付き) |
-| `dmg/background.png`, `dmg/background@2x.png` | .dmg のウィンドウ背景 (660x400pt と 2x。不透明)。ビルド時に `tiffutil -cathidpicheck` で1つの TIFF にまとめる。矢印は x=265..395・y≈170、手順の文字は y≈313 (左上原点)。アイコン位置は `scripts/dmg-settings.py` |
+| `dmg/background.png`, `dmg/background@2x.png` | .dmg のウィンドウ背景 (660x400pt と 2x。不透明)。ビルド時に `tiffutil -cathidpicheck` で1つの TIFF にまとめる。矢印は x=265..395・y≈170、手順の文字は y≈313 (左上原点)。アイコン位置は `apps/desktop/scripts/dmg-settings.py` |
 | `macos/MenuBarIcon(@2x).png` | メニューバー用 18pt (未使用。テンプレート画像にするなら黒一色化が必要) |
 
-アプリアイコンは `src-tauri/icons/` に配置済み (`icon.icns` と 32/128/256/1024px の PNG)。差し替える時は `macos/` を更新し、同じ手順で `src-tauri/icons/` にコピーする。
+アプリアイコンは `apps/desktop/src-tauri/icons/` に配置済み (`icon.icns` と 32/128/256/1024px の PNG)。差し替える時は `macos/` を更新し、同じ手順で `apps/desktop/src-tauri/icons/` にコピーする。
 
 favicon の HTML 例:
 

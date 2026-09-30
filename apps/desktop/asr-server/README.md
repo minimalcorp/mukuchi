@@ -1,9 +1,11 @@
 # asr-server
 
 mukuchiのASRサーバー。Qwen3-ASR (`mlx-qwen3-asr`) をMLXで動かし、`127.0.0.1` でHTTP待受する。
-HTTP APIは [docs/architecture.md](../docs/architecture.md) の「ASRサーバー HTTP API」を正とする。
+HTTP APIは [docs/architecture.md](../../../docs/architecture.md) の「ASRサーバー HTTP API」を正とする。
 
 ## 実行
+
+コマンドは `apps/desktop` で実行する (開発時は `make up` が process-compose から同じように起動する)。
 
 ```bash
 uv sync --project asr-server
@@ -29,7 +31,7 @@ HF_HOME=<モデル置き場> uv run --project asr-server mukuchi-asr-convert --m
 ```
 
 MLX形式の量子化済みチェックポイントを作る(サーバー実行時には使わない)。`--encoder-bits 16` で音声エンコーダを非量子化、`--bits 4 --encoder-bits 8` で4bitデコーダ。
-出力先はそのまま `--model` に渡せる。採用した設定と評価は [spikes/asr-bench/MODEL_DECISION.md](../spikes/asr-bench/MODEL_DECISION.md)。
+出力先はそのまま `--model` に渡せる。採用した設定と評価は [spikes/asr-bench/MODEL_DECISION.md](../../../spikes/asr-bench/MODEL_DECISION.md)。
 
 ## 開発
 

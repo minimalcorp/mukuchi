@@ -39,8 +39,8 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 | 再度の起動 | 起動中に Finder・Spotlight・Launchpad から開くと (macOS の Reopen) 設定を開く (セットアップ未完了ならセットアップ)。2つ目のプロセス (実行ファイルの直接起動・`open -n`) は `tauri-plugin-single-instance` で既存プロセスに知らせて終了し、同じく設定を開く | メニューバーのアイコンがノッチに隠れ Dock にも出ないと、設定・終了に辿れないため。LaunchServices 経由の起動は2つ目を立てず Reopen になるが、直接起動は防げない |
 | 配布 | Developer ID署名 + 公証の .dmg。Mac App Storeは対象外 | サンドボックスではCGEventPost不可、ダウンロードしたPython実行環境の実行はガイドライン2.5.2違反、非公開API (`_setPreventsActivation`) は審査で却下、アプリ内アンインストール不可のため (2026-09-30 再確認) |
 | 実行環境の導入 | アプリは軽量に保ち、初回セットアップでuv(同梱)がPython・依存・モデルを導入 | |
-| アンインストール | 設定 > ストレージ の「完全にアンインストール」+ `scripts/uninstall.sh`。「実行環境とモデルのみ削除」も提供 | |
-| 開発環境 | Nix flakes devShell + Makefile + process-compose | |
+| アンインストール | 設定 > ストレージ の「完全にアンインストール」+ `apps/desktop/scripts/uninstall.sh`。「実行環境とモデルのみ削除」も提供 | |
+| 開発環境 | Nix flakes devShell + Makefile + process-compose。monorepo (`apps/desktop`、LP は `apps/web` 予定) で JS/TS は pnpm workspace、Rust は Cargo (`apps/desktop/src-tauri` 単独)、Python は uv | [monorepo-plan.md](plans/monorepo-plan.md) |
 | 作らない機能 | キーボードショートカット、押している間だけ録音するモード、文字起こし履歴、入力完了時の効果音、「取り消し」音声での破棄 | 2026-09-30 決定 |
 
 ## 識別子・パス
@@ -61,7 +61,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 
 アンインストール対象: 上記データディレクトリ、`~/Library/{Caches,Logs,WebKit,HTTPStorages}/<バンドルID>`、`~/Library/Saved Application State/<バンドルID>.savedState`、`~/Library/Preferences/<バンドルID>.plist` (`defaults delete <バンドルID>` で消す。ファイル削除だけでは cfprefsd のキャッシュから書き戻されうる)、ログイン項目、TCC (`tccutil reset All <バンドルID>`。LaunchServices に登録されたアプリが必要なため本体を消す前に行う)、アプリ本体(ゴミ箱へ)。HTTPStorages・Saved Application State は WebKit・AppKit がバンドルIDで作りうるため含める(存在するものだけ消す)。開発版は `tauri dev` の未バンドル実行で WebKit が作る `~/Library/{Caches,WebKit}/mukuchi` も対象。
 
-- ログイン項目: `SMAppService.mainAppService` で登録したもの。ファイルはアプリ外に置かず、システムの Background Task Management (BTM) に記録される(「システム設定 > 一般 > ログイン項目」に表示)。アプリ内のアンインストールでは本体を消す前に `SMAppService.mainApp.unregister` で解除する。`scripts/uninstall.sh` からは API を呼べないため解除せず、残っていればシステム設定から削除するよう表示する。アプリ本体を消した後に BTM の記録が残るか(自動で消えるか)は未検証 (実機でログイン項目を登録して確かめる必要があり、利用者の環境を変えるため未実施)。`sfltool resetbtm` は他のアプリの項目も消すため使わない
+- ログイン項目: `SMAppService.mainAppService` で登録したもの。ファイルはアプリ外に置かず、システムの Background Task Management (BTM) に記録される(「システム設定 > 一般 > ログイン項目」に表示)。アプリ内のアンインストールでは本体を消す前に `SMAppService.mainApp.unregister` で解除する。`apps/desktop/scripts/uninstall.sh` からは API を呼べないため解除せず、残っていればシステム設定から削除するよう表示する。アプリ本体を消した後に BTM の記録が残るか(自動で消えるか)は未検証 (実機でログイン項目を登録して確かめる必要があり、利用者の環境を変えるため未実施)。`sfltool resetbtm` は他のアプリの項目も消すため使わない
 - LaunchAgent (`~/Library/LaunchAgents/*.plist`) は作らない
 
 ## 同梱物と初回セットアップ (P4)
@@ -70,16 +70,16 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 
 | .app 内の場所 | 内容 |
 |---|---|
-| `Contents/Helpers/uv` | uv の単一バイナリ (aarch64-apple-darwin。版は devShell の uv と揃え、sha256 を固定して `scripts/fetch-uv.sh` が取得)。公式リリースは開発元の Developer ID 署名 (0.12.17 は `OpenAI OpCo, LLC (2DC432GLL2)`)・Hardened Runtime・タイムスタンプ付きで公証済みのため、再署名せずそのまま同梱する。Resources ではなく Helpers に置くのは、Apple の "Placing content in a bundle" で helper tool (Mach-O) の置き場所が `Contents/MacOS/` か `Contents/Helpers/` とされ、それ以外に置くと公証で問題になりうるため。`bundle.macOS.files` でコピーするので Tauri は再署名しない (externalBin にすると Tauri が自分の証明書と本体の entitlements で再署名する) |
+| `Contents/Helpers/uv` | uv の単一バイナリ (aarch64-apple-darwin。版は devShell の uv と揃え、sha256 を固定して `apps/desktop/scripts/fetch-uv.sh` が取得)。公式リリースは開発元の Developer ID 署名 (0.12.17 は `OpenAI OpCo, LLC (2DC432GLL2)`)・Hardened Runtime・タイムスタンプ付きで公証済みのため、再署名せずそのまま同梱する。Resources ではなく Helpers に置くのは、Apple の "Placing content in a bundle" で helper tool (Mach-O) の置き場所が `Contents/MacOS/` か `Contents/Helpers/` とされ、それ以外に置くと公証で問題になりうるため。`bundle.macOS.files` でコピーするので Tauri は再署名しない (externalBin にすると Tauri が自分の証明書と本体の entitlements で再署名する) |
 | `Contents/Resources/asr-server/` | `pyproject.toml` `uv.lock` `.python-version` `src/` (テスト・キャッシュは除く) |
-| `Contents/Resources/verify.wav` | 検証用音声 (「確認します。」、Kyoko の合成音声、16kHz/mono/s16、約1.1秒)。リポジトリには置かず、`scripts/prepare-bundle-resources.sh` がビルド時に `scripts/make-verify-wav.sh` (`say` + python) で `.build-cache/` に一度だけ作り `src-tauri/bundle-resources/` にコピーする |
+| `Contents/Resources/verify.wav` | 検証用音声 (「確認します。」、Kyoko の合成音声、16kHz/mono/s16、約1.1秒)。リポジトリには置かず、`apps/desktop/scripts/prepare-bundle-resources.sh` がビルド時に `apps/desktop/scripts/make-verify-wav.sh` (`say` + python) で `apps/desktop/.build-cache/` に一度だけ作り `apps/desktop/src-tauri/bundle-resources/` にコピーする |
 | `Contents/Resources/THIRD_PARTY_NOTICES`, `licenses/` | ライセンス |
 
-- uv と `asr-server/` は `scripts/prepare-bundle-resources.sh` が `src-tauri/bundle-resources/` (gitignore) に用意する。tauri-build は dev でも resources を要求するため `make setup` と `make build*` から呼ぶ
+- uv と `apps/desktop/asr-server/` は `apps/desktop/scripts/prepare-bundle-resources.sh` が `apps/desktop/src-tauri/bundle-resources/` (gitignore) に用意する。tauri-build は dev でも resources を要求するため `make setup` と `make build*` から呼ぶ
 - Rust からの解決:
-  - uv: .app から起動している時 (実行ファイルが `<X>.app/Contents/MacOS/` にある時) は `<実行ファイルのディレクトリ>/../Helpers/uv`。それ以外 (`tauri dev` の未バンドル実行) は `app.path().resolve("bin/uv", BaseDirectory::Resource)` (= `src-tauri/target/debug/bin/uv`。`tauri.dev.conf.json` が dev の時だけ resources に `bin/uv` を加え、tauri-build がコピーする)。正規化し、実在する実行可能ファイルでなければ起動は続けてログに記録し、セットアップの runtime ステップで「入れ直してください」を表示する。`MUKUCHI_DEV_UV` はデバッグビルドのみ (検査せずそのまま使う)
-  - asr-server・verify.wav: `app.path().resolve(..., BaseDirectory::Resource)`。本番は `mukuchi.app/Contents/Resources/`、`tauri dev` は `src-tauri/target/debug/`
-- 本体以外の Mach-O は `Contents/Helpers/uv` だけにする (`make verify` が確認)。署名は `scripts/build-macos.sh` が .app に `--deep` なしで行い、uv の署名は入れ子のコードとして検証・封印される
+  - uv: .app から起動している時 (実行ファイルが `<X>.app/Contents/MacOS/` にある時) は `<実行ファイルのディレクトリ>/../Helpers/uv`。それ以外 (`tauri dev` の未バンドル実行) は `app.path().resolve("bin/uv", BaseDirectory::Resource)` (= `apps/desktop/src-tauri/target/debug/bin/uv`。`tauri.dev.conf.json` が dev の時だけ resources に `bin/uv` を加え、tauri-build がコピーする)。正規化し、実在する実行可能ファイルでなければ起動は続けてログに記録し、セットアップの runtime ステップで「入れ直してください」を表示する。`MUKUCHI_DEV_UV` はデバッグビルドのみ (検査せずそのまま使う)
+  - asr-server・verify.wav: `app.path().resolve(..., BaseDirectory::Resource)`。本番は `mukuchi.app/Contents/Resources/`、`tauri dev` は `apps/desktop/src-tauri/target/debug/`
+- 本体以外の Mach-O は `Contents/Helpers/uv` だけにする (`make verify` が確認)。署名は `apps/desktop/scripts/build-macos.sh` が .app に `--deep` なしで行い、uv の署名は入れ子のコードとして検証・封印される
 
 ### セットアップ手順 (provisioning)
 
@@ -103,7 +103,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 
 `uninstall` の順序: (本番) 実行中のアプリ本体の場所が分からない・App Translocation (パスに `/AppTranslocation/` を含む。`SecTranslocateIsTranslocatedURL` は公開ヘッダにないため使わない) なら何も消さずにエラー (「アプリケーション」フォルダへの移動を促す) → 音声入力OFF・セットアップ停止 (削除中の扱い)・ASR停止 → ログイン項目の解除 → ファイル削除 (上記対象のうち存在するもの。名前にバンドルIDを含む・`~/Library` 配下かデータディレクトリ (目印あり) であることを確かめてから消す) → `defaults delete <バンドルID>` → `tccutil reset All <バンドルID>` → アプリ本体を `NSFileManager.trashItemAtURL` でゴミ箱へ → 終了。途中で失敗しても残りは続け、本体をゴミ箱に入れられなかった場合はエラーを返して終了しない。開発ビルドでは target ディレクトリ外のアプリ本体は対象にしない
 
-- `mukuchi.app/Contents/MacOS/mukuchi --unregister-login-item`: ログイン項目 (SMAppService) を解除して終了する (UI は起動しない。終了コード 0=成功 1=失敗)。`scripts/uninstall.sh` が本体をゴミ箱に入れる前に呼ぶ
+- `mukuchi.app/Contents/MacOS/mukuchi --unregister-login-item`: ログイン項目 (SMAppService) を解除して終了する (UI は起動しない。終了コード 0=成功 1=失敗)。`apps/desktop/scripts/uninstall.sh` が本体をゴミ箱に入れる前に呼ぶ
 - `mukuchi.app/Contents/MacOS/mukuchi --print-uv-path`: 解決した同梱 uv のパス (正規化済み) を表示して終了する (隠しフラグ。UI は起動しない。終了コード 0=成功 1=見つからない・実行できない)。リリースビルドは `MUKUCHI_DEV_*` を無視するため、ビルドした .app が `Contents/Helpers/uv` を指すかの確認に使う
 
 ## インターフェース
@@ -123,7 +123,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 
 ### Tauri commands / events (Rust ↔ フロントエンド)
 
-型はRust側を正とし、`src/lib/ipc.ts` にTypeScript型を手書きで同期する。名前はRustがsnake_case、JSONのフィールドはcamelCase (`#[serde(rename_all = "camelCase")]`)。ウィンドウのlabelは `panel` / `settings` / `setup`。
+型はRust側を正とし、`apps/desktop/src/lib/ipc.ts` にTypeScript型を手書きで同期する。名前はRustがsnake_case、JSONのフィールドはcamelCase (`#[serde(rename_all = "camelCase")]`)。ウィンドウのlabelは `panel` / `settings` / `setup`。
 
 #### 型
 

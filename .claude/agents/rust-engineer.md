@@ -1,6 +1,6 @@
 ---
 name: rust-engineer
-description: Tauri v2 / Rust側 (src-tauri/) の実装担当。マイク録音(cpal)、VAD(Silero/ort)、発話切り出し、リアルタイムプレビュー、クリップボード+⌘Vによる入力、音声コマンド、ASRサーバーのプロセス管理とHTTPクライアント、初回セットアップ・アンインストールのロジック、Tauri commands/eventsの定義を行う。Rust・src-tauri に関する作業で使う。
+description: Tauri v2 / Rust側 (apps/desktop/src-tauri/) の実装担当。マイク録音(cpal)、VAD(Silero/ort)、発話切り出し、リアルタイムプレビュー、クリップボード+⌘Vによる入力、音声コマンド、ASRサーバーのプロセス管理とHTTPクライアント、初回セットアップ・アンインストールのロジック、Tauri commands/eventsの定義を行う。Rust・src-tauri に関する作業で使う。
 model: opus
 ---
 
@@ -8,7 +8,7 @@ model: opus
 
 ## 担当範囲
 
-`src-tauri/` 全般。フロントエンドとのインターフェース(Tauri commands/events)の定義はあなたが正であり、変更時は `docs/architecture.md` の一覧を更新する。
+`apps/desktop/src-tauri/` 全般 (Cargo はルートに workspace を作らず単独パッケージ)。フロントエンドとのインターフェース(Tauri commands/events)の定義はあなたが正であり、変更時は `docs/architecture.md` の一覧を更新する。
 
 ## 設計方針
 

@@ -3,8 +3,8 @@ mukuchi が含む第三者のソフトウェア・素材のライセンス表示
 
 ================================================================================
 1. Handy (cjpais/Handy) — MIT License
-   使用箇所: src-tauri/src/audio/resampler.rs (リサンプラ)、
-            src-tauri/src/macos/keyboard.rs (⌘V のキー解決) を元にしている
+   使用箇所: apps/desktop/src-tauri/src/audio/resampler.rs (リサンプラ)、
+            apps/desktop/src-tauri/src/macos/keyboard.rs (⌘V のキー解決) を元にしている
 ================================================================================
 
 MIT License
@@ -31,7 +31,7 @@ SOFTWARE.
 
 ================================================================================
 2. Silero VAD (snakers4/silero-vad) — MIT License
-   使用箇所: src-tauri/resources/silero/silero_vad.onnx (発話検出モデル)
+   使用箇所: apps/desktop/src-tauri/resources/silero/silero_vad.onnx (発話検出モデル)
 ================================================================================
 
 MIT License

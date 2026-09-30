@@ -3,27 +3,27 @@
 配布物は Developer ID 署名 + 公証 (notarization) + staple 済みの `.dmg` のみ (Mac App Store は対象外)。
 証明書・API キー・パスワードはリポジトリに置かない。
 
-## 流れ (`make build` = `scripts/build-macos.sh`)
+## 流れ (`make build` = `apps/desktop/scripts/build-macos.sh`)
 
 1. 資格情報を確認 (無ければビルド前に日本語のエラーで止まる)
 2. `tauri build --bundles app --no-sign` で .app。dmgbuild で .dmg のテンプレート (見た目だけ。.app なし) を作る (下記「.dmg の見た目」)
-3. `codesign --options runtime --timestamp --entitlements src-tauri/Entitlements.plist` で .app に署名 (`--deep` なし。同梱 uv `Contents/Helpers/uv` は開発元の署名のまま)
+3. `codesign --options runtime --timestamp --entitlements apps/desktop/src-tauri/Entitlements.plist` で .app に署名 (`--deep` なし。同梱 uv `Contents/Helpers/uv` は開発元の署名のまま)
 4. .app を zip にして `notarytool submit --wait` → `stapler staple`
 5. テンプレートに staple 済みの .app を `hdiutil`・`ditto` で入れて UDZO の .dmg にし、署名 → 公証 → staple
-6. `scripts/verify-macos.sh` (`make verify`)
+6. `apps/desktop/scripts/verify-macos.sh` (`make verify`)
 
-生成物: `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/mukuchi_<version>_aarch64.dmg`
+生成物: `apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/mukuchi_<version>_aarch64.dmg`
 
-手順 2 だけを `scripts/build-macos.sh --build-only` (資格情報を見ない)、3〜5 だけを `--sign-only` (Apple のツールと標準ライブラリだけの python3 のみ。npm・cargo・uv の依存・本体を実行しない。6 は行わない) で実行できる。`make build` は両方を続けて行う。CI はこれを別 job に分け、第三者の依存が動くビルドを secret のない場所で行う。
+手順 2 だけを `apps/desktop/scripts/build-macos.sh --build-only` (資格情報を見ない)、3〜5 だけを `--sign-only` (Apple のツールと標準ライブラリだけの python3 のみ。pnpm・cargo・uv の依存・本体を実行しない。6 は行わない) で実行できる。`make build` は両方を続けて行う。CI はこれを別 job に分け、第三者の依存が動くビルドを secret のない場所で行う。
 
 `make build-local` は手順 2・3 を ad-hoc 署名で行う (公証しない)。`make dmg-local` はそれに加えて .dmg を作る (署名・公証しない。ウィンドウの見た目の確認用)。`make verify` は ad-hoc の場合 Gatekeeper・公証・.dmg の署名の項目を SKIP と表示する。
 
 ### .dmg の見た目
 
-開いた時のウィンドウ: 背景 `assets/brand/dmg/background(@2x).png` (660x400pt)、左に mukuchi.app (中心 160,170)、右に Applications へのリンク (中心 500,170)、アイコン 128pt・文字 13pt、ツールバー・サイドバー・ステータスバーなし、アイコン表示・整列なし。ボリューム名 `mukuchi`、ボリュームアイコンはアプリアイコン (`src-tauri/icons/icon.icns`)。
+開いた時のウィンドウ: 背景 `assets/brand/dmg/background(@2x).png` (660x400pt)、左に mukuchi.app (中心 160,170)、右に Applications へのリンク (中心 500,170)、アイコン 128pt・文字 13pt、ツールバー・サイドバー・ステータスバーなし、アイコン表示・整列なし。ボリューム名 `mukuchi`、ボリュームアイコンはアプリアイコン (`apps/desktop/src-tauri/icons/icon.icns`)。
 
-- 設定: `scripts/dmg-settings.py` (dmgbuild の settings)。値を変えたら `scripts/check-dmg-layout.py` の期待値も直す
-- [dmgbuild](https://github.com/dmgbuild/dmgbuild) 1.6.7 を `scripts/run-dmgbuild.py` (uv スクリプト、依存は `scripts/run-dmgbuild.py.lock` に sha256 付きで固定) で動かす。Finder・AppleScript を使わず `.DS_Store` を直接書くため、画面に何も出ずに CI でも動く
+- 設定: `apps/desktop/scripts/dmg-settings.py` (dmgbuild の settings)。値を変えたら `apps/desktop/scripts/check-dmg-layout.py` の期待値も直す
+- [dmgbuild](https://github.com/dmgbuild/dmgbuild) 1.6.7 を `apps/desktop/scripts/run-dmgbuild.py` (uv スクリプト、依存は `apps/desktop/scripts/run-dmgbuild.py.lock` に sha256 付きで固定) で動かす。Finder・AppleScript を使わず `.DS_Store` を直接書くため、画面に何も出ずに CI でも動く
 - 背景は `tiffutil -cathidpicheck` で 1x と 2x を1つの TIFF にまとめて渡す (Retina では 2x が使われる)
 - dmgbuild は第三者のコードなので、資格情報のない build 側でテンプレート (`bundle/dmg-template/mukuchi.dmg`、UDRW) だけを作る。sign 側はテンプレートの中身を確かめてから .app を入れる。`hdiutil convert` は同じ HFS+ ボリュームを写すので、`.DS_Store` 内の背景のエイリアスは有効なまま
 - ウィンドウの高さ (`window_rect`) はタイトルバー込みなので 400 + 28pt にしている。macOS 26 はタイトルバーが 32pt で背景の下端 4pt (無地) が隠れる
@@ -87,7 +87,7 @@ Environment `production-release` (Required reviewers で承認制。作成は `.
 
 ### 手元で作る
 
-1. `src-tauri/tauri.conf.json` の `version` を上げる
+1. `apps/desktop/src-tauri/tauri.conf.json` の `version` を上げる
 2. `make build` (公証の待ち時間を含め数分〜。`make verify` まで自動で行う)
 3. 別のユーザーアカウント (または別の Mac) で .dmg をダウンロード相当 (quarantine 付き) で開き、セットアップから音声入力まで通ることを確認する (実マイクでの確認は人が行う)
 
@@ -95,7 +95,7 @@ Environment `production-release` (Required reviewers で承認制。作成は `.
 
 1. `version` を上げた変更を main に入れる
 2. Actions > Release > Run workflow (main)
-   - job `Build unsigned .app`: `npm ci` → `build-macos.sh --build-only` (secret なし)。.app を artifact で渡す
+   - job `Build unsigned .app`: `pnpm install --frozen-lockfile` → `build-macos.sh --build-only` (secret なし)。.app を artifact で渡す
    - job `Sign and notarize (.dmg)`: `production-release` の承認後、証明書を一時キーチェーンに入れて `build-macos.sh --sign-only` → 資格情報を削除 → `verify-macos.sh`
 3. 下書きの Release (`v<version>`、.dmg と .sha256 付き) を確認してから公開する
 
@@ -113,7 +113,7 @@ Environment `production-release` (Required reviewers で承認制。作成は `.
 |---|---|
 | .app | `codesign --verify --deep --strict`、Hardened Runtime、secure timestamp、entitlements がマイクのみ、Info.plist (バンドルID・`LSMinimumSystemVersion` 13.0・マイクの説明文)、`/nix/store` へのリンクなし、`mukuchi --print-uv-path` が `Contents/Helpers/uv`、`spctl -a -vv -t exec` が `Notarized Developer ID`、`stapler validate` |
 | 同梱 uv | 開発元の Developer ID 署名 (Team ID 固定)・Hardened Runtime・timestamp。MacOS/・Helpers/ 以外に Mach-O がない |
-| .dmg | `codesign --verify --strict`、`spctl -a -vv -t open --context context:primary-signature`、`stapler validate`、中の .app が同じ CDHash で staple 済み、見た目 (`scripts/check-dmg-layout.py`) |
+| .dmg | `codesign --verify --strict`、`spctl -a -vv -t open --context context:primary-signature`、`stapler validate`、中の .app が同じ CDHash で staple 済み、見た目 (`apps/desktop/scripts/check-dmg-layout.py`) |
 
 ## 出典
 

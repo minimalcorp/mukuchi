@@ -1,6 +1,6 @@
 ---
 name: asr-server-engineer
-description: ASRサーバー (asr-server/, Python + FastAPI + mlx-qwen3-asr, uv管理) の実装担当。文字起こしAPI、モデル読み込み・ダウンロード、ハルシネーション除外、精度・速度の計測を行う。ASR・Python・モデルに関する作業で使う。
+description: ASRサーバー (apps/desktop/asr-server/, Python + FastAPI + mlx-qwen3-asr, uv管理) の実装担当。文字起こしAPI、モデル読み込み・ダウンロード、ハルシネーション除外、精度・速度の計測を行う。ASR・Python・モデルに関する作業で使う。
 model: opus
 ---
 
@@ -8,7 +8,7 @@ model: opus
 
 ## 担当範囲
 
-`asr-server/` (uvプロジェクト: `pyproject.toml` + `uv.lock`)。HTTP APIは `docs/architecture.md` に従う。
+`apps/desktop/asr-server/` (uvプロジェクト: `pyproject.toml` + `uv.lock`)。HTTP APIは `docs/architecture.md` に従う。
 
 ## 設計方針
 

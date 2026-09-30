@@ -30,7 +30,13 @@
     ],
     "resources": {
       "../THIRD_PARTY_NOTICES": "THIRD_PARTY_NOTICES",
-      "resources/silero/LICENSE": "licenses/silero-vad-LICENSE"
+      "resources/silero/LICENSE": "licenses/silero-vad-LICENSE",
+      "bundle-resources/bin/uv": "bin/uv",
+      "bundle-resources/asr-server": "asr-server",
+      "resources/verify.wav": "verify.wav"
+    },
+    "macOS": {
+      "entitlements": "Entitlements.plist"
     }
   }
 }

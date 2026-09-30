@@ -35,6 +35,10 @@ if [ -n "${MUKUCHI_HF_SEED:-}" ] && [ -d "$MUKUCHI_HF_SEED/hub/$model_dir" ] && 
   /bin/cp -Rc "$MUKUCHI_HF_SEED/hub/$model_dir" "$HF_HOME/hub/"
 fi
 
+# tauri-build は dev でも bundle.resources を要求するため、tauri dev の前に用意する
+echo "==> bundle resources (uv, asr-server)"
+scripts/prepare-bundle-resources.sh
+
 echo "==> model: $MUKUCHI_MODEL"
 # 取得済みなら HF API に問い合わせない (オフライン・HF 障害時でも make up を止めない)。
 # snapshots/ のファイルはダウンロード完了後にだけ作られる symlink なので、存在すれば取得済みとみなす

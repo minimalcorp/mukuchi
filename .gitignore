@@ -8,6 +8,10 @@ dist-ssr
 # Rust / Tauri
 src-tauri/target
 src-tauri/gen/schemas
+# 同梱物の取得・展開先 (scripts/prepare-bundle-resources.sh)
+src-tauri/bundle-resources
+src-tauri/bundle-resources.tmp
+.build-cache
 
 # Nix / direnv
 result
@@ -35,6 +39,8 @@ __pycache__
 
 # 録音データ
 *.wav
+# 初回セットアップの検証用音声 (合成音声。scripts/make-verify-wav.sh で作成)
+!src-tauri/resources/verify.wav
 
 # Claude Design handoff (社内デザインシステムを含むため公開しない)
 docs/design/handoff/

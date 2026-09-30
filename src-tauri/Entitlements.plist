@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened Runtime 用の entitlements。必要最小限にし、追加する場合は理由を書く。
+  サンドボックス (com.apple.security.app-sandbox) は使わない: CGEventPost (⌘V の送信) ができないため。
+  アクセシビリティ (CGEventPost) は entitlement ではなく TCC の許可で扱う。
+  ASR サーバー (Python) と同梱 uv は別プロセスで、この entitlements の影響を受けない。
+-->
+<plist version="1.0">
+<dict>
+	<!-- マイク録音 (cpal / Core Audio)。Hardened Runtime ではこれがないと利用者が許可しても無音になる -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>

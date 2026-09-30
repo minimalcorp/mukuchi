@@ -31,7 +31,8 @@ macOS常駐の音声入力アプリ。ショートカットでON/OFFし、ONの�
 | `make ps` / `make logs [s=<name>]` | プロセス状態 / ログ追従 |
 | `make setup` | npm install・uv sync・モデル取得 (`up` から自動実行)。`MUKUCHI_HF_SEED=<HF_HOME>` で既存HFキャッシュから複製 |
 | `make build` | 本番用 (Developer ID署名 + 公証) .dmg (署名・公証は未実装) |
-| `make build-local` | ad-hoc署名の .app (手元確認用) |
+| `make build-local` | ad-hoc署名の .app (手元確認用)。同梱物 (uv・asr-server) は `scripts/prepare-bundle-resources.sh` が用意する |
+| `scripts/uninstall.sh [--dev] [--dry-run]` | 完全アンインストール (既定は確認付き。`--dry-run` で対象の表示のみ) |
 | `make verify` / `make clean` | 署名・公証の検証 (未実装) / 生成物削除 (devデータは残す) |
 | `make help` | ターゲット一覧 |
 

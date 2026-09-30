@@ -32,6 +32,14 @@ define check_no_nix_links
 	fi
 endef
 
+# 同梱 uv は Resources にあり Tauri は個別に署名しない (bundle.resources はコピーのみ)。
+# 開発元の署名のまま動くこと (コピーで壊れていない・実行権限がある) を確認する
+define check_bundled_uv
+	@uv=$(BUNDLE_DIR)/macos/mukuchi.app/Contents/Resources/bin/uv; \
+	test -x "$$uv" || { echo "error: $$uv がない・実行できない"; exit 1; }; \
+	/usr/bin/codesign --verify --strict "$$uv" || { echo "error: $$uv の署名が壊れている"; exit 1; }
+endef
+
 # UDS モード (TCP 8080 を使わない)。ソケットは固定パスにして別シェルからも操作できるようにする。
 # macOS の UDS パス上限 (sun_path 104 バイト、NUL 込み) を超える場合は /tmp の短いパスに逃がす。
 # ($TMPDIR は nix develop がセッションごとに変えるため使わない)
@@ -108,12 +116,16 @@ setup: ## npm install / uv sync / モデル取得
 # TODO(macos-release-engineer): Developer ID 署名 + 公証 (notarytool / stapler) を追加する。
 # 公証系はホスト Xcode のツールを使う (devShell の xcrun は nixpkgs の xcbuild 版のため /usr/bin/xcrun を明示する)
 build: ## 本番用 .dmg
+	@scripts/prepare-bundle-resources.sh
 	npm run tauri build -- --target $(TARGET) --bundles app,dmg
 	$(check_no_nix_links)
+	$(check_bundled_uv)
 
 build-local: ## ad-hoc 署名の .app (手元確認用)
+	@scripts/prepare-bundle-resources.sh
 	npm run tauri build -- --target $(TARGET) --bundles app --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
 	$(check_no_nix_links)
+	$(check_bundled_uv)
 
 # TODO(macos-release-engineer): codesign --verify / spctl -a / stapler validate を実装する
 verify: ## 署名・公証の検証
@@ -122,6 +134,6 @@ verify: ## 署名・公証の検証
 # 起動中に .process-compose (ソケット) を消すと make down で止められなくなるため先に停止する
 clean: ## 生成物を削除 (モデル等の dev データは残す)
 	-@$(MAKE) --no-print-directory down
-	rm -rf dist src-tauri/target node_modules "$(PC_DIR)"
+	rm -rf dist src-tauri/target src-tauri/bundle-resources node_modules "$(PC_DIR)"
 
 endif

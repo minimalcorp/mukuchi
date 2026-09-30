@@ -50,10 +50,36 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 
 データディレクトリ配下: `settings.json` `uv/` `python/`(UV_PYTHON_INSTALL_DIR) `venv/` `cache/`(UV_CACHE_DIR) `models/`(HF_HOME)。ログは `~/Library/Logs/<バンドルID>/`。アプリ外(`~/.cache` 等)に書き込まない。
 
-アンインストール対象: 上記データディレクトリ、`~/Library/{Caches,Logs,WebKit}/<バンドルID>`、`~/Library/Preferences/<バンドルID>.plist`、ログイン項目、TCC (`tccutil reset All <バンドルID>`)、アプリ本体。
+アンインストール対象: 上記データディレクトリ、`~/Library/{Caches,Logs,WebKit,HTTPStorages}/<バンドルID>`、`~/Library/Saved Application State/<バンドルID>.savedState`、`~/Library/Preferences/<バンドルID>.plist` (`defaults delete <バンドルID>` で消す。ファイル削除だけでは cfprefsd のキャッシュから書き戻されうる)、ログイン項目、TCC (`tccutil reset All <バンドルID>`。LaunchServices に登録されたアプリが必要なため本体を消す前に行う)、アプリ本体(ゴミ箱へ)。HTTPStorages・Saved Application State は WebKit・AppKit がバンドルIDで作りうるため含める(存在するものだけ消す)。開発版は `tauri dev` の未バンドル実行で WebKit が作る `~/Library/{Caches,WebKit}/mukuchi` も対象。
 
-- ログイン項目: `SMAppService.mainAppService` で登録したもの。ファイルはアプリ外に置かず、システムの Background Task Management (BTM) に記録される(「システム設定 > 一般 > ログイン項目」に表示)。アプリ内のアンインストールでは本体を消す前に `SMAppService.mainApp.unregister` で解除する。`scripts/uninstall.sh` からは API を呼べないため、アプリ本体を消した後に BTM の記録が残るか(自動で消えるか)は未検証 (P4 で確認)。`sfltool resetbtm` は他のアプリの項目も消すため使わない
+- ログイン項目: `SMAppService.mainAppService` で登録したもの。ファイルはアプリ外に置かず、システムの Background Task Management (BTM) に記録される(「システム設定 > 一般 > ログイン項目」に表示)。アプリ内のアンインストールでは本体を消す前に `SMAppService.mainApp.unregister` で解除する。`scripts/uninstall.sh` からは API を呼べないため解除せず、残っていればシステム設定から削除するよう表示する。アプリ本体を消した後に BTM の記録が残るか(自動で消えるか)は未検証 (実機でログイン項目を登録して確かめる必要があり、利用者の環境を変えるため未実施)。`sfltool resetbtm` は他のアプリの項目も消すため使わない
 - LaunchAgent (`~/Library/LaunchAgents/*.plist`) は作らない
+
+## 同梱物と初回セットアップ (P4)
+
+### .app に同梱するもの (macos-release-engineer が bundle 設定、rust-engineer は下記パスを前提に実装)
+
+| Resources 配下 | 内容 |
+|---|---|
+| `bin/uv` | uv の単一バイナリ (aarch64-apple-darwin。版は devShell の uv と揃え、sha256 を固定して `scripts/fetch-uv.sh` が取得)。公式リリースは開発元 (Astral) の Developer ID 署名・Hardened Runtime・タイムスタンプ付きで公証済みのため、再署名せずそのまま同梱する |
+| `asr-server/` | `pyproject.toml` `uv.lock` `.python-version` `src/` (テスト・キャッシュは除く) |
+| `verify.wav` | 検証用音声 (「確認します。」、Kyoko の合成音声、16kHz/mono/s16、約1.1秒)。`scripts/make-verify-wav.sh` で作りリポジトリに置く (`src-tauri/resources/verify.wav`) |
+| `THIRD_PARTY_NOTICES`, `licenses/` | ライセンス |
+
+- `bin/uv` と `asr-server/` は `scripts/prepare-bundle-resources.sh` が `src-tauri/bundle-resources/` (gitignore) に用意する。tauri-build は dev でも resources を要求するため `make setup` と `make build*` から呼ぶ
+- Rust からは `app.path().resolve("bin/uv", BaseDirectory::Resource)` 等で解決する。本番は `mukuchi.app/Contents/Resources/`、`tauri dev` は `src-tauri/target/debug/` (tauri-build がコピー) を指す
+
+### セットアップ手順 (provisioning)
+
+1. **runtime**: 同梱 uv で Python を `python/` に導入し、`asr-server/` をデータディレクトリへコピーして `uv sync --frozen --no-dev` で `venv/` を作る (環境変数 `UV_PYTHON_INSTALL_DIR` `UV_CACHE_DIR` `UV_PROJECT_ENVIRONMENT` をデータディレクトリ配下に向ける。`UV_NO_CONFIG=1` でユーザーのuv設定を読まない)
+2. **model**: 配布モデルを Hugging Face から `models/` (HF_HOME) に取得。リポジトリIDと revision は Rust の定数で固定 (配布用リポジトリが決まるまで `neosophie/Qwen3-ASR-1.7B-JA` の固定revision)。進捗・一時停止・再開(部分ファイルからの再開)は Rust が HTTP で直接取得して実現する
+3. **verify**: ASRサーバーを起動し `/health` と、同梱の短い無音ではない検証用音声 (TTSで作成、`Resources/verify.wav`) で `/transcribe` が成功することを確認
+
+導入済みの判定は `<データ>/provisioned.json` (runtime/model の版と完了時刻) で行う。版が変わった場合は該当ステップのみやり直す。
+
+### 本番の ASR サーバー起動
+
+`<データ>/venv/bin/python -m mukuchi_asr --port <空きポート> --model <models内のパス> --exit-on-stdin-eof` を stdin をパイプにして起動 (環境変数 `HF_HOME` `HF_HUB_OFFLINE=1`)。stdout/stderr は `~/Library/Logs/<バンドルID>/asr-server.log` へ。異常終了時は3回まで自動再起動。
 
 ## インターフェース
 

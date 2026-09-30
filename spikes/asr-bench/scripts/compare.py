@@ -44,6 +44,11 @@ def cer(refs: list[str], hyps: list[str]) -> float:
     return errors / total if total else 0.0
 
 
+def corpus_id(uid: str) -> str:
+    # data/tts の "<id>.<voice>" 形式は同じ正解文を複数話者で読んだもの
+    return uid.split(".")[0]
+
+
 def peak_memory_gb(label: str) -> str:
     path = RESULTS / f"{label}.time.txt"
     if not path.exists():
@@ -65,20 +70,22 @@ def main() -> None:
     base = {r["id"]: r["text"] for r in runs[args.baseline]["results"]} if args.baseline in runs else {}
 
     print("## サマリ\n")
-    print("| label | 実装 | CER | vsBase | 短発話CER | レイテンシ中央値 | p90 | RTF | ロード | メモリ(GB) |")
-    print("|---|---|---|---|---|---|---|---|---|---|")
+    print("| label | 実装 | CER | vsBase | Base一致 | 短発話CER | レイテンシ中央値 | p90 | RTF | ロード | メモリ(GB) |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
     for label, run in runs.items():
-        rs = [r for r in run["results"] if r["id"] in corpus]
+        rs = [r for r in run["results"] if corpus_id(r["id"]) in corpus]
         ids = [r["id"] for r in rs]
         hyps = [r["text"] for r in rs]
-        refs = [corpus[i] for i in ids]
-        short = [(corpus[r["id"]], r["text"]) for r in rs if r["id"].startswith("cmd")]
+        refs = [corpus[corpus_id(i)] for i in ids]
+        short = [(corpus[corpus_id(r["id"])], r["text"]) for r in rs if r["id"].startswith("cmd")]
         lat = [r["latency_ms"] for r in rs]
         rtf = sum(r["latency_ms"] / 1000 for r in rs) / sum(r["audio_sec"] for r in rs)
         vs = f"{cer([base[i] for i in ids if i in base], [h for i, h in zip(ids, hyps) if i in base]):.1%}" if base else "-"
+        same = (f"{sum(normalize(base[i]) == normalize(h) for i, h in zip(ids, hyps) if i in base)}/{len(ids)}"
+                if base else "-")
         short_cer = f"{cer(*zip(*short)):.1%}" if short else "-"
         p90 = statistics.quantiles(lat, n=10)[-1] if len(lat) >= 2 else lat[0]
-        print(f"| {label} | {run['impl']} | {cer(refs, hyps):.1%} | {vs} | {short_cer} | "
+        print(f"| {label} | {run['impl']} | {cer(refs, hyps):.1%} | {vs} | {same} | {short_cer} | "
               f"{statistics.median(lat):.0f}ms | {p90:.0f}ms | {rtf:.3f} | {run['load_ms'] / 1000:.1f}s | {peak_memory_gb(label)} |")
 
     print("\n## 発話ごとの出力\n")
@@ -86,7 +93,11 @@ def main() -> None:
     print("| id | 正解 | " + " | ".join(labels) + " |")
     print("|---|---|" + "---|" * len(labels))
     outputs = {label: {r["id"]: r for r in run["results"]} for label, run in runs.items()}
-    for uid, ref in corpus.items():
+    order = {cid: n for n, cid in enumerate(corpus)}
+    all_ids = sorted({r["id"] for run in runs.values() for r in run["results"] if corpus_id(r["id"]) in corpus},
+                     key=lambda u: (order[corpus_id(u)], u))
+    for uid in all_ids:
+        ref = corpus[corpus_id(uid)]
         cells = []
         for label in labels:
             r = outputs[label].get(uid)

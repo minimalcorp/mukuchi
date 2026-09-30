@@ -46,4 +46,8 @@ scripts/run_all.sh
 
 CERはNFKC正規化・小文字化・句読点/空白除去後の文字単位編集距離。`Rust`/`ラスト` のような表記の違いも誤りとして数えるため、絶対値より実装間の差を見る。
 
-`data/` と `results/` はコミットしない(音声は個人の声のため)。
+## 配布モデルの比較 (P1'')
+
+量子化済みチェックポイントの候補比較は `scripts/make_tts.sh` (複数話者のTTS音声) と `scripts/run_models.sh`。結果と決定は [MODEL_DECISION.md](MODEL_DECISION.md)。
+
+`data/` と `results/` はコミットしない(音声は個人の声のため)。`models/` (変換済みモデル) も同様。

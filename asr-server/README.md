@@ -22,6 +22,15 @@ HF_HOME=<モデル置き場> uv run --project asr-server mukuchi-asr --port 1876
 curl -s -H 'Content-Type: audio/wav' --data-binary @sample.wav 'http://127.0.0.1:18765/transcribe?context=Rust%20Tauri'
 ```
 
+## 配布用モデルの変換
+
+```bash
+HF_HOME=<モデル置き場> uv run --project asr-server mukuchi-asr-convert --model neosophie/Qwen3-ASR-1.7B-JA --bits 8 --out <出力先>
+```
+
+MLX形式の量子化済みチェックポイントを作る(サーバー実行時には使わない)。`--encoder-bits 16` で音声エンコーダを非量子化、`--bits 4 --encoder-bits 8` で4bitデコーダ。
+出力先はそのまま `--model` に渡せる。採用した設定と評価は [spikes/asr-bench/MODEL_DECISION.md](../spikes/asr-bench/MODEL_DECISION.md)。
+
 ## 開発
 
 ```bash

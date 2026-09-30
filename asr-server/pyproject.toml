@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 mukuchi-asr = "mukuchi_asr.__main__:main"
+mukuchi-asr-convert = "mukuchi_asr.convert:main"
 
 [dependency-groups]
 dev = [

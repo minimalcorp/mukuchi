@@ -1,14 +1,18 @@
 mod asr;
+mod asr_process;
 mod audio;
 mod autostart;
 mod commands;
 mod core;
 mod insert;
 mod macos;
+mod paths;
 mod permissions;
 mod pipeline;
+mod provisioning;
 mod settings;
 mod state;
+mod storage;
 mod tray;
 mod vad;
 mod voice_command;
@@ -21,8 +25,25 @@ use tauri::{Manager, RunEvent, WindowEvent};
 
 use crate::core::Core;
 
+/// `scripts/uninstall.sh` 用: ログイン項目 (SMAppService) を解除して終了する (UI は起動しない)。
+/// シェルからは SMAppService を呼べないため、本体をゴミ箱に入れる前にこのフラグ付きで本体を実行する
+const ARG_UNREGISTER_LOGIN_ITEM: &str = "--unregister-login-item";
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if std::env::args_os().any(|a| a == ARG_UNREGISTER_LOGIN_ITEM) {
+        let code = match autostart::set_enabled(false) {
+            Ok(()) => {
+                println!("ログイン項目を解除しました");
+                0
+            }
+            Err(e) => {
+                eprintln!("{e:#}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     let app = tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -43,8 +64,40 @@ pub fn run() {
             // 常駐アプリのため Dock に出さない (設定・セットアップ表示中のみ Regular にする)
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            let data_dir = app.path().app_data_dir()?;
-            let core = Core::new(app.handle().clone(), data_dir.join("settings.json"));
+            // 同梱物 (Resources)。tauri dev では target/debug/ にコピーされたものを指す
+            let resources = paths::Resources::resolve(app.path().resource_dir().ok().as_deref());
+            log::info!(
+                "同梱物: uv={} asr-server={} verify={}",
+                resources.uv.display(),
+                resources.asr_server.display(),
+                resources.verify_wav.display()
+            );
+            let data_dir = match paths::dev_path(paths::ENV_DEV_DATA_DIR) {
+                Some(d) => {
+                    // 指定を誤っても、リポジトリ・ビルド成果物・ホーム等を削除対象にしない
+                    let mut protected: Vec<std::path::PathBuf> = vec![
+                        resources.asr_server.clone(),
+                        resources.uv.clone(),
+                        app.path().home_dir()?,
+                    ];
+                    protected.extend(storage::build_target_dir());
+                    let d = paths::validate_dev_data_dir(&d, &protected).map_err(|e| {
+                        log::error!("{}: {e:#}", paths::ENV_DEV_DATA_DIR);
+                        e
+                    })?;
+                    log::info!(
+                        "{} によりデータディレクトリを差し替え: {}",
+                        paths::ENV_DEV_DATA_DIR,
+                        d.display()
+                    );
+                    d
+                }
+                None => app.path().app_data_dir()?,
+            };
+            let data_paths = paths::DataPaths::new(data_dir);
+            data_paths.ensure_root()?;
+            let log_dir = app.path().app_log_dir()?;
+            let core = Core::new(app.handle().clone(), data_paths, log_dir, resources)?;
             app.manage(core.clone());
             let settings = core.settings.get();
             app.manage(Arc::new(windows::Windows::new(
@@ -99,13 +152,20 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|_app, event| {
+    app.run(|app, event| match event {
         // 最後のウィンドウが閉じても終了しない。明示的な終了 (app.exit) は code 付きで来る
-        if let RunEvent::ExitRequested { api, code, .. } = event {
+        RunEvent::ExitRequested { api, code, .. } => {
             if code.is_none() {
                 api.prevent_exit();
             }
         }
+        // ASR サーバーを止める (止めきれなくても、終了で stdin が閉じてサーバーは終わる)
+        RunEvent::Exit => {
+            if let Some(core) = app.try_state::<Arc<Core>>() {
+                core.shutdown();
+            }
+        }
+        _ => {}
     });
 }
 

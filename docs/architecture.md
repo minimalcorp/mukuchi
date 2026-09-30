@@ -48,7 +48,14 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 | バンドルID | `com.minimalcorp.mukuchi` | `com.minimalcorp.mukuchi.dev` |
 | データ | `~/Library/Application Support/<バンドルID>/` | 同左 (devのID) |
 
-データディレクトリ配下: `settings.json` `uv/` `python/`(UV_PYTHON_INSTALL_DIR) `venv/` `cache/`(UV_CACHE_DIR) `models/`(HF_HOME)。ログは `~/Library/Logs/<バンドルID>/`。アプリ外(`~/.cache` 等)に書き込まない。
+データディレクトリ配下: `.mukuchi-data`(目印。下記) `settings.json` `provisioned.json` `uv/`(uv のその他の書き込み先: UV_PYTHON_BIN_DIR・UV_TOOL_DIR。同梱 uv のハッシュのキャッシュ `bundled-uv-hash.json` も置く) `python/`(UV_PYTHON_INSTALL_DIR) `venv/`(UV_PROJECT_ENVIRONMENT) `cache/`(UV_CACHE_DIR) `asr-server/`(同梱物のコピー。uv sync のプロジェクト) `models/`(HF_HOME)。ログは `~/Library/Logs/<バンドルID>/`。アプリ外(`~/.cache` 等)に書き込まない。
+
+削除の安全策:
+- 目印 `.mukuchi-data`: 起動時にデータディレクトリを作り (本番・開発とも) 空ファイルを書く。アンインストール・「実行環境とモデルのみ削除」は目印があり `.git` を含まないデータディレクトリだけを消す (無ければ対象から外す・エラー)
+- `MUKUCHI_DEV_DATA_DIR` は 絶対パス・`..` を含まない・存在しないか空か目印がある・`.git` を含まない・target ディレクトリ / 同梱物 (asr-server・uv。`MUKUCHI_DEV_*` で差し替えたものを含む) / ホームと同じかその祖先でない (シンボリックリンクは解決して比較) ものだけ受け付ける。満たさなければ起動しない (本物のデータディレクトリに切り替えない)
+- asr-server/ のコピーは、コピー元とコピー先が同じか入れ子なら行わない
+- 開発ビルドがバンドルIDが `.dev` で終わらない (本番のID) で動いている場合、アンインストールは dry-run に、「実行環境とモデルのみ削除」はエラーにする
+- 削除の実行中は `start_provisioning` を無視し `restart_asr` はエラー。削除を始める前に導入済みの扱いを外す (削除後は未導入)
 
 アンインストール対象: 上記データディレクトリ、`~/Library/{Caches,Logs,WebKit,HTTPStorages}/<バンドルID>`、`~/Library/Saved Application State/<バンドルID>.savedState`、`~/Library/Preferences/<バンドルID>.plist` (`defaults delete <バンドルID>` で消す。ファイル削除だけでは cfprefsd のキャッシュから書き戻されうる)、ログイン項目、TCC (`tccutil reset All <バンドルID>`。LaunchServices に登録されたアプリが必要なため本体を消す前に行う)、アプリ本体(ゴミ箱へ)。HTTPStorages・Saved Application State は WebKit・AppKit がバンドルIDで作りうるため含める(存在するものだけ消す)。開発版は `tauri dev` の未バンドル実行で WebKit が作る `~/Library/{Caches,WebKit}/mukuchi` も対象。
 
@@ -71,15 +78,27 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 
 ### セットアップ手順 (provisioning)
 
-1. **runtime**: 同梱 uv で Python を `python/` に導入し、`asr-server/` をデータディレクトリへコピーして `uv sync --frozen --no-dev` で `venv/` を作る (環境変数 `UV_PYTHON_INSTALL_DIR` `UV_CACHE_DIR` `UV_PROJECT_ENVIRONMENT` をデータディレクトリ配下に向ける。`UV_NO_CONFIG=1` でユーザーのuv設定を読まない)
-2. **model**: 配布モデルを Hugging Face から `models/` (HF_HOME) に取得。リポジトリIDと revision は Rust の定数で固定 (配布用リポジトリが決まるまで `neosophie/Qwen3-ASR-1.7B-JA` の固定revision)。進捗・一時停止・再開(部分ファイルからの再開)は Rust が HTTP で直接取得して実現する
-3. **verify**: ASRサーバーを起動し `/health` と、同梱の短い無音ではない検証用音声 (TTSで作成、`Resources/verify.wav`) で `/transcribe` が成功することを確認
+1. **runtime**: `asr-server/` をデータディレクトリへコピーし、同梱 uv で `uv python install <.python-version の版> --no-bin` (引数なしだと最新版も入るため版を明示) → `uv sync --frozen --no-dev --compile-bytecode` で `venv/` を作る。uv には環境変数を引き継がず (`PYTHONPATH` 等の混入防止)、`HOME` `TMPDIR` `LANG`、プロキシ変数 (`HTTP_PROXY` `HTTPS_PROXY` `NO_PROXY` `ALL_PROXY` とその小文字)、`SSL_CERT_FILE` `SSL_CERT_DIR` だけ渡す。`UV_SYSTEM_CERTS=1` で OS の証明書ストアを使う (社内プロキシの独自ルート証明書向け。uv 0.12 で `UV_NATIVE_TLS` は非推奨になりこちらが正)。`UV_PYTHON_INSTALL_DIR` `UV_CACHE_DIR` `UV_PROJECT_ENVIRONMENT` `UV_PYTHON_BIN_DIR` `UV_TOOL_DIR` `UV_TOOL_BIN_DIR` をデータディレクトリ配下に向け、`UV_NO_CONFIG=1` (ユーザーのuv設定を読まない)・`UV_PYTHON_PREFERENCE=only-managed` (システムの Python を使わない)。出力は `~/Library/Logs/<バンドルID>/provisioning.log` (5MB を超えたら `.1` に1世代残す)
+2. **model**: 配布モデルを Hugging Face から `models/` (HF_HOME) に取得。リポジトリIDと revision は Rust の定数で固定 (`provisioning/hf.rs`。配布用リポジトリが決まるまで `neosophie/Qwen3-ASR-1.7B-JA@987bda16…`)。進捗・一時停止・再開(部分ファイルからの再開)は Rust が HTTP で直接取得して実現する
+   - 一覧は `GET /api/models/<repo>/tree/<revision>?recursive=true`。取得対象は mlx-qwen3-asr と同じ `*.json *.safetensors *.txt *.model`
+   - 本体は `GET /<repo>/resolve/<revision>/<path>` を `Range: bytes=<取得済み>-` で続きから取る (リダイレクト先の CDN も Range に対応)。通信の一時的な失敗は3回まで続きから取り直す。206 の `Content-Range` が要求 (`<取得済み>-<size-1>/<size>`) と合わなければ書かずに一時的な失敗として取り直し、200 (Range を無視) なら最初から取り直す。配布ビルドの HTTP クライアントは https のみ (リダイレクト先も)。取得後に LFS は sha256、それ以外は git の blob id (sha1) で検証し、一致しなければ捨てる
+   - 書き込み先は huggingface_hub (2.0) のキャッシュと同じレイアウト: `hub/models--<org>--<name>/{blobs/<etag>, blobs/<etag>.incomplete, snapshots/<commit>/<path> → ../../blobs/<etag>, refs/main, trees/<commit>.json}`。`trees/` は revision に commit を指定したオフラインの snapshot_download に必要 (無いとネットワークへ出て失敗する)。取得したファイルだけを載せる
+3. **verify**: 本番と同じ起動方法 (下記) でASRサーバーを起動し `/health` と、同梱の短い無音ではない検証用音声 (TTSで作成、`Resources/verify.wav`) で `/transcribe` が成功し結果が空でないことを確認。検証中は自動再起動しない。成功したサーバーはそのまま使い続ける (読み込みをやり直さない)
 
-導入済みの判定は `<データ>/provisioned.json` (runtime/model の版と完了時刻) で行う。版が変わった場合は該当ステップのみやり直す。
+導入済みの判定は `<データ>/provisioned.json` (`{ runtime: {version, completedAt}, model: {version, completedAt}, verify: {runtime, model, completedAt} }`、時刻は UNIX 秒) で行う。runtime の版は同梱 uv と `asr-server/` の内容の sha256 (uv のハッシュは大きさ・更新時刻が同じならキャッシュを使う)、model の版は `<repo>@<revision>`。記録があっても導入先 (`venv/bin/python`・スナップショットの `config.json`) が無ければやり直す。版が変わった場合は該当ステップとその後の verify のみやり直す。起動時に、セットアップ完了済みで記録があるのに版が変わっていれば (アプリの更新) 自動でやり直す (その間 phase は loading)。「実行環境とモデルのみ削除」は記録ごと消すため自動ではやり直さない
+
+- 一時停止: model は途中のファイルを残し再開時に続きから取る。runtime は uv を止め再開時にやり直す (uv のキャッシュで続きから進む)。verify はやり直す
+- 失敗: `ProvisioningStatus.error` に表示用の文言。`start_provisioning` で再試行 (一時停止からの再開と同じ。済んだ段階はやり直さない)
 
 ### 本番の ASR サーバー起動
 
-`<データ>/venv/bin/python -m mukuchi_asr --port <空きポート> --model <models内のパス> --exit-on-stdin-eof` を stdin をパイプにして起動 (環境変数 `HF_HOME` `HF_HUB_OFFLINE=1`)。stdout/stderr は `~/Library/Logs/<バンドルID>/asr-server.log` へ。異常終了時は3回まで自動再起動。
+`<データ>/venv/bin/python -m mukuchi_asr --port <空きポート> --model <models/hub/models--<org>--<name>/snapshots/<commit>> --exit-on-stdin-eof` を stdin をパイプにして起動。環境変数は引き継がず `HOME` `USER` `LOGNAME` `TMPDIR` `LANG` `LC_*` と `PATH=/usr/bin:/bin:/usr/sbin:/sbin` `HF_HOME` `HF_HUB_OFFLINE=1` `HF_HUB_DISABLE_TELEMETRY=1` `PYTHONNOUSERSITE=1` `PYTHONSAFEPATH=1` だけ渡す。作業ディレクトリは `venv/` (cwd のファイルを import しない)。セットアップの動作確認で起動した場合は `/transcribe` の確認が済むまで準備完了 (asrReady) にしない。stdout/stderr は `~/Library/Logs/<バンドルID>/asr-server.log` へ (5MB を超えたら `.1` に1世代残す)。`/health` が応答するまで phase は loading (上限10分)。異常終了時は3回まで自動再起動 (10分以上動いた後の異常終了は数え直す)。使い切ったら `asr_stopped`。`restart_asr` は止めてから起動し直す。アプリ終了時は実行中のセットアップ (uv・ダウンロード・動作確認) を止めて最大3秒待ち、stdin を閉じてサーバーを止める (3秒で終わらなければ kill)。未導入なら `runtime_missing` (action `start_setup`)
+
+### アンインストール (アプリ内)
+
+`uninstall` の順序: (本番) 実行中のアプリ本体の場所が分からない・App Translocation (パスに `/AppTranslocation/` を含む。`SecTranslocateIsTranslocatedURL` は公開ヘッダにないため使わない) なら何も消さずにエラー (「アプリケーション」フォルダへの移動を促す) → 音声入力OFF・セットアップ停止 (削除中の扱い)・ASR停止 → ログイン項目の解除 → ファイル削除 (上記対象のうち存在するもの。名前にバンドルIDを含む・`~/Library` 配下かデータディレクトリ (目印あり) であることを確かめてから消す) → `defaults delete <バンドルID>` → `tccutil reset All <バンドルID>` → アプリ本体を `NSFileManager.trashItemAtURL` でゴミ箱へ → 終了。途中で失敗しても残りは続け、本体をゴミ箱に入れられなかった場合はエラーを返して終了しない。開発ビルドでは target ディレクトリ外のアプリ本体は対象にしない
+
+- `mukuchi.app/Contents/MacOS/mukuchi --unregister-login-item`: ログイン項目 (SMAppService) を解除して終了する (UI は起動しない。終了コード 0=成功 1=失敗)。`scripts/uninstall.sh` が本体をゴミ箱に入れる前に呼ぶ
 
 ## インターフェース
 
@@ -92,7 +111,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 - `POST /transcribe` — body: 16kHz/mono/16bit PCMのWAV (`Content-Type: audio/wav`)。query: `language` (既定 `Japanese`)、`context` (語彙ヒント、任意) → `200 {"text":"...","elapsed_ms":123}`
   - `elapsed_ms`: サーバーがbodyを受信し終えてから応答するまでの時間 (WAVデコード + 推論待ち + 推論)。ネットワーク転送は含まない
   - エラー: 不正なWAV/形式違い → `400`、body が 5MiB (約120秒分+余裕) を超える → `413`
-- 開発用 (デバッグビルドのみ): `MUKUCHI_DEV_AUDIO_FILE=<wav>` でマイクの代わりにWAVを実時間で流す (その後は無音)。`MUKUCHI_DEV_AUTO_LISTEN=1` でASR準備完了後に自動でONにする (セットアップ画面は開かない)。`MUKUCHI_DEV_TARGET_BUNDLE=<bundle id>` でそのアプリが前面の時だけ入力する (自動テストで他のアプリに入力しないため)。`MUKUCHI_DEV_NO_PARTIAL=1` で途中表示を送らない (遅延の比較用)。`MUKUCHI_ASR_URL` もデバッグビルドのみ有効で、ループバックの http のみ受け付ける
+- 開発用 (デバッグビルドのみ): `MUKUCHI_DEV_AUDIO_FILE=<wav>` でマイクの代わりにWAVを実時間で流す (その後は無音)。`MUKUCHI_DEV_AUTO_LISTEN=1` でASR準備完了後に自動でONにする (セットアップ画面は開かない)。`MUKUCHI_DEV_TARGET_BUNDLE=<bundle id>` でそのアプリが前面の時だけ入力する (自動テストで他のアプリに入力しないため)。`MUKUCHI_DEV_NO_PARTIAL=1` で途中表示を送らない (遅延の比較用)。`MUKUCHI_ASR_URL` もデバッグビルドのみ有効で、ループバックの http のみ受け付ける。`MUKUCHI_DEV_DATA_DIR=<dir>` でデータディレクトリを差し替える (本物のデータ・モデルに触れずに検証するため。受け付ける条件は「識別子・パス」の削除の安全策)。`MUKUCHI_DEV_UV` `MUKUCHI_DEV_ASR_SERVER_DIR` `MUKUCHI_DEV_VERIFY_WAV` で同梱物 (uv・asr-server/・verify.wav) を個別に差し替える。`MUKUCHI_DEV_UNINSTALL_DRY_RUN=1` でアンインストールは何も消さず対象と操作をログに出すだけ (アプリも終了しない)
 - 推論は直列実行 (MLXはスレッド束縛のため、読み込み・ウォームアップ・全推論を専用の1スレッドで行う)。無音由来の定型ハルシネーション除外はサーバー側で行う
 - リアルタイムプレビューも同じ `/transcribe` を使う(専用APIは設けない)
 
@@ -159,11 +178,13 @@ type Permissions = {
 
 type ProvisioningStatus = {
   stage: "idle" | "runtime" | "model" | "verify" | "done" | "paused" | "error";
+  // 常に runtime, model, verify の順の3件。paused・error の時、止まった項目は "active" のまま
+  // bytesTotal: model はファイル一覧の取得後に決まる (再開時は取得済みの分が bytesDone に入る)。runtime・verify は大きさが分からないため常に null
   items: { id: "runtime" | "model" | "verify"; state: "pending" | "active" | "done"; bytesDone: number; bytesTotal: number | null }[];
-  bytesDone: number;
+  bytesDone: number;          // 全体 = bytesTotal の分かる項目 (model) の合計
   bytesTotal: number | null;
-  etaSeconds: number | null;
-  error: string | null;
+  etaSeconds: number | null;  // model の取得中のみ (直近10秒の速度から。最初の2秒は null)
+  error: string | null;       // stage=error の時の表示用 (日本語)
 };
 
 type StorageUsage = { runtimeBytes: number; modelBytes: number; otherBytes: number };
@@ -187,10 +208,10 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `open_system_settings` | `{ pane: "microphone" \| "accessibility" \| "login_items" }` → `()` | システム設定を開く。`login_items` はログイン項目 (`SMAppService.openSystemSettingsLoginItems`。launchAtLogin を ON にできなかった時の案内用) |
 | `restart_asr` | → `()` | エラーからの復旧 |
 | `get_provisioning_status` | → `ProvisioningStatus` | |
-| `start_provisioning` / `pause_provisioning` | → `()` | ダウンロード開始・再開 / 一時停止 |
-| `get_storage_usage` | → `StorageUsage` | |
-| `delete_runtime_and_model` | → `()` | 実行環境とモデルのみ削除 |
-| `get_uninstall_targets` | → `{ path: string; bytes: number }[]` | 確認ダイアログの一覧 |
+| `start_provisioning` / `pause_provisioning` | → `()` | ダウンロード開始・再開・失敗後の再試行 (実行中・完了済みなら何もしない) / 一時停止 (止まるまで待って返る) |
+| `get_storage_usage` | → `StorageUsage` | runtime = python・venv・uv・cache・asr-server、model = models、other = settings.json・provisioned.json・ログ (ディスク上の使用量) |
+| `delete_runtime_and_model` | → `()` | 実行環境とモデルのみ削除 (セットアップ一時停止・ASR停止の後。設定・ログは残す)。以後 provisioning は idle、status は `runtime_missing` |
+| `get_uninstall_targets` | → `{ path: string; bytes: number }[]` | 確認ダイアログの一覧 (存在するものだけ。bytes はディスク上の使用量) |
 | `uninstall` | → `()` | 完全にアンインストール(完了後にアプリ終了) |
 | `list_running_apps` | → `{ bundleId: string; name: string }[]` | 入力しないアプリの追加候補 |
 | `open_logs_folder` | → `()` | Finderで開く |
@@ -213,4 +234,4 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `settings-navigate` | `{ category: SettingsCategory }` | settingsウィンドウ宛。表示中のカテゴリを切り替える |
 | `permissions-changed` | `Permissions` | 権限の変化を検知した時 |
 | `input-devices-changed` | `AudioDevice[]` | マイクの接続・取り外し・既定の変更を検知した時 (2秒ごとのポーリング。settings/setup を開いている間か ON の間のみ) |
-| `provisioning-progress` | `ProvisioningStatus` | 約4Hz |
+| `provisioning-progress` | `ProvisioningStatus` | 実行中は変化があれば約4Hz。段階の変化 (開始・完了・一時停止・失敗) は即時 |

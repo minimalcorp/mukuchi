@@ -100,6 +100,21 @@ pub fn open_path(path: &std::path::Path) -> Result<()> {
     }
 }
 
+/// ゴミ箱に入れる (アンインストールでアプリ本体に使う。rm と違い利用者が取り戻せる)
+pub fn trash(path: &std::path::Path) -> Result<()> {
+    let s = path.to_str().context("パスが UTF-8 ではありません")?;
+    let url = NSURL::fileURLWithPath(&NSString::from_str(s));
+    objc2_foundation::NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, None)
+        .map_err(|e| {
+            anyhow!(
+                "ゴミ箱に入れられません: {} ({})",
+                path.display(),
+                e.localizedDescription()
+            )
+        })
+}
+
 // ---- アプリ -----------------------------------------------------------------
 
 pub fn frontmost_app() -> Option<FrontApp> {

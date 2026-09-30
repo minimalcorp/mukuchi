@@ -9,18 +9,16 @@ use tauri::{AppHandle, Manager, State};
 use crate::audio::{self, AudioDevice};
 use crate::core::Core;
 use crate::permissions::{self, Pane, Permissions};
+use crate::provisioning::ProvisioningStatus;
 use crate::settings::Settings;
 use crate::state::AppStatus;
+use crate::storage::{StorageUsage, UninstallTarget};
 use crate::windows::{self, SettingsCategory};
 
 type CmdResult<T> = Result<T, String>;
 
 fn err(e: anyhow::Error) -> String {
     format!("{e:#}")
-}
-
-fn not_implemented(name: &str) -> String {
-    format!("not_implemented: {name} は未実装です")
 }
 
 #[tauri::command]
@@ -105,41 +103,49 @@ pub fn get_app_info(app: tauri::AppHandle) -> AppInfo {
     }
 }
 
-// ---- 未実装 (P2 以降) -------------------------------------------------------
+// ---- セットアップ・ストレージ ------------------------------------------------
 
 #[tauri::command]
-pub fn get_provisioning_status() -> CmdResult<()> {
-    Err(not_implemented("get_provisioning_status"))
+pub fn get_provisioning_status(core: State<'_, Arc<Core>>) -> ProvisioningStatus {
+    core.provisioning.status()
 }
 
 #[tauri::command]
-pub fn start_provisioning() -> CmdResult<()> {
-    Err(not_implemented("start_provisioning"))
+pub fn start_provisioning(core: State<'_, Arc<Core>>) {
+    core.provisioning.start();
 }
 
 #[tauri::command]
-pub fn pause_provisioning() -> CmdResult<()> {
-    Err(not_implemented("pause_provisioning"))
+pub async fn pause_provisioning(core: State<'_, Arc<Core>>) -> CmdResult<()> {
+    core.provisioning.pause().await;
+    Ok(())
 }
 
 #[tauri::command]
-pub fn get_storage_usage() -> CmdResult<()> {
-    Err(not_implemented("get_storage_usage"))
+pub async fn get_storage_usage(core: State<'_, Arc<Core>>) -> CmdResult<StorageUsage> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || core.storage_usage())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn delete_runtime_and_model() -> CmdResult<()> {
-    Err(not_implemented("delete_runtime_and_model"))
+pub async fn delete_runtime_and_model(core: State<'_, Arc<Core>>) -> CmdResult<()> {
+    core.inner().delete_runtime_and_model().await.map_err(err)
 }
 
 #[tauri::command]
-pub fn get_uninstall_targets() -> CmdResult<()> {
-    Err(not_implemented("get_uninstall_targets"))
+pub async fn get_uninstall_targets(core: State<'_, Arc<Core>>) -> CmdResult<Vec<UninstallTarget>> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || core.uninstall_targets())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(err)
 }
 
 #[tauri::command]
-pub fn uninstall() -> CmdResult<()> {
-    Err(not_implemented("uninstall"))
+pub async fn uninstall(core: State<'_, Arc<Core>>) -> CmdResult<()> {
+    core.inner().uninstall().await.map_err(err)
 }
 
 #[tauri::command]

@@ -5,18 +5,24 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
 
 use crate::asr::{self, AsrClient, HttpAsrClient, Transcript};
+use crate::asr_process::{AsrEvent, AsrProcess, LaunchSpec};
 use crate::audio::{self, Source};
 use crate::insert::{InsertConfig, InsertQueue, Job, UtteranceResult};
 use crate::macos::{self, MicAuthorization};
+use crate::paths::{DataPaths, Resources};
 use crate::pipeline::{self, PipelineSink, Running, StartError};
+use crate::provisioning::hf::HfModel;
+use crate::provisioning::runtime::UvRuntime;
+use crate::provisioning::{Provisioner, ServerVerify, Stage};
 use crate::settings::{Settings, SettingsStore};
 use crate::state::{AppError, ErrorCode, StateManager, DONE_DISPLAY};
+use crate::storage::{self, DevScope, UninstallContext};
 use crate::vad::VadParams;
 
 pub mod events {
@@ -28,7 +34,11 @@ pub mod events {
     pub const SETTINGS_CHANGED: &str = "settings-changed";
     pub const PERMISSIONS_CHANGED: &str = "permissions-changed";
     pub const INPUT_DEVICES_CHANGED: &str = "input-devices-changed";
+    pub const PROVISIONING_PROGRESS: &str = "provisioning-progress";
 }
+
+/// 未バンドルの開発実行 (tauri dev) で WebKit がキャッシュ等に使う名前 (実行ファイル名)
+const DEV_PRODUCT_NAME: &str = "mukuchi";
 
 /// 開発用: 設定するとマイクの代わりにこの WAV を入力にする (デバッグビルドのみ)
 pub const ENV_DEV_AUDIO_FILE: &str = "MUKUCHI_DEV_AUDIO_FILE";
@@ -142,6 +152,12 @@ pub struct Core {
     app: AppHandle,
     pub settings: SettingsStore,
     pub state: StateManager,
+    paths: DataPaths,
+    log_dir: PathBuf,
+    /// 開発時の接続先 (MUKUCHI_ASR_URL)。あれば ASR サーバーを自分では起動しない
+    dev_asr_url: Option<String>,
+    asr_process: Arc<AsrProcess>,
+    pub provisioning: Arc<Provisioner>,
     asr: RwLock<Option<Arc<HttpAsrClient>>>,
     insert: Mutex<Option<InsertQueue>>,
     running: Mutex<Option<Capture>>,
@@ -156,11 +172,41 @@ pub struct Core {
 }
 
 impl Core {
-    pub fn new(app: AppHandle, settings_path: PathBuf) -> Arc<Self> {
+    pub fn new(
+        app: AppHandle,
+        paths: DataPaths,
+        log_dir: PathBuf,
+        resources: Resources,
+    ) -> Result<Arc<Self>> {
+        let asr_process = Arc::new(AsrProcess::new());
+        let model = HfModel::distributed();
+        let emit_app = app.clone();
+        let provisioning = Provisioner::new(
+            paths.clone(),
+            model.clone(),
+            Arc::new(UvRuntime {
+                paths: paths.clone(),
+                resources: resources.clone(),
+                log_file: log_dir.join("provisioning.log"),
+            }),
+            Arc::new(ServerVerify {
+                asr: asr_process.clone(),
+                spec: launch_spec(&paths, &log_dir, &model),
+                wav: resources.verify_wav.clone(),
+            }),
+            move |s| {
+                let _ = emit_app.emit(events::PROVISIONING_PROGRESS, s);
+            },
+        )?;
         let core = Arc::new(Self {
             app,
-            settings: SettingsStore::load(settings_path),
+            settings: SettingsStore::load(paths.settings()),
             state: StateManager::new(),
+            dev_asr_url: asr::resolve_endpoint(),
+            paths,
+            log_dir,
+            asr_process,
+            provisioning,
             asr: RwLock::new(None),
             insert: Mutex::new(None),
             running: Mutex::new(None),
@@ -174,7 +220,19 @@ impl Core {
         core.state.subscribe(move |status| {
             let _ = app.emit(events::STATUS_CHANGED, status);
         });
-        core
+        let weak = Arc::downgrade(&core);
+        core.asr_process.subscribe(move |ev| {
+            if let Some(c) = weak.upgrade() {
+                c.on_asr_event(ev);
+            }
+        });
+        let weak = Arc::downgrade(&core);
+        core.provisioning.on_finish(move |stage| {
+            if let Some(c) = weak.upgrade() {
+                c.on_provisioning_finished(stage);
+            }
+        });
+        Ok(core)
     }
 
     pub fn app(&self) -> &AppHandle {
@@ -213,7 +271,17 @@ impl Core {
 
         let core = self.clone();
         tauri::async_runtime::spawn(async move { core.connect_asr().await });
+        self.clone().spawn_health_monitor();
         Ok(())
+    }
+
+    /// 本番の ASR サーバー (自分で起動するもの) を使うか。開発で MUKUCHI_ASR_URL を指定した時は false
+    fn managed_asr(&self) -> bool {
+        self.dev_asr_url.is_none()
+    }
+
+    fn launch_spec(&self) -> LaunchSpec {
+        launch_spec(&self.paths, &self.log_dir, &HfModel::distributed())
     }
 
     fn asr_client(&self) -> Option<Arc<HttpAsrClient>> {
@@ -221,12 +289,8 @@ impl Core {
     }
 
     async fn connect_asr(self: Arc<Self>) {
-        let Some(url) = asr::resolve_endpoint() else {
-            log::error!(
-                "{} が未設定。本番のASRサーバー起動は未実装 (P4)",
-                asr::ENV_ASR_URL
-            );
-            self.state.set_error(AppError::runtime_missing());
+        let Some(url) = self.dev_asr_url.clone() else {
+            self.start_managed_asr().await;
             return;
         };
         let client = match HttpAsrClient::new(url) {
@@ -257,14 +321,266 @@ impl Core {
         }
         *self.asr.write().unwrap_or_else(|p| p.into_inner()) = Some(client);
         self.state.set_asr_ready(true);
-        self.clone().spawn_health_monitor();
+        self.auto_listen().await;
+    }
 
+    async fn auto_listen(self: &Arc<Self>) {
         if dev_flag(ENV_DEV_AUTO_LISTEN) {
             log::info!("{ENV_DEV_AUTO_LISTEN}=1 のため音声入力をONにする");
             if let Err(e) = self.set_listening(true).await {
                 log::error!("自動ONに失敗: {e:#}");
             }
         }
+    }
+
+    /// 本番: 導入済みならサーバーを起動する。
+    /// 以前に導入済みでアプリの更新により版が変わった場合は、変わった段階だけ自動でやり直す (読み込み中の表示のまま)
+    async fn start_managed_asr(self: &Arc<Self>) {
+        if self.provisioning.is_done() {
+            self.asr_process.start(self.launch_spec(), true).await;
+        } else if self.settings.get().setup_completed && self.provisioning.has_record() {
+            log::info!("実行環境またはモデルの版が変わったため導入し直す");
+            self.provisioning.start();
+        } else {
+            log::info!("実行環境とモデルが未導入");
+            self.state.set_error(AppError::runtime_missing());
+        }
+    }
+
+    fn set_asr_client(&self, client: Option<Arc<HttpAsrClient>>) {
+        *self.asr.write().unwrap_or_else(|p| p.into_inner()) = client;
+    }
+
+    /// ASR のエラー (未導入・停止) を解除する。他のエラー (権限等) は残す
+    fn clear_asr_error(&self) {
+        if matches!(
+            self.state.error().map(|e| e.code),
+            Some(ErrorCode::RuntimeMissing | ErrorCode::AsrStopped)
+        ) {
+            self.state.clear_error();
+        }
+    }
+
+    /// サーバーが使えなくなった (起動し直し中)。ON なら録音を止める
+    fn asr_unavailable(self: &Arc<Self>) {
+        self.set_asr_client(None);
+        self.state.set_asr_ready(false);
+        if self.state.is_listening() {
+            let core = self.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = core.set_listening(false).await;
+            });
+        }
+    }
+
+    fn on_asr_event(self: &Arc<Self>, ev: AsrEvent) {
+        // 開発で外部のサーバーに接続している間は、verify で起動したサーバーを使わない
+        if !self.managed_asr() {
+            return;
+        }
+        match ev {
+            AsrEvent::Starting => {
+                self.asr_unavailable();
+                self.clear_asr_error();
+            }
+            AsrEvent::Ready(url) => match HttpAsrClient::new(url) {
+                Ok(c) => {
+                    log::info!("ASRサーバーに接続: {}", c.base_url());
+                    self.set_asr_client(Some(Arc::new(c)));
+                    self.clear_asr_error();
+                    if self.provisioning.is_done() {
+                        self.asr_became_ready();
+                    } else {
+                        // セットアップの動作確認中: /transcribe の確認が済むまで使える状態にしない
+                        // (on_provisioning_finished で使える状態にする)
+                        log::info!("動作確認が済むまで準備完了にしない");
+                    }
+                }
+                Err(e) => self
+                    .state
+                    .set_error(AppError::asr_stopped(format!("{e:#}"))),
+            },
+            AsrEvent::Crashed {
+                will_restart: true, ..
+            } => self.asr_unavailable(),
+            AsrEvent::Crashed {
+                will_restart: false,
+                detail,
+            } => {
+                self.set_asr_client(None);
+                if self.provisioning.is_done() {
+                    self.fail_later(AppError::asr_stopped(detail), None);
+                } else {
+                    // セットアップの動作確認での失敗 (セットアップ画面に表示される)
+                    self.state.set_error(AppError::runtime_missing());
+                }
+            }
+            AsrEvent::Stopped => {
+                self.asr_unavailable();
+                if !self.provisioning.is_done() {
+                    self.state.set_error(AppError::runtime_missing());
+                }
+            }
+        }
+    }
+
+    fn asr_became_ready(self: &Arc<Self>) {
+        self.state.set_asr_ready(true);
+        let core = self.clone();
+        tauri::async_runtime::spawn(async move { core.auto_listen().await });
+    }
+
+    fn on_provisioning_finished(self: &Arc<Self>, stage: Stage) {
+        if self.provisioning.is_suspended() {
+            // 削除の実行中 (削除する側がサーバーを止め、未導入に戻す)
+            return;
+        }
+        match stage {
+            Stage::Done if self.managed_asr() => {
+                // 動作確認で起動したサーバーをそのまま使う。以後は異常終了時に起動し直す
+                self.asr_process.set_auto_restart(true);
+                if self.asr_process.is_running() {
+                    if self.asr_client().is_some() {
+                        self.asr_became_ready();
+                    }
+                } else {
+                    let core = self.clone();
+                    tauri::async_runtime::spawn(async move {
+                        core.asr_process.start(core.launch_spec(), true).await;
+                    });
+                }
+            }
+            Stage::Done => {
+                // 開発で外部のサーバーを使っている: 動作確認のサーバーは止める (メモリを二重に使わない)
+                let core = self.clone();
+                tauri::async_runtime::spawn(async move { core.asr_process.stop().await });
+            }
+            _ if self.managed_asr() && !self.state.is_asr_ready() => {
+                self.state.set_error(AppError::runtime_missing());
+            }
+            _ => {}
+        }
+    }
+
+    /// 開発ビルドが本番のバンドルIDで動いていないか (storage::destructive_ops_allowed)
+    fn destructive_ops_allowed(&self) -> bool {
+        let id = &self.app.config().identifier;
+        let ok = storage::destructive_ops_allowed(cfg!(debug_assertions), id);
+        if !ok {
+            log::warn!("開発ビルドが dev でないバンドルID ({id}) で動いているため、削除を行わない");
+        }
+        ok
+    }
+
+    /// 実行環境とモデルのみ削除 (設定・ログは残す)。以後は未導入 (runtime_missing)
+    pub async fn delete_runtime_and_model(self: &Arc<Self>) -> Result<()> {
+        if !self.destructive_ops_allowed() {
+            return Err(anyhow!(
+                "開発ビルドを本番のバンドルIDで実行しているため削除しません"
+            ));
+        }
+        if self.managed_asr() {
+            self.set_listening(false).await?;
+        }
+        // 削除が終わるまでセットアップ・サーバーの起動をさせない (落とすと解除)
+        let _suspended = self.provisioning.suspend().await?;
+        self.asr_process.stop().await;
+        let paths = self.paths.clone();
+        let result =
+            tauri::async_runtime::spawn_blocking(move || storage::delete_runtime_and_model(&paths))
+                .await
+                .map_err(|e| anyhow!("削除処理が異常終了しました: {e}"));
+        // 失敗しても (途中まで消えている・サーバーは止めた) 未導入に戻す。記録は最初に消すため、
+        // 再セットアップでは残っているものを確かめ直す
+        self.provisioning.reset();
+        if self.managed_asr() {
+            self.state.set_error(AppError::runtime_missing());
+        }
+        result?.map_err(|e| {
+            log::error!("実行環境とモデルを削除できません: {e:#}");
+            anyhow!("実行環境とモデルを削除できません")
+        })?;
+        log::info!("実行環境とモデルを削除した");
+        Ok(())
+    }
+
+    pub fn storage_usage(&self) -> storage::StorageUsage {
+        storage::usage(&self.paths, &self.log_dir)
+    }
+
+    fn uninstall_context(&self) -> Result<(PathBuf, String, Option<PathBuf>)> {
+        let home = tauri::Manager::path(&self.app)
+            .home_dir()
+            .context("ホームディレクトリが分かりません")?;
+        let id = self.app.config().identifier.clone();
+        Ok((home, id, storage::current_app_bundle()))
+    }
+
+    fn with_uninstall_context<T>(&self, f: impl FnOnce(&UninstallContext) -> T) -> Result<T> {
+        let (home, id, bundle) = self.uninstall_context()?;
+        let target_dir = storage::build_target_dir();
+        let ctx = UninstallContext {
+            home: &home,
+            bundle_id: &id,
+            data_dir: self.paths.root(),
+            log_dir: &self.log_dir,
+            app_bundle: bundle,
+            dev: cfg!(debug_assertions).then(|| DevScope {
+                product_name: DEV_PRODUCT_NAME,
+                target_dir: target_dir.as_deref(),
+            }),
+        };
+        Ok(f(&ctx))
+    }
+
+    pub fn uninstall_targets(&self) -> Result<Vec<storage::UninstallTarget>> {
+        self.with_uninstall_context(|ctx| storage::uninstall_plan(ctx).targets())
+    }
+
+    /// 完全にアンインストールする。本体をゴミ箱に入れたらアプリを終了する。
+    /// 開発ビルドで MUKUCHI_DEV_UNINSTALL_DRY_RUN=1 なら何も変えずにログに出す
+    pub async fn uninstall(self: &Arc<Self>) -> Result<()> {
+        // 開発ビルドが本番のバンドルIDで動いている時は、指定がなくても dry-run にする
+        let dry_run =
+            dev_flag(storage::ENV_DEV_UNINSTALL_DRY_RUN) || !self.destructive_ops_allowed();
+        // 何も消す前に確かめる (本体の場所が分からない・App Translocation なら中止)
+        self.with_uninstall_context(|ctx| {
+            storage::check_app_bundle(ctx.app_bundle.as_deref(), ctx.dev.is_some())
+        })??;
+        let suspended = if dry_run {
+            None
+        } else {
+            self.set_listening(false).await?;
+            let s = self.provisioning.suspend().await?;
+            self.asr_process.stop().await;
+            Some(s)
+        };
+        let core = self.clone();
+        let trashed = tauri::async_runtime::spawn_blocking(move || {
+            core.with_uninstall_context(|ctx| uninstall_blocking(ctx, dry_run))
+        })
+        .await
+        .map_err(|e| anyhow!("アンインストール処理が異常終了しました: {e}"));
+        if suspended.is_some() {
+            // 本体を消せずに続ける場合 (開発・失敗): データは消えているため未導入に戻す
+            self.provisioning.reset();
+            if self.managed_asr() {
+                self.state.set_error(AppError::runtime_missing());
+            }
+        }
+        drop(suspended);
+        let trashed = trashed???;
+        if trashed {
+            log::info!("アンインストール完了。終了する");
+            self.app.exit(0);
+        }
+        Ok(())
+    }
+
+    /// アプリ終了時: セットアップ (uv・ダウンロード・動作確認) と ASR サーバーを止める
+    pub fn shutdown(&self) {
+        self.provisioning.shutdown_blocking(Duration::from_secs(3));
+        self.asr_process.shutdown_blocking();
     }
 
     /// ON の間、ASR サーバーが落ちていないか定期的に確かめる。
@@ -315,9 +631,20 @@ impl Core {
         self.fail(AppError::asr_stopped(detail), None).await;
     }
 
-    /// エラーからの復旧 (restart_asr)。開発時はサーバーを process-compose が管理するため、
-    /// 応答するかを確かめ直すだけ。本番のプロセス再起動は P4。
+    /// エラーからの復旧 (restart_asr)。本番はサーバーを起動し直す (読み込み中の表示になる)。
+    /// 開発で外部のサーバー (process-compose) に接続している時は、応答するかを確かめ直すだけ。
     pub async fn restart_asr(self: &Arc<Self>) -> Result<()> {
+        if self.provisioning.is_suspended() {
+            return Err(anyhow!("削除を実行中です"));
+        }
+        if self.managed_asr() {
+            if !self.provisioning.is_done() {
+                return Err(anyhow!("実行環境とモデルが導入されていません"));
+            }
+            log::info!("文字起こしサーバーを起動し直す");
+            self.asr_process.start(self.launch_spec(), true).await;
+            return Ok(());
+        }
         let Some(client) = self.asr_client() else {
             if self.state.error().map(|e| e.code) == Some(ErrorCode::RuntimeMissing) {
                 return Err(anyhow!("実行環境とモデルが導入されていません"));
@@ -729,6 +1056,89 @@ impl Core {
             );
             let _ = tx.send(result);
         });
+    }
+}
+
+fn launch_spec(paths: &DataPaths, log_dir: &std::path::Path, model: &HfModel) -> LaunchSpec {
+    LaunchSpec {
+        python: paths.venv_python(),
+        model_dir: model.snapshot_dir(&paths.models()),
+        hf_home: paths.models(),
+        cwd: paths.venv(),
+        log_file: log_dir.join("asr-server.log"),
+    }
+}
+
+/// アンインストールの本体 (ブロッキング)。アプリ本体をゴミ箱に入れたかを返す。
+/// 順序: ログイン項目の解除 → ファイル削除 → 設定 (defaults) → TCC (LaunchServices に登録された
+/// アプリが要るため本体より先) → 本体をゴミ箱へ。途中で失敗しても残りは続け、最後にまとめて報告する
+fn uninstall_blocking(ctx: &UninstallContext, dry_run: bool) -> Result<bool> {
+    let plan = storage::uninstall_plan(ctx);
+    let mut errors: Vec<String> = Vec::new();
+    if dry_run {
+        log::info!("[dry-run] ログイン項目を解除");
+    } else if let Err(e) = crate::autostart::set_enabled(false) {
+        log::warn!("ログイン項目を解除できません: {e:#}");
+        errors.push("ログイン項目".into());
+    }
+    if let Err(e) = storage::delete_files(&plan, ctx, dry_run) {
+        log::error!("{e:#}");
+        errors.push("データ".into());
+    }
+    if let Some((domain, plist)) = &plan.preferences {
+        if dry_run {
+            log::info!("[dry-run] defaults delete {domain}");
+        } else {
+            // plist の削除だけでは cfprefsd のキャッシュから書き戻されうるため defaults で消す
+            run_tool("/usr/bin/defaults", &["delete", domain]);
+            if plist.exists() {
+                if let Err(e) = std::fs::remove_file(plist) {
+                    log::warn!("{}: {e}", plist.display());
+                    errors.push("設定".into());
+                }
+            }
+        }
+    }
+    if dry_run {
+        log::info!("[dry-run] tccutil reset All {}", ctx.bundle_id);
+    } else if !run_tool("/usr/bin/tccutil", &["reset", "All", ctx.bundle_id]) {
+        errors.push("権限の設定".into());
+    }
+    let mut trashed = false;
+    match &plan.app_bundle {
+        Some(b) if dry_run => log::info!("[dry-run] ゴミ箱へ: {}", b.display()),
+        Some(b) => match macos::trash(b) {
+            Ok(()) => trashed = true,
+            Err(e) => {
+                log::error!("{e:#}");
+                errors.push("アプリ本体".into());
+            }
+        },
+        None => log::info!("アプリ本体なし (未バンドルの実行)"),
+    }
+    if !errors.is_empty() && !trashed {
+        return Err(anyhow!("削除できないものがあります: {}", errors.join("・")));
+    }
+    Ok(trashed)
+}
+
+/// 外部コマンドを実行し、成功したかを返す (出力はログへ)
+fn run_tool(program: &str, args: &[&str]) -> bool {
+    match std::process::Command::new(program).args(args).output() {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            log::warn!(
+                "{program} {}: {} {}",
+                args.join(" "),
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            log::warn!("{program} を実行できません: {e}");
+            false
+        }
     }
 }
 

@@ -131,9 +131,13 @@ export function PanelWindow() {
       )}
     >
       <PanelFrame>
-        {/* 切り替えのアニメーション中は、切り替え後の内容を見えないまま置いて最終の大きさをウィンドウに伝え、
-            その上に大きさだけが変わる面を重ねる (ListeningPanel の展開・収縮と同じ考え方) */}
-        <div className={cn("grid", ALIGN[anchor.vertical], GRID_JUSTIFY[anchor.horizontal])}>
+        {/* 切り替えのアニメーション中は、切り替え後の内容を見えないまま置き、その上に大きさだけが変わる面を重ねる。
+            ウィンドウはアニメーションの間 切り替え前と後の大きい方に保ち、終わってから最終の大きさにする
+            (ListeningPanel の展開・収縮と同じ考え方。縮む途中でウィンドウを変えると、描画と反映がずれて面が揺れる) */}
+        <div
+          className={cn("grid", ALIGN[anchor.vertical], GRID_JUSTIFY[anchor.horizontal])}
+          style={view.morphFrom ? { minWidth: view.morphFrom.width, minHeight: view.morphFrom.height } : undefined}
+        >
           <div ref={bodyRef} className={cn("[grid-area:1/1]", view.morphFrom && "invisible")}>
             {body}
           </div>
@@ -198,7 +202,9 @@ function PanelFrame({ children }: { children: ReactNode }) {
     let last = "";
     const send = () => {
       const rect = el.getBoundingClientRect();
-      const width = Math.ceil(rect.width);
+      // 幅は偶数に切り上げる。Rust は中央のアンカーで floor(中心 - 幅/2) に置くため、奇数だと描画内容の中心が
+      // 0.5pt ずれ、状態 (ピルの幅) が変わるたびに左右に揺れて見える。フロントエンドはウィンドウ内で中央に置くので端数は吸収される
+      const width = Math.ceil(rect.width / 2) * 2;
       const height = Math.ceil(rect.height);
       const key = `${width}x${height}`;
       if (key === last) return;
@@ -325,6 +331,9 @@ function ErrorActionButton({ error }: { error: AppError }) {
 
 /* ---------- ON (待機中のメーター / 発話中の展開表示) ---------- */
 
+// 収縮の終わりを知るためのカードの大きさのアニメーション (CSS transition)
+const SIZE_TRANSITIONS = new Set(["width", "grid-template-rows"]);
+
 function ListeningPanel({ anchor, isOn, expanded, items }: {
   anchor: PanelAnchor;
   isOn: boolean;
@@ -333,16 +342,46 @@ function ListeningPanel({ anchor, isOn, expanded, items }: {
 }) {
   const previewRef = useRef<HTMLDivElement>(null);
   const targetRef = useRef<HTMLDivElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const rowsRef = useRef<HTMLDivElement>(null);
   const drag = usePanelDrag();
 
+  // 収縮のアニメーション中か。展開 → 収縮に変わった描画で true にし (描画中に前回の値と比べる)、
+  // カードの大きさのアニメーションが終わったら false にする
+  const [collapsing, setCollapsing] = useState(false);
+  const [prevExpanded, setPrevExpanded] = useState(expanded);
+  if (prevExpanded !== expanded) {
+    setPrevExpanded(expanded);
+    setCollapsing(!expanded);
+  }
+
+  useEffect(() => {
+    if (!collapsing) return;
+    const running = [cardRef.current, rowsRef.current]
+      .flatMap((el) => el?.getAnimations() ?? [])
+      .filter((a) => a instanceof CSSTransition && SIZE_TRANSITIONS.has(a.transitionProperty));
+    let active = true;
+    // 取り消された (再び展開した等) 場合も終わりとして扱う。再び展開した時は cleanup で active が false になっている。
+    // 動きを減らす設定 (transition なし) では running が空で、すぐ終わる
+    void Promise.allSettled(running.map((a) => a.finished)).then(() => {
+      if (active) setCollapsing(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [collapsing]);
+
   // 展開・収縮後の最終の大きさを透明な要素 (target) に与え、カードと同じ位置に重ねる。
-  // 親 (PanelFrame) はアニメーション中のカードと target の大きい方になるので、
-  // 展開時は開始時点で最終の大きさがウィンドウに伝わり、収縮時はカードに合わせて縮む (途中でカードが切れない)。
+  // 親 (PanelFrame) はアニメーション中のカードと target の大きい方になる。
+  // 展開時は開始時点で最終の大きさを与え、収縮中は展開時の大きさのまま保って、終わってから最終の大きさにする。
+  // これでウィンドウの大きさ (set_panel_size) は展開・収縮それぞれ 1 回だけ変わる。
+  // 収縮中にウィンドウを少しずつ縮めると、ネイティブのウィンドウの変更と WebView の描画が同じフレームに揃わず、
+  // アンカーの辺 (例: 下端) が上下に揺れて見えるため。
   // 描画前に測るため useLayoutEffect で DOM に直接書く (state にすると 1 フレーム遅れる)
   useLayoutEffect(() => {
     const preview = previewRef.current;
     const target = targetRef.current;
-    if (!preview || !target) return;
+    if (!preview || !target || collapsing) return;
     const apply = () => {
       const width = expanded ? CARD_WIDTH.expanded : CARD_WIDTH.pill;
       const rowHeight = expanded ? ROW_HEIGHT.expanded : ROW_HEIGHT.pill;
@@ -364,22 +403,33 @@ function ListeningPanel({ anchor, isOn, expanded, items }: {
       <div ref={targetRef} className="invisible [grid-area:1/1]" aria-hidden />
       <div
         {...drag}
+        ref={cardRef}
         data-expanded={expanded}
+        data-collapsing={collapsing}
         data-testid="panel-card"
         className={cn(
           "flex flex-col select-none border border-line-default bg-surface-card [grid-area:1/1]",
-          // ピル (240px) → 展開 (440px) は 180ms・標準イージング。文字の追加はアニメーションさせない
+          // ピル (240px) ⇄ 展開 (440px) は展開・収縮とも 180ms・標準イージング (幅と高さで同じ)。文字の追加はアニメーションさせない
           // 角丸は展開しても待機中のピルと同じ 18px に揃える (デザインは展開時 14px だが、形が変わって見えるため利用者の要望で統一)
-          "rounded-[18px] transition-[width,box-shadow] duration-[180ms] ease-standard",
+          "rounded-[18px] transition-[width,box-shadow] duration-[180ms] ease-standard motion-reduce:transition-none",
           expanded ? "shadow-lg" : "shadow-md",
         )}
         style={{ width: expanded ? CARD_WIDTH.expanded : CARD_WIDTH.pill }}
       >
         <div
-          className="grid transition-[grid-template-rows] duration-[180ms] ease-standard"
+          ref={rowsRef}
+          className="grid transition-[grid-template-rows] duration-[180ms] ease-standard motion-reduce:transition-none"
           style={{ gridTemplateRows: expanded ? "1fr" : "0fr" }}
         >
-          <div className="min-h-0 min-w-0 overflow-hidden">
+          <div
+            data-testid="panel-preview-clip"
+            className={cn(
+              "min-h-0 min-w-0 overflow-hidden transition-opacity ease-standard motion-reduce:transition-none",
+              // 収縮時は最終結果の文字を出したまま最初の 80ms で消す (縮むカードに切られていく文字を見せない)。
+              // 展開時はすぐ出す (展開の見た目は変えない)
+              expanded ? "opacity-100 duration-0" : "opacity-0 duration-(--duration-instant)",
+            )}
+          >
             {/* 展開時の幅で固定する。アニメーション中に文字が折り返し直されず、最終の高さを先に測れる */}
             <div style={{ width: CARD_WIDTH.expanded - CARD_BORDER * 2 }}>
               <Preview ref={previewRef} items={items} />

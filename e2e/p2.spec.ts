@@ -52,7 +52,7 @@ test("panel: 描画内容 (影の余白込み) の大きさを set_panel_size �
   expect(size.height).toBeGreaterThanOrEqual(Math.ceil(pill!.height) + 48);
 });
 
-test("panel: 展開は開始時点で最終の大きさを送り、収縮はカードに合わせて縮める", async ({ page }) => {
+test("panel: 展開は開始時点で、収縮は終わってから最終の大きさを送る", async ({ page }) => {
   await open(page, "window=panel&mock=idle", PANEL);
   await expect(page.getByText("待機中")).toBeVisible();
   const pill = await frameSize(page);
@@ -80,13 +80,8 @@ test("panel: 展開は開始時点で最終の大きさを送り、収縮はカ�
   await page.waitForTimeout(300);
   const collapsed = await frameSize(page);
   expect(collapsed).toEqual(pill);
-  const collapseCalls = (await panelSizes(page)).slice(beforeCollapse);
-  expect(collapseCalls.at(-1)).toEqual(pill);
-  // 縮む途中もカードより小さくしない (単調に縮む)
-  for (let i = 1; i < collapseCalls.length; i++) {
-    expect(collapseCalls[i].height).toBeLessThanOrEqual(collapseCalls[i - 1].height);
-    expect(collapseCalls[i].width).toBeLessThanOrEqual(collapseCalls[i - 1].width);
-  }
+  // 縮み終わってから最終の大きさを 1 回だけ送る (途中の大きさでウィンドウを縮めない。詳細は panel-collapse.spec.ts)
+  expect((await panelSizes(page)).slice(beforeCollapse)).toEqual([pill]);
 });
 
 // ---------- エラーからの復旧 ----------

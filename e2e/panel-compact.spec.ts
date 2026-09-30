@@ -204,11 +204,14 @@ test("panel compact: 円の縁 (ボタンの外) からもドラッグ・右ク�
 test("panel: 通常 → コンパクトは面が縮んでから円を出し、ウィンドウも縮む", async ({ page }) => {
   await open(page, "window=panel&mock=idle");
   await expect(page.getByText("待機中")).toBeVisible();
+  await expect.poll(async () => (await panelSizes(page)).length).toBeGreaterThan(0);
+  const before = (await panelSizes(page)).length;
   await mock(page, `api.invoke("update_settings", { patch: { panelStyle: "compact" } });`);
   await expect(page.getByTestId("panel-style-morph")).toBeVisible();
   await expect(page.getByTestId("panel-style-morph")).toHaveCount(0);
   await expect(compact(page)).toBeVisible();
-  await expect.poll(async () => (await panelSizes(page)).at(-1)).toEqual(COMPACT_SIZE);
+  // 縮み終わってから最終の大きさを 1 回だけ送る (途中の大きさでウィンドウを縮めない)
+  await expect.poll(async () => (await panelSizes(page)).slice(before)).toEqual([COMPACT_SIZE]);
 });
 
 test("panel: コンパクト → 通常は最初に最終の大きさを送る", async ({ page }) => {

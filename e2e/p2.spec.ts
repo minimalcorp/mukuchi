@@ -5,7 +5,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const PANEL = { width: 560, height: 260 };
-const SETUP = { width: 640, height: 520 };
 const SETTINGS = { width: 840, height: 640 };
 
 type Call = { cmd: string; args: Record<string, unknown> };
@@ -142,29 +141,12 @@ test("settings: open_settings(category) が開いている設定を切り替え�
 
 // ---------- 未実装 command ----------
 
-test("settings: ストレージの操作が未実装なら無効にして「未対応」を示す", async ({ page }) => {
-  await open(page, "window=settings&mock=unimplemented&category=storage", SETTINGS);
-  const uninstall = page.getByRole("button", { name: "アンインストール…" });
-  await expect(uninstall).toBeDisabled();
-  await expect(page.getByRole("button", { name: "削除" })).toBeDisabled();
-  await expect(page.getByText("—")).toBeVisible();
-  await page.getByTestId("unimplemented").last().hover();
-  await expect(page.getByRole("tooltip")).toContainText("この版では未対応です");
-});
-
 test("settings: 再起動が未実装なら押した後に無効にする", async ({ page }) => {
   await open(page, "window=settings&mock=unimplemented&category=recognition", SETTINGS);
   const restart = page.getByRole("button", { name: "再起動" });
   await expect(restart).toBeEnabled();
   await restart.click();
   await expect(restart).toBeDisabled();
-});
-
-test("setup: ダウンロードが未実装なら案内して次へ進める", async ({ page }) => {
-  await open(page, "window=setup&mock=download-unimplemented", SETUP);
-  await expect(page.getByText("この版ではダウンロードに未対応です", { exact: false })).toBeVisible();
-  await page.getByRole("button", { name: "次へ" }).click();
-  await expect(page.getByText("試しに話してみてください")).toBeVisible();
 });
 
 // ---------- 購読と初期値の順序 ----------

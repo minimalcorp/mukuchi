@@ -97,7 +97,7 @@ export function SettingsWindow() {
               {category === "permissions" && (
                 <PermissionsSection permissions={permissions} onChange={setPermissions} />
               )}
-              {category === "storage" && <StorageSection />}
+              {category === "storage" && <StorageSection status={status} />}
               {category === "about" && <AboutSection />}
             </>
           ) : null}

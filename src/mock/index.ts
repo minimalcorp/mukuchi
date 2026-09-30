@@ -10,10 +10,12 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AppError,
   AppStatus,
   AudioLevel,
   EventMap,
   EventName,
+  ProvisioningStatus,
   Settings,
   SettingsCategory,
   Utterance,
@@ -21,7 +23,14 @@ import type {
 } from "@/lib/ipc";
 import { devOverrides } from "@/lib/env";
 import { findScenario } from "./scenarios";
-import { createDb, provisioning, GB, type MockDb } from "./data";
+import { createDb, provisioning, GB, MODEL_TOTAL, type MockDb } from "./data";
+
+const HOME = "/Users/you";
+const RUNTIME_MISSING: AppError = {
+  code: "runtime_missing",
+  message: "実行環境とモデルがありません",
+  action: "start_setup",
+};
 
 function fire<E extends EventName>(event: E, payload: EventMap[E]) {
   void emit(event, payload);
@@ -92,19 +101,47 @@ export function installMock(params: URLSearchParams) {
     },
   };
 
+  // Rust の provisioning を模す: runtime (約1秒) → model (0.1 GB / 250ms、最初の約2秒は残り時間 null) → verify (約1秒) → done。
+  // verify の後、Rust は起動したサーバーをそのまま使うため status は loading → off になる
+  let stageTicks = 0;
+  const setProvisioning = (p: ProvisioningStatus) => {
+    db.provisioning = p;
+    fire("provisioning-progress", p);
+  };
+  const stopProvisioningTicker = () => {
+    if (provisioningTimer) clearInterval(provisioningTimer);
+    provisioningTimer = null;
+  };
   const startProvisioningTicker = () => {
     if (provisioningTimer) return;
     provisioningTimer = setInterval(() => {
       const p = db.provisioning;
-      if (p.stage === "paused" || p.stage === "error" || p.stage === "done") {
-        if (provisioningTimer) clearInterval(provisioningTimer);
-        provisioningTimer = null;
-        return;
+      stageTicks += 1;
+      const modelDone = p.items[1].bytesDone;
+      if (p.stage === "runtime") {
+        if (stageTicks >= 4) {
+          stageTicks = 0;
+          setProvisioning(provisioning("model", { modelDone, eta: null }));
+        }
+      } else if (p.stage === "model") {
+        const next = Math.min(MODEL_TOTAL, modelDone + 0.1 * GB);
+        if (next >= MODEL_TOTAL) {
+          stageTicks = 0;
+          setProvisioning(provisioning("verify"));
+          setStatus({ phase: "loading", loadingProgress: null, error: null });
+        } else {
+          const eta = stageTicks < 8 ? null : Math.round(((MODEL_TOTAL - next) / (0.1 * GB)) * 0.25);
+          setProvisioning(provisioning("model", { modelDone: next, eta }));
+        }
+      } else if (p.stage === "verify") {
+        if (stageTicks >= 4) {
+          stopProvisioningTicker();
+          setProvisioning(provisioning("done"));
+          setStatus({ phase: "off", loadingProgress: null, error: null });
+        }
+      } else {
+        stopProvisioningTicker();
       }
-      const model = p.items.find((i) => i.id === "model");
-      const next = Math.min(2.4 * GB, (model?.bytesDone ?? 0) + 0.05 * GB);
-      db.provisioning = next >= 2.4 * GB ? provisioning("done") : provisioning("model", next);
-      fire("provisioning-progress", db.provisioning);
     }, 250);
   };
 
@@ -168,32 +205,47 @@ export function installMock(params: URLSearchParams) {
           return null;
         case "get_provisioning_status":
           return db.provisioning;
-        case "start_provisioning":
-          db.provisioning = { ...provisioning("model", db.provisioning.items[1]?.bytesDone ?? 0), error: null };
-          fire("provisioning-progress", db.provisioning);
+        case "start_provisioning": {
+          // 実行中・完了済みなら何もしない。一時停止・失敗からは止まった段階から続ける (model は取得済みの分から)
+          const p = db.provisioning;
+          if (p.stage !== "idle" && p.stage !== "paused" && p.stage !== "error") return null;
+          const at = p.items.find((i) => i.state === "active")?.id ?? "runtime";
+          stageTicks = 0;
+          setProvisioning(provisioning(at, { modelDone: p.items[1].bytesDone, eta: null }));
           startProvisioningTicker();
           return null;
-        case "pause_provisioning":
-          db.provisioning = { ...db.provisioning, stage: "paused", etaSeconds: null };
-          fire("provisioning-progress", db.provisioning);
+        }
+        case "pause_provisioning": {
+          const p = db.provisioning;
+          if (p.stage !== "runtime" && p.stage !== "model" && p.stage !== "verify") return null;
+          stopProvisioningTicker();
+          // Rust は実際に止まってから返る。止まるまでの間を再現する
+          await new Promise((r) => setTimeout(r, 300));
+          setProvisioning(provisioning("paused", { stoppedAt: p.stage, modelDone: p.items[1].bytesDone }));
           return null;
+        }
         case "get_storage_usage":
           return db.provisioning.stage === "done"
-            ? { runtimeBytes: 1.2 * GB, modelBytes: 2.4 * GB, otherBytes: 12_000_000 }
+            ? { runtimeBytes: 1.2 * GB, modelBytes: MODEL_TOTAL, otherBytes: 12_000_000 }
             : { runtimeBytes: 0, modelBytes: 0, otherBytes: 12_000_000 };
         case "delete_runtime_and_model":
-          db.provisioning = provisioning("idle");
+          await new Promise((r) => setTimeout(r, 300));
+          stopProvisioningTicker();
+          setProvisioning(provisioning("idle"));
+          setStatus({ phase: "error", loadingProgress: null, error: RUNTIME_MISSING });
           return null;
         case "get_uninstall_targets":
           return [
+            // Rust は存在するものだけを絶対パスで返す
             { path: "/Applications/mukuchi.app", bytes: 48_000_000 },
-            { path: "~/Library/Application Support/com.minimalcorp.mukuchi", bytes: 3.6 * GB },
-            { path: "~/Library/Caches/com.minimalcorp.mukuchi", bytes: 21_000_000 },
-            { path: "~/Library/Logs/com.minimalcorp.mukuchi", bytes: 12_000_000 },
-            { path: "~/Library/WebKit/com.minimalcorp.mukuchi", bytes: 2_000_000 },
-            { path: "~/Library/Preferences/com.minimalcorp.mukuchi.plist", bytes: 4_000 },
+            { path: `${HOME}/Library/Application Support/com.minimalcorp.mukuchi`, bytes: 3.6 * GB },
+            { path: `${HOME}/Library/Caches/com.minimalcorp.mukuchi`, bytes: 21_000_000 },
+            { path: `${HOME}/Library/Logs/com.minimalcorp.mukuchi`, bytes: 12_000_000 },
+            { path: `${HOME}/Library/WebKit/com.minimalcorp.mukuchi`, bytes: 2_000_000 },
+            { path: `${HOME}/Library/Preferences/com.minimalcorp.mukuchi.plist`, bytes: 4_000 },
           ];
         case "uninstall":
+          // 実機は成功するとアプリが終了する。モックは MUKUCHI_DEV_UNINSTALL_DRY_RUN と同じく終了せずに返る
           return new Promise((resolve) => setTimeout(() => resolve(null), 800));
         case "list_running_apps":
           return [

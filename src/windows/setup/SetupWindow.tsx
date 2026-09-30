@@ -8,6 +8,7 @@ import {
   Circle,
   CircleAlert,
   CircleCheck,
+  CirclePause,
   Clock,
   Download,
   ExternalLink,
@@ -28,6 +29,7 @@ import { useAudioLevel } from "@/lib/audio-level";
 import { devOverrides } from "@/lib/env";
 import { formatBytes, formatBytesPair, formatEta } from "@/lib/format";
 import {
+  errorMessage,
   isPermissionsGranted,
   useAppStatus,
   usePermissions,
@@ -42,9 +44,21 @@ import { cn } from "@/lib/utils";
 
 const STEPS = 5;
 
+/** 導入の途中 (実行中・一時停止・失敗) か */
+function inProgress(p: ProvisioningStatus): boolean {
+  return p.stage !== "idle" && p.stage !== "done";
+}
+
 export function SetupWindow() {
   const [step, setStep] = useState(() => Math.min(STEPS, Math.max(1, devOverrides.setupStep ?? 1)));
   const provisioning = useProvisioning();
+  // ウィンドウを閉じると破棄され、開き直すと最初のステップから始まる。
+  // 導入が途中なら (閉じている間も Rust で進んでいる)、最初に状態が届いた時点でダウンロードのステップへ移る
+  const [resumeChecked, setResumeChecked] = useState(false);
+  if (!resumeChecked && provisioning) {
+    setResumeChecked(true);
+    if (step === 1 && devOverrides.setupStep == null && inProgress(provisioning)) setStep(3);
+  }
   const next = () => setStep((s) => Math.min(STEPS, s + 1));
   const back = () => setStep((s) => Math.max(1, s - 1));
 
@@ -75,7 +89,7 @@ export function SetupWindow() {
         {step === 2 && <PermissionsStep onBack={back} onNext={next} />}
         {step === 3 && <DownloadStep provisioning={provisioning} onNext={next} />}
         {step === 4 && <TestStep onBack={back} onNext={next} />}
-        {step === 5 && <DoneStep />}
+        {step === 5 && <DoneStep provisioning={provisioning} />}
       </div>
     </WindowFrame>
   );
@@ -256,38 +270,81 @@ function PermissionGuide({ perms, onChange }: { perms: Permissions; onChange: (p
 
 /* ---------- 3. ダウンロード ---------- */
 
-const ITEM_LABEL: Record<ProvisioningStatus["items"][number]["id"], string> = {
+type ProvisioningItem = ProvisioningStatus["items"][number];
+
+const ITEM_LABEL: Record<ProvisioningItem["id"], string> = {
   runtime: "Python 実行環境",
   model: "Qwen3-ASR（日本語追加学習）",
   verify: "動作確認",
 };
 
+const RUNNING_TEXT: Record<ProvisioningItem["id"], string> = {
+  runtime: "準備しています…",
+  // model の大きさはファイル一覧を取得するまで分からない
+  model: "ファイル一覧を取得しています…",
+  verify: "確認しています…",
+};
+
+function isRunning(p: ProvisioningStatus): boolean {
+  return p.stage === "runtime" || p.stage === "model" || p.stage === "verify";
+}
+
+/** 全体の行の右側。バイト数は model のみ (runtime・verify は大きさが分からない) */
+function summaryText(p: ProvisioningStatus): string {
+  const parts: string[] = [];
+  if (p.bytesTotal != null) parts.push(`${formatBytes(p.bytesDone)} / ${formatBytes(p.bytesTotal)}`);
+  if (p.stage === "runtime" || (p.stage === "idle" && p.bytesTotal == null)) parts.push("実行環境を準備しています");
+  if (p.stage === "model") parts.push(p.etaSeconds != null ? formatEta(p.etaSeconds) : "残り時間を計算しています");
+  if (p.stage === "verify") parts.push("動作を確認しています");
+  if (p.stage === "paused") parts.push("一時停止中");
+  return parts.join(" ・ ");
+}
+
+function itemRight(item: ProvisioningItem, stage: ProvisioningStatus["stage"]): string {
+  if (item.state === "pending") return "待機中";
+  if (item.state === "done") return item.bytesTotal != null ? formatBytes(item.bytesTotal) : "完了";
+  if (item.bytesTotal != null) return formatBytesPair(item.bytesDone, item.bytesTotal);
+  if (stage === "paused") return "一時停止中";
+  if (stage === "error") return "失敗";
+  return RUNNING_TEXT[item.id];
+}
+
 function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningStatus | null; onNext: () => void }) {
   const started = useRef(false);
+  // 一時停止は止まるまで待って返るため、その間はボタンを押せなくする
+  const [pausing, setPausing] = useState(false);
+  // command 自体の失敗 (導入の失敗は stage=error で届く)
+  const [commandError, setCommandError] = useState<string | null>(null);
+
+  const start = () => {
+    setCommandError(null);
+    commands.startProvisioning().catch((e: unknown) => setCommandError(errorMessage(e)));
+  };
   useEffect(() => {
     // このステップに来た時点で未開始なら開始する
     if (p?.stage === "idle" && !started.current) {
       started.current = true;
-      runCommand(commands.startProvisioning());
+      commands.startProvisioning().catch((e: unknown) => setCommandError(errorMessage(e)));
     }
   }, [p?.stage]);
-  const unimplemented = useUnimplemented("get_provisioning_status", "start_provisioning");
 
-  if (unimplemented) return <DownloadUnimplemented onNext={onNext} />;
-  if (!p) return <StepBody>{null}</StepBody>;
+  if (!p) {
+    return (
+      <StepBody dense>
+        <Title>実行環境とモデルのダウンロード</Title>
+        <p className="m-0 text-sm text-fg-muted">状態を確認しています…</p>
+      </StepBody>
+    );
+  }
 
   const done = p.stage === "done";
   const paused = p.stage === "paused";
-  const running = p.stage === "runtime" || p.stage === "model" || p.stage === "verify";
+  const failed = p.stage === "error";
+  const running = isRunning(p);
   const pct = p.bytesTotal ? Math.min(100, (p.bytesDone / p.bytesTotal) * 100) : 0;
-  const summary = [
-    p.bytesTotal ? `${formatBytes(p.bytesDone)} / ${formatBytes(p.bytesTotal)}` : formatBytes(p.bytesDone),
-    running && p.etaSeconds != null ? formatEta(p.etaSeconds) : null,
-    paused ? "一時停止中" : null,
-  ]
-    .filter(Boolean)
-    .join(" ・ ");
-  const resumeBytes = p.items.find((i) => i.state === "active")?.bytesDone ?? p.bytesDone;
+  // model は途中のファイルから続きを取る。runtime・verify はやり直すため取得済みの量は示さない
+  const stoppedModel = p.items.find((i) => i.id === "model" && i.state === "active");
+  const resumeBytes = stoppedModel?.bytesDone ?? 0;
 
   return (
     <>
@@ -297,16 +354,19 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
             ? "実行環境とモデルの準備ができました"
             : paused
               ? "ダウンロードを一時停止しました"
-              : "実行環境とモデルをダウンロードしています"}
+              : failed
+                ? "準備を完了できませんでした"
+                : "実行環境とモデルをダウンロードしています"}
         </Title>
         <div className="flex flex-col gap-2">
-          <div className="flex justify-between text-sm">
+          <div className="flex justify-between gap-3 text-sm">
             <span>全体</span>
-            <span className="tabular text-fg-muted">{summary}</span>
+            <span className="tabular text-fg-muted">{summaryText(p)}</span>
           </div>
           <div
             className="h-1.5 rounded-[3px] bg-meter-track"
             role="progressbar"
+            aria-label="全体の進捗"
             aria-valuenow={Math.round(pct)}
             aria-valuemin={0}
             aria-valuemax={100}
@@ -317,17 +377,22 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
         <div className="flex flex-col rounded-lg border border-line-default text-sm">
           {p.items.map((item, i) => {
             const last = i === p.items.length - 1;
-            const failed = item.state === "active" && p.stage === "error";
+            const active = item.state === "active";
             const Icon =
-              item.state === "done" ? CircleCheck : failed ? CircleAlert : item.state === "active" ? LoaderCircle : Circle;
-            let right: string;
-            if (item.state === "pending") right = "待機中";
-            else if (item.state === "done") right = item.bytesTotal ? formatBytes(item.bytesTotal) : "完了";
-            else if (item.bytesTotal) right = formatBytesPair(item.bytesDone, item.bytesTotal);
-            else right = "確認しています…";
+              item.state === "done"
+                ? CircleCheck
+                : active && failed
+                  ? CircleAlert
+                  : active && paused
+                    ? CirclePause
+                    : active
+                      ? LoaderCircle
+                      : Circle;
             return (
               <div
                 key={item.id}
+                data-testid={`provisioning-item-${item.id}`}
+                data-state={item.state}
                 className={cn(
                   "flex items-center gap-2.5 px-3.5 py-2.5",
                   !last && "border-b border-line-subtle",
@@ -339,66 +404,62 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
                   className={cn(
                     "flex-none",
                     item.state === "done" && "text-green-500",
-                    item.state === "active" && (failed ? "text-red-500" : "text-blue-500"),
-                    item.state === "active" && running && "animate-spin",
+                    active && (failed ? "text-red-500" : paused ? "text-fg-muted" : "text-blue-500"),
+                    active && running && "animate-spin",
                   )}
                   aria-hidden
                 />
                 <span className="flex-1">{ITEM_LABEL[item.id]}</span>
-                <span className={cn(item.state !== "pending" && "tabular text-fg-muted")}>{right}</span>
+                <span className={cn(item.state !== "pending" && "tabular text-fg-muted")}>{itemRight(item, p.stage)}</span>
               </div>
             );
           })}
         </div>
-        {p.stage === "error" ? (
+        {failed ? (
           <div
             role="alert"
             className="flex items-start gap-2.5 rounded-md bg-tone-danger-bg px-3 py-2.5 text-xs text-tone-danger-fg"
           >
             <CircleAlert size={16} className="mt-0.5 flex-none" aria-hidden />
             <span className="flex-1 leading-[1.5]">
-              {p.error ?? "ダウンロードに失敗しました。"}
+              {p.error ?? "準備に失敗しました。"}
               {resumeBytes > 0 ? `取得済みの ${formatBytes(resumeBytes)} から再開します。` : ""}
             </span>
-            <Button size="sm" iconLeft={RotateCw} onClick={() => runCommand(commands.startProvisioning())}>
+            <Button size="sm" iconLeft={RotateCw} onClick={start}>
               再試行
             </Button>
           </div>
         ) : null}
+        {commandError ? (
+          <p role="alert" className="m-0 text-xs leading-[1.5] text-fg-danger">
+            {commandError}
+          </p>
+        ) : null}
       </StepBody>
       <StepFooter align="between">
         {paused ? (
-          <Button iconLeft={Play} onClick={() => runCommand(commands.startProvisioning())}>
+          <Button iconLeft={Play} onClick={start}>
             再開
           </Button>
         ) : (
-          <Button iconLeft={Pause} disabled={!running} onClick={() => runCommand(commands.pauseProvisioning())}>
+          <Button
+            iconLeft={Pause}
+            loading={pausing}
+            disabled={!running}
+            onClick={() => {
+              setPausing(true);
+              setCommandError(null);
+              commands
+                .pauseProvisioning()
+                .catch((e: unknown) => setCommandError(errorMessage(e)))
+                .finally(() => setPausing(false));
+            }}
+          >
             一時停止
           </Button>
         )}
+        {/* 動作確認まで済んでから (stage=done) 次へ進める。complete_setup はその後でしか呼ばない */}
         <Button variant="primary" disabled={!done} onClick={onNext}>
-          次へ
-        </Button>
-      </StepFooter>
-    </>
-  );
-}
-
-/** ダウンロードが未実装の版 (開発中)。導入済みの前提で先に進めるようにする */
-function DownloadUnimplemented({ onNext }: { onNext: () => void }) {
-  return (
-    <>
-      <StepBody dense>
-        <Title>実行環境とモデルのダウンロード</Title>
-        <div className="flex items-start gap-2.5 rounded-md bg-surface-muted px-3 py-2.5 text-xs text-fg-body">
-          <CircleAlert size={16} className="mt-0.5 flex-none text-fg-muted" aria-hidden />
-          <span className="flex-1 leading-[1.5]">
-            この版ではダウンロードに未対応です。実行環境とモデルが導入済みであれば、そのまま次へ進めます。
-          </span>
-        </div>
-      </StepBody>
-      <StepFooter>
-        <Button variant="primary" onClick={onNext}>
           次へ
         </Button>
       </StepFooter>
@@ -489,9 +550,12 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
 
 /* ---------- 5. 完了 ---------- */
 
-function DoneStep() {
+function DoneStep({ provisioning }: { provisioning: ProvisioningStatus | null }) {
   const [settings, update, settingsErrors] = useSettings();
   const completeUnimplemented = useUnimplemented("complete_setup");
+  const [completeError, setCompleteError] = useState<string | null>(null);
+  // 導入が済むまで (動作確認の成功まで) はセットアップを完了させない
+  const ready = provisioning?.stage === "done";
   return (
     <>
       <StepBody hero>
@@ -512,13 +576,21 @@ function DoneStep() {
           onCheckedChange={(v) => update({ launchAtLogin: v })}
         />
         <LaunchAtLoginError message={settingsErrors.launchAtLogin} />
+        {completeError ? (
+          <p role="alert" className="m-0 text-xs leading-[1.5] text-fg-danger">
+            {completeError}
+          </p>
+        ) : null}
       </StepBody>
       <StepFooter>
         <Unimplemented active={completeUnimplemented}>
           <Button
             variant="primary"
-            disabled={completeUnimplemented}
-            onClick={() => runCommand(commands.completeSetup())}
+            disabled={completeUnimplemented || !ready}
+            onClick={() => {
+              setCompleteError(null);
+              commands.completeSetup().catch((e: unknown) => setCompleteError(errorMessage(e)));
+            }}
           >
             閉じる
           </Button>

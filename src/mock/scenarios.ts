@@ -19,17 +19,6 @@ export type Scenario = {
   unimplemented?: string[];
 };
 
-/** P2 時点で Rust が未実装の command (P4 で実装) */
-const P4_COMMANDS = [
-  "get_provisioning_status",
-  "start_provisioning",
-  "pause_provisioning",
-  "get_storage_usage",
-  "delete_runtime_and_model",
-  "get_uninstall_targets",
-  "uninstall",
-];
-
 const TEXT = "明日の打ち合わせは十時からに変更してください。";
 const THRESHOLD = 0.55;
 
@@ -272,9 +261,34 @@ const SETUP: Scenario[] = [
   {
     name: "download",
     step: 3,
-    description: "ダウンロード中 (静止)",
+    description: "モデルのダウンロード中 (静止)",
     setup: (db) => {
-      db.provisioning = provisioning("model", 0.9 * GB);
+      db.provisioning = provisioning("model", { modelDone: 0.9 * GB });
+    },
+  },
+  {
+    name: "download-runtime",
+    step: 3,
+    description: "実行環境の導入中 (静止。モデルの大きさはまだ不明)",
+    setup: (db) => {
+      db.provisioning = provisioning("runtime");
+    },
+  },
+  {
+    name: "download-eta-unknown",
+    step: 3,
+    description: "モデルのダウンロード開始直後 (残り時間は未計算)",
+    setup: (db) => {
+      db.provisioning = provisioning("model", { modelDone: 0.1 * GB, eta: null });
+    },
+  },
+  {
+    name: "download-verify",
+    step: 3,
+    description: "動作確認中 (静止)",
+    setup: (db) => {
+      db.provisioning = provisioning("verify");
+      setStatus(db, { phase: "loading", loadingProgress: null, error: null });
     },
   },
   {
@@ -289,17 +303,33 @@ const SETUP: Scenario[] = [
   {
     name: "download-error",
     step: 3,
-    description: "ダウンロード失敗",
+    description: "モデルのダウンロード失敗 (取得済みの分から再開できる)",
     setup: (db) => {
-      db.provisioning = provisioning("error", 0.9 * GB);
+      db.provisioning = provisioning("error", { modelDone: 0.9 * GB });
+    },
+  },
+  {
+    name: "download-error-runtime",
+    step: 3,
+    description: "実行環境の導入失敗",
+    setup: (db) => {
+      db.provisioning = provisioning("error", { stoppedAt: "runtime" });
     },
   },
   {
     name: "download-paused",
     step: 3,
-    description: "一時停止中",
+    description: "モデルのダウンロードを一時停止中",
     setup: (db) => {
-      db.provisioning = { ...provisioning("model", 0.9 * GB), stage: "paused", etaSeconds: null };
+      db.provisioning = provisioning("paused", { modelDone: 0.9 * GB });
+    },
+  },
+  {
+    name: "resume",
+    description: "ウィンドウを開き直した (一時停止中。ダウンロードのステップから再開する)",
+    setup: (db) => {
+      db.provisioning = provisioning("paused", { modelDone: 0.9 * GB });
+      db.settings.setupCompleted = false;
     },
   },
   { name: "download-done", step: 3, description: "ダウンロード完了" },
@@ -322,12 +352,6 @@ const SETUP: Scenario[] = [
         api.result({ kind: "command", id: 2, text: "確定", key: "Enter" });
       }, 600);
     },
-  },
-  {
-    name: "download-unimplemented",
-    step: 3,
-    description: "ダウンロードが未実装 (P4 まで)",
-    unimplemented: P4_COMMANDS,
   },
   { name: "test-empty", step: 4, description: "動作テスト (まだ話していない)", setup: (db) => listening(db, 0.1) },
   { name: "done", step: 5, description: "完了" },
@@ -365,8 +389,8 @@ const SETTINGS: Scenario[] = [
   },
   {
     name: "unimplemented",
-    description: "P4 の command と restart_asr が未実装 (ASR 停止中)",
-    unimplemented: [...P4_COMMANDS, "restart_asr"],
+    description: "restart_asr が未実装 (ASR 停止中)",
+    unimplemented: ["restart_asr"],
     setup: (db) => {
       setStatus(db, { phase: "error", loadingProgress: null, error: ERRORS.asr });
     },

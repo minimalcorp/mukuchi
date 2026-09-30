@@ -40,13 +40,17 @@ const cases: Case[] = [
   { name: "panel-speaking-dark", query: "window=panel&mock=speaking", texts: ["認識中"], viewport: PANEL, dark: true },
 
   // ---- セットアップ (04) ----
-  { name: "setup-1-welcome", query: "window=setup&mock=default", texts: ["mukuchi へようこそ", "約 3.6 GB", "はじめる"], viewport: SETUP },
+  { name: "setup-1-welcome", query: "window=setup&mock=default", texts: ["mukuchi へようこそ", "実行環境とモデルをダウンロードします", "はじめる"], viewport: SETUP },
   { name: "setup-2-permissions", query: "window=setup&mock=permissions", texts: ["権限を許可してください", "許可済み", "未許可", "システム設定を開く"], viewport: SETUP },
   { name: "setup-2-permissions-mic-denied", query: "window=setup&mock=permissions-denied", texts: ["システム設定のマイクで"], viewport: SETUP },
   { name: "setup-2-permissions-granted", query: "window=setup&mock=permissions-granted", texts: ["権限を許可してください"], viewport: SETUP },
-  { name: "setup-3-download", query: "window=setup&mock=download", texts: ["実行環境とモデルをダウンロードしています", "2.1 GB / 3.6 GB ・ 残り約 3 分", "Python 実行環境", "0.9 / 2.4 GB", "待機中"], viewport: SETUP },
-  { name: "setup-3-download-error", query: "window=setup&mock=download-error", texts: ["ダウンロードに失敗しました。", "取得済みの 0.9 GB から再開します。", "再試行"], viewport: SETUP },
-  { name: "setup-3-download-paused", query: "window=setup&mock=download-paused", texts: ["ダウンロードを一時停止しました", "再開"], viewport: SETUP },
+  { name: "setup-3-download", query: "window=setup&mock=download", texts: ["実行環境とモデルをダウンロードしています", "0.9 GB / 2.4 GB ・ 残り約 3 分", "Python 実行環境", "0.9 / 2.4 GB", "待機中"], viewport: SETUP },
+  { name: "setup-3-download-runtime", query: "window=setup&mock=download-runtime", texts: ["実行環境を準備しています", "準備しています…"], viewport: SETUP },
+  { name: "setup-3-download-eta-unknown", query: "window=setup&mock=download-eta-unknown", texts: ["残り時間を計算しています"], viewport: SETUP },
+  { name: "setup-3-download-verify", query: "window=setup&mock=download-verify", texts: ["2.4 GB / 2.4 GB ・ 動作を確認しています", "確認しています…"], viewport: SETUP },
+  { name: "setup-3-download-error", query: "window=setup&mock=download-error", texts: ["準備を完了できませんでした", "モデルのダウンロードに失敗しました。", "取得済みの 0.9 GB から再開します。", "再試行"], viewport: SETUP },
+  { name: "setup-3-download-error-runtime", query: "window=setup&mock=download-error-runtime", texts: ["実行環境を導入できませんでした。", "失敗", "再試行"], viewport: SETUP },
+  { name: "setup-3-download-paused", query: "window=setup&mock=download-paused", texts: ["ダウンロードを一時停止しました", "0.9 GB / 2.4 GB ・ 一時停止中", "再開"], viewport: SETUP },
   { name: "setup-3-download-done", query: "window=setup&mock=download-done", texts: ["実行環境とモデルの準備ができました"], viewport: SETUP },
   { name: "setup-4-test", query: "window=setup&mock=test", texts: ["試しに話してみてください", "Enter を送信", "正しく認識できました。"], viewport: SETUP },
   { name: "setup-5-done", query: "window=setup&mock=done", texts: ["準備ができました", "ログイン時に起動", "閉じる"], viewport: SETUP },
@@ -60,6 +64,7 @@ const cases: Case[] = [
   { name: "settings-recognition-stopped", query: "window=settings&mock=asr-stopped&category=recognition", texts: ["停止中", "再起動"], viewport: SETTINGS },
   { name: "settings-permissions", query: "window=settings&mock=perm-denied&category=permissions", texts: ["アクセシビリティ", "未許可", "システム設定を開く"], viewport: SETTINGS },
   { name: "settings-storage", query: "window=settings&mock=default&category=storage", texts: ["3.6 GB", "使用中", "モデル", "12 MB", "完全にアンインストール"], viewport: SETTINGS },
+  { name: "settings-storage-runtime-missing", query: "window=settings&mock=runtime-missing&category=storage", texts: ["12 MB", "実行環境とモデルがありません。", "セットアップを開く"], viewport: SETTINGS },
   { name: "settings-about", query: "window=settings&mock=default&category=about", texts: ["mukuchi", "バージョン 0.1.0（build 42）", "ライセンス", "Finder で開く"], viewport: SETTINGS },
   { name: "settings-voice-dark", query: "window=settings&mock=default&category=voice", texts: ["発話検出の感度"], viewport: SETTINGS, dark: true },
   { name: "settings-commands-dark", query: "window=settings&mock=default&category=commands", texts: ["音声コマンドを使う"], viewport: SETTINGS, dark: true },
@@ -110,7 +115,7 @@ test("settings: アンインストールの確認ダイアログに実パスを�
   await page.getByRole("button", { name: "アンインストール…" }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("mukuchi を完全にアンインストールしますか？")).toBeVisible();
-  await expect(dialog.getByText("~/Library/Application Support/com.minimalcorp.mukuchi")).toBeVisible();
+  await expect(dialog.getByText("/Users/you/Library/Application Support/com.minimalcorp.mukuchi")).toBeVisible();
   await expect(dialog.getByText("/Applications/mukuchi.app")).toBeVisible();
   await page.screenshot({ path: `e2e/screenshots/${c.name}.png` });
   await dialog.getByRole("button", { name: "キャンセル" }).click();

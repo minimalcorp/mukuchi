@@ -85,15 +85,18 @@ pub fn set(item: &NSStatusItem, mtm: MainThreadMarker, icon: StatusIcon) {
     let Some(button) = item.button(mtm) else {
         return;
     };
-    let image = match icon {
-        StatusIcon::Template(png) => image_from_png(png).inspect(|img| img.setTemplate(true)),
-        StatusIcon::WithRedDot { png, dark } => render_with_red_dot(png, dark),
-    };
-    let Some(image) = image else {
+    let Some(image) = make_image(icon) else {
         log::warn!("メニューバーのアイコンを作成できません");
         return;
     };
     button.setImage(Some(&image));
+}
+
+fn make_image(icon: StatusIcon) -> Option<Retained<NSImage>> {
+    match icon {
+        StatusIcon::Template(png) => image_from_png(png).inspect(|img| img.setTemplate(true)),
+        StatusIcon::WithRedDot { png, dark } => render_with_red_dot(png, dark),
+    }
 }
 
 /// グリフを外観に合う色で塗り、赤い点を重ねたビットマップ (@1x/@2x) を描く。
@@ -168,4 +171,50 @@ fn draw_with_red_dot(ctx: &NSGraphicsContext, glyph: &NSImage, color: &NSColor, 
         NSSize::new(r * 2.0, r * 2.0),
     ))
     .fill();
+}
+
+/// テスト・目視確認用: メニューバーに出る見た目を `scale` 倍のビットマップに描く。
+/// テンプレート画像は AppKit と同様に外観の色 (暗: 白 / 明: 黒) で塗る。
+#[cfg(test)]
+pub(crate) fn render_for_test(
+    icon: StatusIcon,
+    dark: bool,
+    scale: isize,
+) -> Option<Retained<NSBitmapImageRep>> {
+    let image = make_image(icon)?;
+    let size = NSSize::new(ICON_PT, ICON_PT);
+    let px = ICON_PT as isize * scale;
+    // SAFETY: render_with_red_dot と同じ (バッファは NSBitmapImageRep が確保する)
+    let rep = unsafe {
+        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            px,
+            px,
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            0,
+            0,
+        )
+    }?;
+    rep.setSize(size);
+    let ctx = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&ctx));
+    let rect = NSRect::new(NSPoint::new(0.0, 0.0), size);
+    image.drawInRect(rect);
+    if image.isTemplate() {
+        if dark {
+            NSColor::whiteColor().set();
+        } else {
+            NSColor::blackColor().set();
+        }
+        NSRectFillUsingOperation(rect, NSCompositingOperation::SourceAtop);
+    }
+    ctx.flushGraphics();
+    NSGraphicsContext::restoreGraphicsState_class();
+    Some(rep)
 }

@@ -401,4 +401,66 @@ mod tests {
             assert_eq!(&png.x2[16..24], &[0, 0, 0, 36, 0, 0, 0, 36]);
         }
     }
+
+    /// 全状態 × 明暗 × @1x/@2x で、メニューバーに出る画像に不透明な画素があること。
+    /// `MUKUCHI_TRAY_ICON_DUMP=<dir>` を指定すると PNG に書き出す (目視確認用)
+    #[test]
+    fn every_icon_renders_visible_pixels() {
+        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRepPropertyKey};
+        use objc2_foundation::NSDictionary;
+
+        let dump = std::env::var_os("MUKUCHI_TRAY_ICON_DUMP").map(std::path::PathBuf::from);
+        if let Some(dir) = &dump {
+            std::fs::create_dir_all(dir).expect("create dump dir");
+        }
+        let kinds = [
+            IconKind::Off,
+            IconKind::Listening,
+            IconKind::Speaking,
+            IconKind::Finalizing,
+            IconKind::Error,
+        ];
+        for kind in kinds {
+            for dark in [false, true] {
+                for scale in [1isize, 2] {
+                    let label =
+                        format!("{kind:?}-{}@{scale}x", if dark { "dark" } else { "light" });
+                    let rep = status_icon::render_for_test(kind.icon(dark), dark, scale)
+                        .unwrap_or_else(|| panic!("{label}: 描けない"));
+                    let px = 18 * scale;
+                    assert_eq!((rep.pixelsWide(), rep.pixelsHigh()), (px, px), "{label}");
+                    let mut max_alpha = 0.0f64;
+                    let mut visible = 0;
+                    for y in 0..px {
+                        for x in 0..px {
+                            let a = rep.colorAtX_y(x, y).map_or(0.0, |c| c.alphaComponent());
+                            max_alpha = max_alpha.max(a);
+                            if a > 0.1 {
+                                visible += 1;
+                            }
+                        }
+                    }
+                    // OFF は 50% の濃さ。それ以外は不透明な線がある
+                    let min_alpha = if kind == IconKind::Off { 0.4 } else { 0.9 };
+                    assert!(
+                        max_alpha >= min_alpha && visible >= 20 * scale * scale,
+                        "{label}: max_alpha={max_alpha} visible={visible}"
+                    );
+                    if let Some(dir) = &dump {
+                        let props = NSDictionary::<NSBitmapImageRepPropertyKey, _>::new();
+                        // SAFETY: 空の辞書 (型は API どおり)
+                        let data = unsafe {
+                            rep.representationUsingType_properties(
+                                NSBitmapImageFileType::PNG,
+                                &props,
+                            )
+                        }
+                        .expect("encode png");
+                        std::fs::write(dir.join(format!("{label}.png")), data.to_vec())
+                            .expect("write png");
+                    }
+                }
+            }
+        }
+    }
 }

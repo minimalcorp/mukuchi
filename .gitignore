@@ -43,3 +43,6 @@ docs/design/handoff/
 e2e/screenshots/
 test-results/
 playwright-report/
+
+# TypeScript incremental build info
+*.tsbuildinfo

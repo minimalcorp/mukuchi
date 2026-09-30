@@ -9,6 +9,7 @@
 | `web/favicon.ico`, `web/favicon-{16,32,48,96}x*.png` | favicon |
 | `web/apple-touch-icon.png` | iOS ホーム画面用 180px (白背景) |
 | `web/android-chrome-{192,512}.png`, `web/maskable-512x512.png` | PWA manifest 用 |
+| `web/og-image.jpg` | LP の OG 画像 (1200x630。WebP 非対応の共有先があるため JPG)。`apps/web/public/` に同じものを置く |
 | `macos/AppIcon_1024.png`, `macos/AppIcon.icns` | アプリアイコンの元 (1024px、Apple のグリッド相当の余白付き) |
 | `dmg/background.png`, `dmg/background@2x.png` | .dmg のウィンドウ背景 (660x400pt と 2x。不透明)。ビルド時に `tiffutil -cathidpicheck` で1つの TIFF にまとめる。矢印は x=265..395・y≈170、手順の文字は y≈313 (左上原点)。アイコン位置は `apps/desktop/scripts/dmg-settings.py` |
 | `macos/MenuBarIcon(@2x).png` | メニューバー用 18pt (未使用。テンプレート画像にするなら黒一色化が必要) |

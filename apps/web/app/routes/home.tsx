@@ -39,7 +39,7 @@ import {
 } from "@/lib/site";
 
 export function meta(): Route.MetaDescriptors {
-  const image = `${SITE_URL}/mukuchi-icon-512.png`;
+  const image = `${SITE_URL}/og-image.jpg`;
   return [
     { title: SITE_TITLE },
     { name: "description", content: SITE_DESCRIPTION },
@@ -50,7 +50,15 @@ export function meta(): Route.MetaDescriptors {
     { property: "og:title", content: SITE_TITLE },
     { property: "og:description", content: SITE_DESCRIPTION },
     { property: "og:image", content: image },
-    { name: "twitter:card", content: "summary" },
+    // 寸法を明示すると、初回共有時にクローラーが画像を取得し終える前でもプレビューを描画できる
+    { property: "og:image:type", content: "image/jpeg" },
+    { property: "og:image:width", content: "1200" },
+    { property: "og:image:height", content: "630" },
+    {
+      property: "og:image:alt",
+      content: `${SITE_NAME} — Mac に常駐する音声入力アプリ`,
+    },
+    { name: "twitter:card", content: "summary_large_image" },
     { tagName: "link", rel: "canonical", href: `${SITE_URL}/` },
   ];
 }

@@ -185,6 +185,12 @@ pub fn set_panel_size(app: AppHandle, width: f64, height: f64) -> CmdResult<()> 
     windows::set_panel_size(&app, width, height).map_err(err)
 }
 
+/// panel の読み込み直後に、`panel-anchor` を待たずに現在のアンカーを取る
+#[tauri::command]
+pub fn get_panel_anchor(app: AppHandle) -> windows::geometry::PanelAnchor {
+    windows::panel_anchor(&app)
+}
+
 #[tauri::command]
 pub async fn restart_asr(core: State<'_, Arc<Core>>) -> CmdResult<()> {
     core.inner().restart_asr().await.map_err(err)

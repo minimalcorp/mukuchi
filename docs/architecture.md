@@ -170,7 +170,7 @@ type Settings = {
   voiceCommands: { id: string; phrases: string[]; key: KeyCombo }[]; // 言い方のないコマンド・正規化(NFKC・記号空白除去・小文字化)後に空/重複する言い方は update_settings がエラーにする
   vocabulary: string[];                   // ASR の context に空白区切りで渡す
   excludedApps: { bundleId: string; name: string }[];
-  panelPosition: { x: number; y: number; displayId: string } | null; // null=既定位置。x,y はpanelウィンドウの下端中央の、ディスプレイ左下からの位置 (整数pt、y上向き)。displayId は CGDirectDisplayID (ピルの中心があるディスプレイ)
+  panelPosition: { x: number; y: number; displayId: string; version: 2 } | null; // null=既定位置。Rust (ドラッグ) だけが書く (フロントエンドは null にするだけ)。x,y はピル (影の余白を除いた描画内容) のアンカー点の、ディスプレイ左下からの位置 (整数pt、y上向き)。アンカー点はアンカー (panel-anchor) に当たるピルの辺・角 (例: 右上なら右上の角、中央下なら下辺の中央) で、アンカーはこの点の visibleFrame 内の位置 (左右3等分・上下2等分) から決まる。displayId は CGDirectDisplayID (ピルの中心があるディスプレイ)。version なし (旧形式: ウィンドウの下端中央) は起動時に Rust が見た目の位置を変えずに移行して保存し直す。大きさの変更で画面に収めるための自動のずれは保存しない
   setupCompleted: boolean;
 };
 type KeyCombo = { key: "enter" | "tab" | "escape" | "backspace"; modifiers: ("cmd" | "shift" | "option" | "ctrl")[] };
@@ -221,7 +221,8 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `open_logs_folder` | → `()` | Finderで開く |
 | `get_app_info` | → `AppInfo` | |
 | `open_settings` | `{ category?: SettingsCategory }` → `()` | 設定ウィンドウを開く(開いていれば前面に出し `settings-navigate` を送る)。エラー復旧から該当カテゴリを開く |
-| `set_panel_size` | `{ width: number; height: number }` → `()` | panelの描画内容(影の余白込み)の大きさ。Rustはpanelウィンドウをこの大きさにし、下端中央を基準位置に保つ(透明部分がクリックを奪わないようにするため) |
+| `set_panel_size` | `{ width: number; height: number }` → `()` | panelの描画内容(影の余白込み。余白は左右24・上16・下32pt固定)の大きさ。Rustはpanelウィンドウをこの大きさにし(透明部分がクリックを奪わないようにするため)、アンカー (`panel-anchor`) の辺・角を固定して広げる/縮める。ピル・カード(余白を除いた部分)が visibleFrame (メニューバー・Dockを除く) からはみ出す分だけずらし(余白ははみ出してよい)、小さく戻れば利用者の位置に戻る |
+| `get_panel_anchor` | → `{ horizontal: "left" \| "center" \| "right"; vertical: "top" \| "bottom" }` | 現在のアンカー (`panel-anchor` と同じ形)。panel の読み込み直後に呼ぶ (作成直後のイベントは購読前に送られるため)。位置が決まる前は center/bottom |
 | `complete_setup` | → `()` | セットアップ完了。launchAtLogin をログイン項目に反映し (本番ビルドのみ。登録できなければ launchAtLogin を false にして完了する)、panelを表示してsetupウィンドウを閉じる |
 | `open_setup` | → `()` | セットアップウィンドウを開く(エラー `start_setup` の復旧・実行環境の再導入) |
 | `show_panel` | → `()` | panelを表示する (表示中なら何もしない)。setupの「試しに話してみてください」ステップに入った時に呼ぶ。起動時、setupCompleted が false ならpanelは作るだけで表示しない (setupを閉じても非表示のまま。メニューバーの「セットアップを開く…」で再開できる)。ONにした時 (メニューバー等から) もRustがpanelを表示する |
@@ -237,6 +238,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `utterance-result` | `UtteranceResult` | 最終結果と入力結果 |
 | `settings-changed` | `Settings` | 他ウィンドウからの変更の反映 |
 | `settings-navigate` | `{ category: SettingsCategory }` | settingsウィンドウ宛。表示中のカテゴリを切り替える |
+| `panel-anchor` | `{ horizontal: "left" \| "center" \| "right"; vertical: "top" \| "bottom" }` | panel宛。大きさが変わる時にウィンドウのどの辺・角を固定して広げるか。フロントエンドは描画内容をこの基準に寄せて配置する (例: top なら上端から下へ広がる、right なら右端から左へ)。ピルの中心が visibleFrame の左1/3なら left・右1/3なら right・他は center、上半分なら top・他は bottom。変わった時 (ドラッグ中を含む) と panel 作成直後に送る。変わる時は新しいフレームを設定する前に送る。読み込み直後は `get_panel_anchor` で取る |
 | `permissions-changed` | `Permissions` | 権限の変化を検知した時 |
 | `input-devices-changed` | `AudioDevice[]` | マイクの接続・取り外し・既定の変更を検知した時 (2秒ごとのポーリング。settings/setup を開いている間か ON の間のみ) |
 | `provisioning-progress` | `ProvisioningStatus` | 実行中は変化があれば約4Hz。段階の変化 (開始・完了・一時停止・失敗) は即時 |

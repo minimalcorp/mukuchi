@@ -92,6 +92,19 @@ pub struct PanelPosition {
     pub x: f64,
     pub y: f64,
     pub display_id: String,
+    /// 位置の意味の版。1 (旧・フィールドなし) = ウィンドウの下端中央、2 = ピルのアンカー点。
+    /// 旧形式は windows がディスプレイと大きさの分かった時点で 2 に移行して保存し直す
+    #[serde(default = "PanelPosition::legacy_version")]
+    pub version: u32,
+}
+
+impl PanelPosition {
+    pub const LEGACY_VERSION: u32 = 1;
+    pub const CURRENT_VERSION: u32 = 2;
+
+    fn legacy_version() -> u32 {
+        Self::LEGACY_VERSION
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -295,6 +308,18 @@ mod tests {
         assert_eq!(v["silenceMs"], 1300);
         assert_eq!(v["voiceCommands"][0]["key"]["key"], "enter");
         assert_eq!(v["voiceCommands"][2]["key"]["modifiers"][0], "cmd");
+    }
+
+    #[test]
+    fn panel_position_without_version_is_legacy() {
+        let s: Settings = serde_json::from_value(json!({
+            "panelPosition": { "x": 10, "y": 20, "displayId": "1" }
+        }))
+        .unwrap();
+        let p = s.panel_position.unwrap();
+        assert_eq!(p.version, PanelPosition::LEGACY_VERSION);
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["version"], 1);
     }
 
     #[test]

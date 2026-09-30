@@ -7,6 +7,7 @@ import {
   latestStatusOnly,
   subscribeWithInitial,
   type AppStatus,
+  type PanelAnchor,
   type Permissions,
   type ProvisioningStatus,
   type Settings,
@@ -16,6 +17,18 @@ export function useAppStatus(): AppStatus | null {
   const [status, setStatus] = useState<AppStatus | null>(null);
   useEffect(() => subscribeWithInitial("status-changed", commands.getStatus, latestStatusOnly(setStatus)), []);
   return status;
+}
+
+/** Rust の位置が決まる前の値 (get_panel_anchor と同じ) */
+const DEFAULT_PANEL_ANCHOR: PanelAnchor = { horizontal: "center", vertical: "bottom" };
+
+/**
+ * panel のアンカー。作成直後の panel-anchor は購読前に送られるため、購読してから get_panel_anchor で取る
+ */
+export function usePanelAnchor(): PanelAnchor {
+  const [anchor, setAnchor] = useState<PanelAnchor>(DEFAULT_PANEL_ANCHOR);
+  useEffect(() => subscribeWithInitial("panel-anchor", commands.getPanelAnchor, setAnchor), []);
+  return anchor;
 }
 
 /** 設定キーごとの保存エラー (Rust の表示用メッセージ)。該当する操作の近くに表示する */

@@ -74,7 +74,11 @@ export type Settings = {
   voiceCommands: VoiceCommand[];
   vocabulary: string[];
   excludedApps: ExcludedApp[];
-  panelPosition: { x: number; y: number; displayId: string } | null;
+  /**
+   * Rust (ドラッグ) だけが書く。フロントエンドは null (既定位置に戻す) にする時だけ送る。
+   * version なしは旧形式 (起動時に Rust が移行する)
+   */
+  panelPosition: { x: number; y: number; displayId: string; version?: number } | null;
   setupCompleted: boolean;
 };
 
@@ -105,6 +109,8 @@ export type AppInfo = { version: string; build: string };
 export type UninstallTarget = { path: string; bytes: number };
 export type RunningApp = { bundleId: string; name: string };
 export type AudioLevel = { level: number; threshold: number; speech: boolean };
+/** panel の大きさが変わる時に固定する辺・角。描画内容もこの基準に寄せて配置する */
+export type PanelAnchor = { horizontal: "left" | "center" | "right"; vertical: "top" | "bottom" };
 export type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "permissions" | "storage" | "about";
 
 // ---------- エラー ----------
@@ -161,6 +167,7 @@ export const commands = {
   openSettings: (category?: SettingsCategory) => call<void>("open_settings", { category }),
   /** panel の描画内容 (影の余白込み) の大きさ。論理ピクセル (CSS px) */
   setPanelSize: (width: number, height: number) => call<void>("set_panel_size", { width, height }),
+  getPanelAnchor: () => call<PanelAnchor>("get_panel_anchor"),
   completeSetup: () => call<void>("complete_setup"),
   openSetup: () => call<void>("open_setup"),
   /** setup の動作テストで panel を出す (セットアップ完了前は panel を表示しないため) */
@@ -177,6 +184,7 @@ export type EventMap = {
   "utterance-result": UtteranceResult;
   "settings-changed": Settings;
   "settings-navigate": { category: SettingsCategory };
+  "panel-anchor": PanelAnchor;
   "permissions-changed": Permissions;
   "provisioning-progress": ProvisioningStatus;
   // マイクの接続・切断。変化後の一覧を送る (Rust が送らない版でも購読は無害)

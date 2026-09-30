@@ -2,6 +2,7 @@
  * 開発用モック (npm run dev のブラウザ表示・Playwright 用)。本番ビルドには含まれない。
  * @tauri-apps/api/mocks で IPC とイベントを差し替え、?window= と ?mock= で画面・状態を選ぶ。
  * シナリオ一覧は src/mock/scenarios.ts。
+ * &anchor=<top|bottom>-<left|center|right> で panel のアンカー (get_panel_anchor の値) を指定する。
  * &slow=<command,...> で指定した command の応答を 500ms 遅らせる (初期値取得と event の順序の確認用)。
  * window.__mukuchiMock.fail[<command>] = "<メッセージ>" でその command を失敗させられる (エラー表示の確認用)。
  */
@@ -13,6 +14,7 @@ import type {
   AppStatus,
   AudioLevel,
   EventMap,
+  PanelAnchor,
   EventName,
   ProvisioningStatus,
   Settings,
@@ -31,6 +33,15 @@ const RUNTIME_MISSING: AppError = {
   action: "start_setup",
 };
 
+/** "top-right" 等を PanelAnchor にする。不正な値は Rust の位置が決まる前と同じ center/bottom */
+function parseAnchor(value: string | null): PanelAnchor {
+  const [v, h] = (value ?? "").split("-");
+  return {
+    horizontal: h === "left" || h === "right" ? h : "center",
+    vertical: v === "top" ? "top" : "bottom",
+  };
+}
+
 function fire<E extends EventName>(event: E, payload: EventMap[E]) {
   void emit(event, payload);
 }
@@ -40,6 +51,7 @@ export function installMock(params: URLSearchParams) {
   const scenario = findScenario(windowLabel, params.get("mock") ?? "default");
   const db = createDb();
   scenario.setup?.(db);
+  db.anchor = parseAnchor(params.get("anchor"));
   // 静止状態のシナリオは確定結果・エラー表示を消さない
   devOverrides.holdResults = !scenario.live;
   const step = Number(params.get("step")) || scenario.step || null;
@@ -83,6 +95,10 @@ export function installMock(params: URLSearchParams) {
     started: (id) => fire("utterance-started", { id }),
     partial: (u: Utterance) => fire("utterance-partial", u),
     result: (r: UtteranceResult) => fire("utterance-result", r),
+    setAnchor: (anchor: PanelAnchor) => {
+      db.anchor = anchor;
+      fire("panel-anchor", anchor);
+    },
     setLevel: (level: number, speech = false) => {
       db.level = { ...db.level, level, speech };
     },
@@ -149,7 +165,7 @@ export function installMock(params: URLSearchParams) {
       if (failure != null) return Promise.reject(failure);
       if (slow.has(cmd)) {
         // 応答時点の値ではなく、呼ばれた時点の値を返す (遅れて届く古い応答を再現する)
-        const snapshot = cmd === "get_status" ? db.status : undefined;
+        const snapshot = cmd === "get_status" ? db.status : cmd === "get_panel_anchor" ? db.anchor : undefined;
         await new Promise((r) => setTimeout(r, 500));
         if (snapshot) return snapshot;
       }
@@ -259,6 +275,8 @@ export function installMock(params: URLSearchParams) {
         case "complete_setup":
         case "show_panel":
           return null;
+        case "get_panel_anchor":
+          return db.anchor;
         case "get_app_info":
           return { version: "0.1.0", build: "42" };
         default:
@@ -289,5 +307,7 @@ export type MockApi = {
   partial: (u: Utterance) => void;
   result: (r: UtteranceResult) => void;
   setLevel: (level: number, speech?: boolean) => void;
+  /** Rust がドラッグ等でアンカーを変えた時の panel-anchor を再現する */
+  setAnchor: (anchor: PanelAnchor) => void;
   typeIntoFocused: (text: string) => void;
 };

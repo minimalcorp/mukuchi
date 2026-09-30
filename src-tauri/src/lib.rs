@@ -203,6 +203,7 @@ pub fn run() {
             commands::open_setup,
             commands::complete_setup,
             commands::set_panel_size,
+            commands::get_panel_anchor,
             commands::show_panel,
         ])
         .build(context)

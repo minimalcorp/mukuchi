@@ -1,5 +1,5 @@
 /* モックの初期データ */
-import type { AppStatus, AudioDevice, AudioLevel, Permissions, ProvisioningStatus, Settings } from "@/lib/ipc";
+import type { AppStatus, AudioDevice, AudioLevel, PanelAnchor, Permissions, ProvisioningStatus, Settings } from "@/lib/ipc";
 import type { MockApi } from "./index";
 
 export type MockDb = {
@@ -9,6 +9,8 @@ export type MockDb = {
   provisioning: ProvisioningStatus;
   level: AudioLevel;
   devices: AudioDevice[];
+  /** panel のアンカー (get_panel_anchor の値) */
+  anchor: PanelAnchor;
   /** true の時はレベルを揺らす (live 表示用) */
   levelStream: boolean;
   /** set_listening(true) の時に呼ぶ (live シナリオで発話を流す) */
@@ -97,6 +99,7 @@ export function createDb(): MockDb {
       { id: "airpods", name: "AirPods Pro", isDefault: false },
       { id: "usb", name: "USB オーディオ", isDefault: false },
     ],
+    anchor: { horizontal: "center", vertical: "bottom" },
     levelStream: false,
     onListen: null,
   };

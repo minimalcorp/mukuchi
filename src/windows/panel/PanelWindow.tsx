@@ -1,7 +1,8 @@
 /*
  * 常時表示パネル (デザイン 03 / 06)。
  * ウィンドウは透明・枠なしで、描画内容 (ピル・カード + 影の余白) の大きさを set_panel_size で Rust に伝える。
- * Rust はウィンドウをその大きさにし、下端中央を基準位置に保つ (透明部分がクリックを奪わないように)。
+ * Rust はウィンドウをその大きさにし、アンカー (panel-anchor) の辺・角を固定して広げる/縮める (透明部分がクリックを奪わないように)。
+ * 描画内容もアンカーに寄せて配置し、展開・収縮がアンカーの辺・角から始まるようにする。
  */
 import {
   AudioLines,
@@ -18,7 +19,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, type ReactNode, type Ref } from "react";
-import { commands, runCommand, type AppError, type AppStatus } from "@/lib/ipc";
+import { commands, runCommand, type AppError, type AppStatus, type PanelAnchor } from "@/lib/ipc";
+import { usePanelAnchor } from "@/lib/hooks";
 import { useAudioLevel } from "@/lib/audio-level";
 import { LevelMeter } from "@/components/app/level-meter";
 import { env } from "@/lib/env";
@@ -34,8 +36,23 @@ const CARD_WIDTH = { pill: 240, expanded: 440 };
 const ROW_HEIGHT = { pill: 34, expanded: 36 };
 const CARD_BORDER = 1;
 
+// アンカーへの寄せ方。ウィンドウ内 (flex) とカード・最終の大きさの要素の重ね方 (grid) で同じ向きにする
+// align-items は flex・grid で共通
+const ALIGN: Record<PanelAnchor["vertical"], string> = { top: "items-start", bottom: "items-end" };
+const FLEX_JUSTIFY: Record<PanelAnchor["horizontal"], string> = {
+  left: "justify-start",
+  center: "justify-center",
+  right: "justify-end",
+};
+const GRID_JUSTIFY: Record<PanelAnchor["horizontal"], string> = {
+  left: "justify-items-start",
+  center: "justify-items-center",
+  right: "justify-items-end",
+};
+
 export function PanelWindow() {
   const { status, items, lastShown, errorVisible } = usePanelModel();
+  const anchor = usePanelAnchor();
   if (!status) return null;
 
   const isOn = ON_PHASES.includes(status.phase);
@@ -43,7 +60,7 @@ export function PanelWindow() {
 
   let body: ReactNode;
   if (expanded || isOn) {
-    body = <ListeningPanel isOn={isOn} expanded={expanded} items={expanded ? items : lastShown} />;
+    body = <ListeningPanel anchor={anchor} isOn={isOn} expanded={expanded} items={expanded ? items : lastShown} />;
   } else if (status.phase === "loading") {
     body = <LoadingPill progress={status.loadingProgress} />;
   } else if (status.phase === "error" && errorVisible && status.error) {
@@ -54,8 +71,12 @@ export function PanelWindow() {
 
   return (
     <div
+      data-anchor={`${anchor.vertical}-${anchor.horizontal}`}
       className={cn(
-        "flex h-full w-full items-end justify-center overflow-hidden",
+        "flex h-full w-full overflow-hidden",
+        // 実機ではウィンドウ = PanelFrame の大きさだが、大きさの反映が遅れる間もアンカー側を合わせておく
+        ALIGN[anchor.vertical],
+        FLEX_JUSTIFY[anchor.horizontal],
         // ブラウザでのモック表示時はデザインのキャンバスと同じ背景にする
         env.browserFrame && "bg-surface-app",
       )}
@@ -205,7 +226,12 @@ function ErrorActionButton({ error }: { error: AppError }) {
 
 /* ---------- ON (待機中のメーター / 発話中の展開表示) ---------- */
 
-function ListeningPanel({ isOn, expanded, items }: { isOn: boolean; expanded: boolean; items: PanelItem[] }) {
+function ListeningPanel({ anchor, isOn, expanded, items }: {
+  anchor: PanelAnchor;
+  isOn: boolean;
+  expanded: boolean;
+  items: PanelItem[];
+}) {
   const previewRef = useRef<HTMLDivElement>(null);
   const targetRef = useRef<HTMLDivElement>(null);
   const drag = usePanelDrag();
@@ -232,8 +258,10 @@ function ListeningPanel({ isOn, expanded, items }: { isOn: boolean; expanded: bo
     return () => document.fonts.removeEventListener("loadingdone", apply);
   });
 
+  // カードと target をアンカーの辺・角に揃えて重ねる。幅・高さのアニメーションはアンカーの反対側へ伸び縮みする
+  // (top ならカードの上端が動かず、プレビュー → メーター行の順のまま下へ広がる)
   return (
-    <div className="grid items-end justify-items-center">
+    <div className={cn("grid", ALIGN[anchor.vertical], GRID_JUSTIFY[anchor.horizontal])}>
       <div ref={targetRef} className="invisible [grid-area:1/1]" aria-hidden />
       <div
         {...drag}

@@ -1,5 +1,5 @@
 /* モックの初期データ */
-import type { AppStatus, AudioLevel, Permissions, ProvisioningStatus, Settings } from "@/lib/ipc";
+import type { AppStatus, AudioDevice, AudioLevel, Permissions, ProvisioningStatus, Settings } from "@/lib/ipc";
 import type { MockApi } from "./index";
 
 export type MockDb = {
@@ -8,6 +8,7 @@ export type MockDb = {
   permissions: Permissions;
   provisioning: ProvisioningStatus;
   level: AudioLevel;
+  devices: AudioDevice[];
   /** true の時はレベルを揺らす (live 表示用) */
   levelStream: boolean;
   /** set_listening(true) の時に呼ぶ (live シナリオで発話を流す) */
@@ -67,6 +68,11 @@ export function createDb(): MockDb {
     permissions: { microphone: "granted", accessibility: true },
     provisioning: provisioning("done"),
     level: { level: 0.18, threshold: 0.55, speech: false },
+    devices: [
+      { id: "builtin", name: "MacBook Pro のマイク", isDefault: true },
+      { id: "airpods", name: "AirPods Pro", isDefault: false },
+      { id: "usb", name: "USB オーディオ", isDefault: false },
+    ],
     levelStream: false,
     onListen: null,
   };

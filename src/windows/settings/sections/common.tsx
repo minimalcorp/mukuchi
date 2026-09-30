@@ -1,9 +1,27 @@
 import type { ReactNode } from "react";
+import { CircleAlert } from "lucide-react";
 import type { Settings } from "@/lib/ipc";
+import type { SettingsErrors } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { HelpTip } from "@/components/ui/tooltip";
 
-export type SectionProps = { settings: Settings; update: (patch: Partial<Settings>) => void };
+export type SectionProps = {
+  settings: Settings;
+  update: (patch: Partial<Settings>) => void;
+  /** 保存に失敗した設定キーとメッセージ */
+  errors: SettingsErrors;
+};
+
+/** 操作の近くに出すエラー (保存の失敗・入力の検証) */
+export function FieldError({ message, className }: { message: string | null | undefined; className?: string }) {
+  if (!message) return null;
+  return (
+    <p role="alert" className={cn("m-0 flex items-start gap-1.5 text-xs leading-[1.5] text-fg-danger", className)}>
+      <CircleAlert size={14} className="mt-px flex-none" aria-hidden />
+      <span>{message}</span>
+    </p>
+  );
+}
 
 /** 枠付きのまとまり (デザインの border 1px・角丸 8px のカード) */
 export function Card({ className, children }: { className?: string; children: ReactNode }) {

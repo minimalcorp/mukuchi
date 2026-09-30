@@ -33,7 +33,7 @@ export function SettingsWindow() {
       }),
     [],
   );
-  const [settings, updateSettings] = useSettings();
+  const [settings, updateSettings, settingsErrors] = useSettings();
   // システム設定での変更は通知されないことがあるため、開いている間は 1 秒ごとに再取得する
   const [permissions, setPermissions] = usePermissions(1000);
   const status = useAppStatus();
@@ -88,11 +88,11 @@ export function SettingsWindow() {
         <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-7 py-5">
           {settings ? (
             <>
-              {category === "general" && <GeneralSection settings={settings} update={updateSettings} />}
-              {category === "voice" && <VoiceSection settings={settings} update={updateSettings} status={status} />}
-              {category === "commands" && <CommandsSection settings={settings} update={updateSettings} />}
+              {category === "general" && <GeneralSection settings={settings} update={updateSettings} errors={settingsErrors} />}
+              {category === "voice" && <VoiceSection settings={settings} update={updateSettings} errors={settingsErrors} status={status} />}
+              {category === "commands" && <CommandsSection settings={settings} update={updateSettings} errors={settingsErrors} />}
               {category === "recognition" && (
-                <RecognitionSection settings={settings} update={updateSettings} status={status} />
+                <RecognitionSection settings={settings} update={updateSettings} errors={settingsErrors} status={status} />
               )}
               {category === "permissions" && (
                 <PermissionsSection permissions={permissions} onChange={setPermissions} />

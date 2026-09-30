@@ -4,6 +4,7 @@
  * シナリオ一覧は src/mock/scenarios.ts。
  * &unimplemented=<command,...> で指定した command を未実装 (`not_implemented:` で reject) にできる。
  * &slow=<command,...> で指定した command の応答を 500ms 遅らせる (初期値取得と event の順序の確認用)。
+ * window.__mukuchiMock.fail[<command>] = "<メッセージ>" でその command を失敗させられる (エラー表示の確認用)。
  */
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
@@ -70,6 +71,7 @@ export function installMock(params: URLSearchParams) {
   const api: MockApi = {
     db,
     calls: [],
+    fail: {},
     invoke: (cmd, args) => invoke(cmd, args),
     setStatus,
     fire,
@@ -113,6 +115,8 @@ export function installMock(params: URLSearchParams) {
         // Rust と同じく文字列で reject する
         return Promise.reject(`not_implemented: ${cmd} は未実装です`);
       }
+      const failure = api.fail[cmd];
+      if (failure != null) return Promise.reject(failure);
       if (slow.has(cmd)) {
         // 応答時点の値ではなく、呼ばれた時点の値を返す (遅れて届く古い応答を再現する)
         const snapshot = cmd === "get_status" ? db.status : undefined;
@@ -140,11 +144,7 @@ export function installMock(params: URLSearchParams) {
           fire("settings-changed", db.settings);
           return db.settings;
         case "list_input_devices":
-          return [
-            { id: "builtin", name: "MacBook Pro のマイク", isDefault: true },
-            { id: "airpods", name: "AirPods Pro", isDefault: false },
-            { id: "usb", name: "USB オーディオ", isDefault: false },
-          ];
+          return db.devices;
         case "get_permissions":
           return db.permissions;
         case "request_microphone":
@@ -209,6 +209,7 @@ export function installMock(params: URLSearchParams) {
           return null;
         case "set_panel_size":
         case "open_logs_folder":
+        case "open_setup":
         case "complete_setup":
           return null;
         case "get_app_info":
@@ -229,6 +230,8 @@ export type MockApi = {
   db: MockDb;
   /** 呼ばれた command と引数 (plugin:* を除く)。Playwright から確認する */
   calls: { cmd: string; args: Record<string, unknown> }[];
+  /** command 名 → reject するメッセージ (Rust の表示用メッセージの代わり) */
+  fail: Record<string, string>;
   /** Tauri の invoke (他ウィンドウからの command 呼び出しを再現する) */
   invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
   setStatus: (patch: Partial<AppStatus>) => void;

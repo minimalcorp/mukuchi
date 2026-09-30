@@ -12,84 +12,169 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useAudioLevel } from "@/lib/audio-level";
-import { commands, type AppStatus, type AudioDevice, type RunningApp } from "@/lib/ipc";
-import { Card, FieldHeading, type SectionProps } from "./common";
+import { errorMessage, useDebouncedCommit } from "@/lib/hooks";
+import { commands, subscribeEvents, type AppStatus, type AudioDevice, type RunningApp } from "@/lib/ipc";
+import { Card, FieldError, FieldHeading, type SectionProps } from "./common";
 
 const ON_PHASES: AppStatus["phase"][] = ["listening", "speaking", "finalizing", "done"];
 
-export function VoiceSection({ settings, update, status }: SectionProps & { status: AppStatus | null }) {
-  const [devices, setDevices] = useState<AudioDevice[]>([]);
-  useEffect(() => {
-    commands.listInputDevices().then(setDevices, () => {});
-  }, []);
+/**
+ * 感度から求めた入力レベル上のしきい値 (0..1)。audio-level が届く前・オフの間に使う。
+ * Rust の VadParams::from_settings の floor_db と floor_level (-60〜-10 dB を 0〜1) に合わせる
+ */
+function thresholdFromSensitivity(sensitivity: number): number {
+  const floorDb = -45 + (60 - sensitivity) * 0.25;
+  return Math.min(1, Math.max(0, (floorDb + 60) / 50));
+}
 
-  const defaultDevice = devices.find((d) => d.isDefault);
+/** マイク一覧。表示時・フォーカス時・接続の変化 (input-devices-changed) で取り直す */
+function useInputDevices(): { devices: AudioDevice[] | null; error: string | null } {
+  const [devices, setDevices] = useState<AudioDevice[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    const refresh = () => {
+      commands.listInputDevices().then(
+        (d) => {
+          if (disposed) return;
+          setDevices(d);
+          setError(null);
+        },
+        (e: unknown) => {
+          if (!disposed) setError(errorMessage(e));
+        },
+      );
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    // 購読してから取得する (取得中の接続変化を取りこぼさない)
+    const unsubscribe = subscribeEvents(
+      {
+        "input-devices-changed": (list) => {
+          // 変化後の一覧が届く。形が違う (旧版) 場合は取り直す
+          if (Array.isArray(list)) {
+            setDevices(list);
+            setError(null);
+          } else refresh();
+        },
+      },
+      refresh,
+    );
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      disposed = true;
+      unsubscribe();
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+  return { devices, error };
+}
+
+export function VoiceSection({ settings, update, errors, status }: SectionProps & { status: AppStatus | null }) {
+  const { devices, error: devicesError } = useInputDevices();
+  const sensitivity = useDebouncedCommit(settings.vadSensitivity, (v) => update({ vadSensitivity: v }));
+  // スライダーは 0.1 秒刻み (3〜30) で扱う
+  const silence = useDebouncedCommit(Math.round(settings.silenceMs / 100), (v) => update({ silenceMs: v * 100 }));
+
+  const list = devices ?? [];
+  const defaultDevice = list.find((d) => d.isDefault);
+  const selected = settings.inputDeviceId;
   const options = [
     { value: "", label: defaultDevice ? `システムの既定（${defaultDevice.name}）` : "システムの既定" },
-    ...devices.map((d) => ({ value: d.id, label: d.name })),
+    ...list.map((d) => ({ value: d.id, label: d.name })),
   ];
+  // 選んだマイクが外れている間も選択を残す (Rust はつながるまで既定のマイクを使う想定)。一覧の取得前は出さない
+  if (selected && devices && !list.some((d) => d.id === selected)) {
+    options.push({ value: selected, label: "選択中のマイク（接続されていません）" });
+  }
   const isOn = status != null && ON_PHASES.includes(status.phase);
 
   return (
     <>
-      <Select
-        label="マイク"
-        options={options}
-        value={settings.inputDeviceId ?? ""}
-        onValueChange={(v) => update({ inputDeviceId: v === "" ? null : v })}
+      <div className="flex flex-col gap-1.5">
+        <Select
+          label="マイク"
+          options={options}
+          value={selected ?? ""}
+          onValueChange={(v) => update({ inputDeviceId: v === "" ? null : v })}
+        />
+        <FieldError message={errors.inputDeviceId ?? devicesError} />
+      </div>
+      <InputLevel
+        isOn={isOn}
+        sensitivity={sensitivity.value}
+        editing={sensitivity.value !== settings.vadSensitivity}
       />
-      <InputLevel isOn={isOn} sensitivity={settings.vadSensitivity} />
       <div className="flex flex-col gap-2">
         <FieldHeading
           label="発話検出の感度"
           help="高くすると小さな声も拾います。周囲がうるさい場合は下げてください。入力レベルの縦線が検出のしきい値です"
-          value={settings.vadSensitivity}
+          value={sensitivity.value}
         />
         <Slider
           aria-label="発話検出の感度"
           min={0}
           max={100}
-          value={settings.vadSensitivity}
-          onChange={(e) => update({ vadSensitivity: Number(e.target.value) })}
+          value={sensitivity.value}
+          onChange={(e) => sensitivity.change(Number(e.target.value))}
+          onPointerUp={sensitivity.flush}
+          onKeyUp={sensitivity.flush}
+          onBlur={sensitivity.flush}
         />
         <div className="flex justify-between text-2xs text-fg-subtle">
           <span>低い</span>
           <span>高い</span>
         </div>
+        <FieldError message={errors.vadSensitivity} />
       </div>
       <div className="flex flex-col gap-2">
         <FieldHeading
           label="話し終わりと判定するまでの無音"
           help="短くすると早く入力されますが、息継ぎで文が途切れやすくなります"
-          value={`${(settings.silenceMs / 1000).toFixed(1)} 秒`}
+          value={`${(silence.value / 10).toFixed(1)} 秒`}
         />
         <Slider
           aria-label="話し終わりと判定するまでの無音"
           min={3}
           max={30}
-          value={Math.round(settings.silenceMs / 100)}
-          onChange={(e) => update({ silenceMs: Number(e.target.value) * 100 })}
+          value={silence.value}
+          onChange={(e) => silence.change(Number(e.target.value))}
+          onPointerUp={silence.flush}
+          onKeyUp={silence.flush}
+          onBlur={silence.flush}
         />
         <div className="flex justify-between text-2xs text-fg-subtle">
           <span>0.3 秒</span>
           <span>3.0 秒</span>
         </div>
+        <FieldError message={errors.silenceMs} />
       </div>
-      <ExcludedApps settings={settings} update={update} />
+      <ExcludedApps settings={settings} update={update} errors={errors} />
     </>
   );
 }
 
-/** 入力レベル。オンの間だけ Rust から届く。しきい値の縦線は、届く前は感度から求めた位置に置く */
-function InputLevel({ isOn, sensitivity }: { isOn: boolean; sensitivity: number }) {
+/**
+ * 入力レベル。オンの間だけ Rust から届く。
+ * しきい値の縦線は audio-level の threshold を使い、届く前・オフの間・感度の操作中 (保存前) は感度から求めた位置に置く
+ */
+function InputLevel({ isOn, sensitivity, editing }: { isOn: boolean; sensitivity: number; editing: boolean }) {
   const { level, threshold, received } = useAudioLevel();
-  const line = isOn && received ? threshold : (100 - sensitivity) / 100;
+  const line = isOn && received && !editing ? threshold : thresholdFromSensitivity(sensitivity);
   return (
     <div className="-mt-2 flex h-8 items-center gap-2.5 rounded-md bg-surface-muted px-3" data-testid="input-level">
       <AudioLines size={14} className="flex-none text-fg-muted" aria-hidden />
       <div className="relative h-1 flex-1 rounded-[2px] bg-meter-track-strong">
         <div className="h-1 rounded-[2px] bg-green-500" style={{ width: `${(isOn ? level : 0) * 100}%` }} />
-        <span className="absolute -top-1 h-3 w-0.5 bg-meter-threshold" style={{ left: `${line * 100}%` }} aria-hidden />
+        <span
+          data-testid="level-threshold"
+          className="absolute -top-1 h-3 w-0.5 bg-meter-threshold"
+          style={{ left: `${line * 100}%` }}
+          aria-hidden
+        />
       </div>
       <span className="text-xs text-fg-muted">入力レベル</span>
     </div>
@@ -97,8 +182,9 @@ function InputLevel({ isOn, sensitivity }: { isOn: boolean; sensitivity: number 
 }
 
 /** 入力しないアプリ (デザイン 07-A) */
-function ExcludedApps({ settings, update }: SectionProps) {
+function ExcludedApps({ settings, update, errors }: SectionProps) {
   const [running, setRunning] = useState<RunningApp[] | null>(null);
+  const [runningError, setRunningError] = useState<string | null>(null);
   const excluded = settings.excludedApps;
   const candidates = (running ?? []).filter((a) => !excluded.some((e) => e.bundleId === a.bundleId));
 
@@ -127,7 +213,14 @@ function ExcludedApps({ settings, update }: SectionProps) {
         <div className="px-2.5 py-2">
           <DropdownMenu
             onOpenChange={(open) => {
-              if (open) commands.listRunningApps().then(setRunning, () => setRunning([]));
+              if (!open) return;
+              // 開くたびに取り直す (起動中のアプリは変わるため)
+              setRunning(null);
+              setRunningError(null);
+              commands.listRunningApps().then(setRunning, (e: unknown) => {
+                setRunning([]);
+                setRunningError(errorMessage(e) ?? "この版では未対応です");
+              });
             }}
           >
             <DropdownMenuTrigger asChild>
@@ -138,7 +231,8 @@ function ExcludedApps({ settings, update }: SectionProps) {
             <DropdownMenuContent align="start">
               <DropdownMenuLabel>起動中のアプリ</DropdownMenuLabel>
               {running === null ? <DropdownMenuLabel>読み込んでいます…</DropdownMenuLabel> : null}
-              {running !== null && candidates.length === 0 ? (
+              {runningError ? <DropdownMenuLabel className="text-fg-danger">{runningError}</DropdownMenuLabel> : null}
+              {running !== null && !runningError && candidates.length === 0 ? (
                 <DropdownMenuLabel>追加できるアプリはありません</DropdownMenuLabel>
               ) : null}
               {candidates.map((app) => (
@@ -151,6 +245,7 @@ function ExcludedApps({ settings, update }: SectionProps) {
           </DropdownMenu>
         </div>
       </Card>
+      <FieldError message={errors.excludedApps} />
     </div>
   );
 }

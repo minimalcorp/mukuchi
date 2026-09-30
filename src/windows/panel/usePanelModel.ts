@@ -3,7 +3,7 @@
  * 値・挙動は docs/plans/implementation-plan.md「2. 音声入力の体験」に従う。
  */
 import { useEffect, useReducer, useRef } from "react";
-import { commands, subscribeWithInitial, type AppStatus, type Utterance, type UtteranceResult } from "@/lib/ipc";
+import { commands, latestStatusOnly, subscribeWithInitial, type AppStatus, type Utterance, type UtteranceResult } from "@/lib/ipc";
 import { resetAudioLevel } from "@/lib/audio-level";
 import { devOverrides } from "@/lib/env";
 
@@ -127,12 +127,12 @@ export function usePanelModel() {
       timerSet.add(t);
     };
     let lastPhase: AppStatus["phase"] | null = null;
-    const onStatus = (status: AppStatus) => {
+    const onStatus = latestStatusOnly((status: AppStatus) => {
       dispatch({ type: "status", status });
       if (status.phase === "error" && lastPhase !== "error") later(ERROR_DISPLAY_MS, { type: "hideError" });
       if (status.phase === "off" || status.phase === "loading" || status.phase === "error") resetAudioLevel();
       lastPhase = status.phase;
-    };
+    });
 
     // 購読してから初期値を取る (取りこぼし防止)。初期値より新しい status-changed が先に届いた場合は初期値を捨てる
     const unsubscribe = subscribeWithInitial("status-changed", commands.getStatus, onStatus, {

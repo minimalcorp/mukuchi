@@ -8,12 +8,13 @@ import { Select } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { formatKeyCombo, KEY_LABELS, MODIFIER_LABELS, MODIFIER_ORDER } from "@/lib/format";
 import type { KeyCombo, KeyName, VoiceCommand } from "@/lib/ipc";
+import { splitPhrases, validatePhrases } from "@/lib/voice-command";
 import { cn } from "@/lib/utils";
-import { Card, TitleWithSub, type SectionProps } from "./common";
+import { Card, FieldError, TitleWithSub, type SectionProps } from "./common";
 
 const GRID = "grid grid-cols-[1fr_130px_64px] gap-3";
 
-export function CommandsSection({ settings, update }: SectionProps) {
+export function CommandsSection({ settings, update, errors }: SectionProps) {
   // 編集中のコマンド。id が空なら追加
   const [editing, setEditing] = useState<VoiceCommand | null>(null);
   const list = settings.voiceCommands;
@@ -82,46 +83,57 @@ export function CommandsSection({ settings, update }: SectionProps) {
           </Button>
         </div>
       </Card>
+      <FieldError message={errors.voiceCommandsEnabled ?? errors.voiceCommands} />
       <p className="m-0 text-xs leading-[1.6] text-fg-muted">
         「確定してください」のように前後に言葉があると、通常の文字として入力されます。
       </p>
-      <CommandDialog command={editing} onCancel={() => setEditing(null)} onSave={save} />
+      <CommandDialog
+        command={editing}
+        others={list.filter((c) => c.id !== editing?.id)}
+        onCancel={() => setEditing(null)}
+        onSave={save}
+      />
     </>
   );
 }
 
 function CommandDialog({
   command,
+  others,
   onCancel,
   onSave,
 }: {
   command: VoiceCommand | null;
+  others: VoiceCommand[];
   onCancel: () => void;
   onSave: (c: VoiceCommand) => void;
 }) {
   return (
     <Dialog open={command != null} onOpenChange={(open) => !open && onCancel()}>
       {/* key で開くたびにフォームを初期化する */}
-      {command ? <CommandForm key={command.id || "new"} command={command} onCancel={onCancel} onSave={onSave} /> : null}
+      {command ? <CommandForm key={command.id || "new"} command={command} others={others} onCancel={onCancel} onSave={onSave} /> : null}
     </Dialog>
   );
 }
 
 function CommandForm({
   command,
+  others,
   onCancel,
   onSave,
 }: {
   command: VoiceCommand;
+  /** 編集中以外のコマンド (言い方の重複を調べる。他ウィンドウでの変更も反映される) */
+  others: VoiceCommand[];
   onCancel: () => void;
   onSave: (c: VoiceCommand) => void;
 }) {
   const [phrases, setPhrases] = useState(command.phrases.join("、"));
   const [key, setKey] = useState<KeyCombo>(command.key);
-  const parsed = phrases
-    .split(/[、,，\n]/)
-    .map((p) => p.trim())
-    .filter(Boolean);
+  const parsed = splitPhrases(phrases);
+  const error = validatePhrases(parsed, others, (c) => formatKeyCombo(c.key));
+  // 空欄は保存ボタンを無効にするだけで、エラーとしては出さない (開いた直後に赤字を出さない)
+  const shownError = parsed.length === 0 ? null : error;
   const isNew = command.id === "";
 
   const toggleModifier = (m: KeyCombo["modifiers"][number]) =>
@@ -135,7 +147,7 @@ function CommandForm({
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          if (parsed.length === 0) return;
+          if (error) return;
           onSave({ id: command.id || crypto.randomUUID(), phrases: parsed, key });
         }}
       >
@@ -157,8 +169,13 @@ function CommandForm({
               autoFocus
               placeholder="確定、エンター"
               value={phrases}
+              aria-invalid={shownError ? true : undefined}
+              aria-describedby={shownError ? "command-phrases-error" : undefined}
               onChange={(e) => setPhrases(e.target.value)}
             />
+            <div id="command-phrases-error">
+              <FieldError message={shownError} />
+            </div>
           </div>
           <div className="flex flex-col gap-1.5">
             <span className="text-sm leading-[1.4] font-medium">送るキー</span>
@@ -200,7 +217,7 @@ function CommandForm({
         </div>
         <div className="flex justify-end gap-2 px-5 pb-5">
           <Button onClick={onCancel}>キャンセル</Button>
-          <Button type="submit" variant="primary" disabled={parsed.length === 0}>
+          <Button type="submit" variant="primary" disabled={error != null}>
             保存
           </Button>
         </div>

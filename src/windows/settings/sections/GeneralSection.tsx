@@ -1,7 +1,7 @@
 import { Switch } from "@/components/ui/switch";
-import { Card, type SectionProps } from "./common";
+import { Card, FieldError, type SectionProps } from "./common";
 
-export function GeneralSection({ settings, update }: SectionProps) {
+export function GeneralSection({ settings, update, errors }: SectionProps) {
   return (
     <section className="flex flex-col gap-2.5">
       <h2 className="m-0 text-xs font-semibold text-fg-muted">動作</h2>
@@ -15,6 +15,7 @@ export function GeneralSection({ settings, update }: SectionProps) {
           />
         </div>
       </Card>
+      <FieldError message={errors.launchAtLogin} />
     </section>
   );
 }

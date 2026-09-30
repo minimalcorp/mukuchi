@@ -120,12 +120,6 @@ test("panel: 復旧 command が未実装ならボタンを消す", async ({ page
   await expect(page.getByText("文字起こしが停止しました")).toBeVisible();
 });
 
-test("panel: 対応する command のない復旧 (start_setup) はボタンを出さない", async ({ page }) => {
-  await open(page, "window=panel&mock=error-runtime", PANEL);
-  await expect(page.getByText("モデルがありません")).toBeVisible();
-  await expect(page.getByRole("button")).toHaveCount(0);
-});
-
 // ---------- settings-navigate ----------
 
 test("settings: settings-navigate でカテゴリを切り替える", async ({ page }) => {

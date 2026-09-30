@@ -21,7 +21,7 @@ import { useEffect, useLayoutEffect, useRef, type ReactNode, type Ref } from "re
 import { commands, runCommand, type AppError, type AppStatus } from "@/lib/ipc";
 import { useAudioLevel } from "@/lib/audio-level";
 import { env } from "@/lib/env";
-import { ERROR_ACTIONS } from "@/lib/error-actions";
+import { errorActionView } from "@/lib/error-actions";
 import { useUnimplemented } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { usePanelModel, type PanelItem } from "./usePanelModel";
@@ -160,10 +160,18 @@ const ERROR_PILL: Record<AppError["code"], { icon: LucideIcon; iconClass: string
   microphone_missing: { icon: MicOff, iconClass: "text-amber-500", short: "マイクが見つかりません" },
   runtime_missing: { icon: PackageX, iconClass: "text-amber-500", short: "モデルがありません" },
   insert_failed: { icon: CircleAlert, iconClass: "text-red-500", short: "入力できませんでした" },
+  vad_failed: { icon: CircleAlert, iconClass: "text-red-500", short: "発話検出を開始できません" },
 };
 
+// Rust が新しいエラーコードを足した場合 (フロントが未対応) は Rust の表示用メッセージをそのまま出す
+function errorPill(error: AppError) {
+  return Object.hasOwn(ERROR_PILL, error.code)
+    ? ERROR_PILL[error.code]
+    : { icon: CircleAlert, iconClass: "text-red-500", short: error.message };
+}
+
 function ErrorPill({ error }: { error: AppError }) {
-  const e = ERROR_PILL[error.code];
+  const e = errorPill(error);
   return (
     <StatusPill icon={e.icon} iconClass={e.iconClass} action={<ErrorActionButton error={error} />}>
       {e.short}
@@ -176,7 +184,7 @@ function ErrorPill({ error }: { error: AppError }) {
  * 未実装の command はボタンごと出さない (パネルは小さく Tooltip を出す余地がないため)。
  */
 function ErrorActionButton({ error }: { error: AppError }) {
-  const action = error.action ? ERROR_ACTIONS[error.action] : null;
+  const action = errorActionView(error.action);
   const unimplemented = useUnimplemented(action?.command ?? "");
   if (!action || unimplemented) return null;
   const Icon = action.icon;

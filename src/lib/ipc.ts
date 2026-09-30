@@ -15,7 +15,8 @@ export type AppErrorCode =
   | "microphone_missing"
   | "asr_stopped"
   | "runtime_missing"
-  | "insert_failed";
+  | "insert_failed"
+  | "vad_failed";
 
 export type AppErrorAction =
   | "open_accessibility"
@@ -34,6 +35,11 @@ export type AppStatus = {
   phase: Phase;
   loadingProgress: number | null;
   error: AppError | null;
+  /**
+   * 状態の通し番号 (Rust が遷移ごとに増やす)。届く順序が前後しても古い状態で上書きしないために使う。
+   * Rust が付けていない版もあるため任意 (無ければ届いた順に反映する)
+   */
+  seq?: number;
 };
 
 export type Utterance = {
@@ -188,6 +194,7 @@ export const commands = {
   /** panel の描画内容 (影の余白込み) の大きさ。論理ピクセル (CSS px) */
   setPanelSize: (width: number, height: number) => call<void>("set_panel_size", { width, height }),
   completeSetup: () => call<void>("complete_setup"),
+  openSetup: () => call<void>("open_setup"),
 };
 
 // ---------- events ----------
@@ -202,6 +209,8 @@ export type EventMap = {
   "settings-navigate": { category: SettingsCategory };
   "permissions-changed": Permissions;
   "provisioning-progress": ProvisioningStatus;
+  // マイクの接続・切断。変化後の一覧を送る (Rust が送らない版でも購読は無害)
+  "input-devices-changed": AudioDevice[];
 };
 
 export type EventName = keyof EventMap;
@@ -285,5 +294,21 @@ export function subscribeWithInitial<E extends EventName>(
     unsubscribe();
     window.removeEventListener("focus", refetch);
     document.removeEventListener("visibilitychange", onVisibility);
+  };
+}
+
+/**
+ * AppStatus.seq が前回反映したものより小さい状態を捨てる apply を作る。
+ * event と get_status の応答、複数の event の届く順序が前後しても古い状態に戻さないため。
+ * seq の無い状態 (seq 未対応の Rust) は常に反映する。
+ */
+export function latestStatusOnly(apply: (s: AppStatus) => void): (s: AppStatus) => void {
+  let last: number | null = null;
+  return (s) => {
+    if (typeof s.seq === "number") {
+      if (last != null && s.seq < last) return;
+      last = s.seq;
+    }
+    apply(s);
   };
 }

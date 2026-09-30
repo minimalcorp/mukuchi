@@ -10,7 +10,7 @@ export function TooltipProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
-// DS の Tooltip。DS は 1 行 (nowrap) だが、長い補足がウィンドウからはみ出すため最大幅で折り返す
+// ツールチップ。長い補足がウィンドウからはみ出さないよう、1 行にせず最大幅で折り返す
 export function Tooltip({
   content,
   side = "top",
@@ -28,7 +28,7 @@ export function Tooltip({
           side={side}
           sideOffset={6}
           collisionPadding={8}
-          className="z-[70] max-w-[280px] animate-[ds-fade_var(--duration-fast)_var(--ease-out)] rounded-sm bg-gray-900 px-2 py-[5px] text-xs leading-[1.4] font-normal text-gray-0 shadow-md"
+          className="z-[70] max-w-[280px] animate-[fade-in_var(--duration-fast)_var(--ease-out)] rounded-sm bg-gray-900 px-2 py-[5px] text-xs leading-[1.4] font-normal text-gray-0 shadow-md"
         >
           {content}
         </TooltipPrimitive.Content>

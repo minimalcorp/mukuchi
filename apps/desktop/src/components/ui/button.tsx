@@ -4,7 +4,7 @@ import type { LucideIcon } from "lucide-react";
 import { LoaderCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-// DS の Button。押下は 0.5px 沈み込み、ホバーは 1 段濃い色、無効は opacity .5
+// ボタン。押下は 0.5px 沈み込み、ホバーは 1 段濃い色、無効は opacity .5
 const buttonVariants = cva(
   "press inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md border font-medium leading-[1.4] transition-control outline-none focus-visible:shadow-[var(--focus-ring)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
   {

@@ -1,9 +1,8 @@
 @import "tailwindcss";
 
 /*
- * Minimal Portal DS のトークン (docs/design/lp-handoff/project/_ds の tokens) を CSS 変数として置き、
- * Tailwind のテーマはそれを参照する。値の正は DS 側なので、ここでは名前だけを Tailwind に渡す。
- * LP のデザインにダークモードの表示はないため、ライトのみ。
+ * LP の色・影・フォントの変数。:root に置いた変数を Tailwind のテーマから参照する。
+ * 実装で参照しているものだけを置く。LP にダークモードの表示はないため、ライトのみ。
  */
 :root {
   color-scheme: light;
@@ -11,7 +10,6 @@
   --blue-50: #eef2ff;
   --blue-500: #3b5bdb;
   --blue-600: #2f49b8;
-  --blue-700: #273c95;
 
   --gray-0: #ffffff;
   --gray-50: #f5f7fa;
@@ -32,9 +30,6 @@
   --text-body: var(--gray-800);
   --text-muted: var(--gray-500);
   --text-subtle: var(--gray-400);
-  --text-inverse: var(--gray-0);
-  --text-link: var(--blue-600);
-  --text-link-hover: var(--blue-700);
   --text-success: var(--green-600);
 
   --border-subtle: var(--gray-100);
@@ -45,21 +40,15 @@
   --action-primary: var(--blue-500);
   --action-primary-hover: var(--blue-600);
   --surface-hover: var(--gray-50);
-
-  --duration-fast: 120ms;
-  --duration-normal: 180ms;
 }
 
 @theme inline {
-  /* Tailwind 既定のパレットは使わない (DS 以外の色が紛れ込まないように) */
+  /* Tailwind 既定のパレットは使わない (ここで定義した色以外が紛れ込まないように) */
   --color-*: initial;
   --color-white: var(--gray-0);
   --color-transparent: transparent;
-  --color-current: currentColor;
   --color-blue-50: var(--blue-50);
   --color-blue-500: var(--blue-500);
-  --color-blue-600: var(--blue-600);
-  --color-gray-0: var(--gray-0);
   --color-gray-50: var(--gray-50);
   --color-gray-100: var(--gray-100);
   --color-gray-200: var(--gray-200);
@@ -75,8 +64,6 @@
   --color-body: var(--text-body);
   --color-muted: var(--text-muted);
   --color-subtle: var(--text-subtle);
-  --color-link: var(--text-link);
-  --color-link-hover: var(--text-link-hover);
   --color-success: var(--text-success);
   --color-line-subtle: var(--border-subtle);
   --color-line: var(--border-default);
@@ -87,11 +74,10 @@
   --color-hover: var(--surface-hover);
 }
 
-/* DS と同じ名前の変数 (--font-sans など) は Tailwind のテーマ変数そのものとして定義する (static で常に出力) */
+/* --font-sans などは Tailwind のテーマ変数そのものとして定義する (static で常に出力) */
 @theme static {
   --shadow-*: initial;
   --shadow-xs: 0 1px 1px rgba(20, 23, 29, 0.04);
-  --shadow-sm: 0 1px 2px rgba(20, 23, 29, 0.06), 0 1px 3px rgba(20, 23, 29, 0.05);
   --shadow-md: 0 2px 4px rgba(20, 23, 29, 0.06), 0 4px 12px rgba(20, 23, 29, 0.07);
 
   --font-*: initial;
@@ -121,7 +107,7 @@ html {
 body {
   margin: 0;
   background: var(--gray-0);
-  /* デザイン (LP) は和文を先に指定している。DS の --font-sans は欧文が先 */
+  /* 本文は和文フォントを先に指定する (--font-sans は欧文が先) */
   font-family: var(--font-jp);
   font-size: 14px;
   line-height: 1.6;

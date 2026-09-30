@@ -1,6 +1,6 @@
 import type { KeyCombo, Modifier } from "./ipc";
 
-/** バイト数を「2.1 GB」「12 MB」の形にする (DS: 数字と単位の間は半角スペース) */
+/** バイト数を「2.1 GB」「12 MB」の形にする (数字と単位の間は半角スペース) */
 export function formatBytes(bytes: number): string {
   // 0.5 GB 以上は GB で出す (デザインの「0.9 GB」表記。ダウンロード量の比較がしやすい)
   if (bytes >= 5e8 && bytes < 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;

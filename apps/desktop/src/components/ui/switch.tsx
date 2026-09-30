@@ -11,7 +11,7 @@ type SwitchProps = {
   className?: string;
 };
 
-// DS の Switch (34×20、つまみ 16px)
+// スイッチ (34×20、つまみ 16px)
 export function Switch({ checked, onCheckedChange, label, disabled, className, ...rest }: SwitchProps) {
   const id = useId();
   const control = (

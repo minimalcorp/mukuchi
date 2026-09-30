@@ -15,7 +15,8 @@ model: opus
 - Rustとの通信は `@tauri-apps/api` の `invoke` / `listen` のみ。呼び出しは `apps/desktop/src/lib/` 等の薄いラッパーに集約し、型は `docs/architecture.md` のインターフェースに合わせる。未定義のcommand/eventが必要なら実装前に報告する (rust-engineerが定義する)
 - 非同期の状態はstateで管理し、条件付きレンダリングで出し分ける。`setTimeout`/`requestAnimationFrame` で描画タイミングを操作しない
 - 絵文字ではなくlucide-reactのアイコンを使う。補足は「?」アイコン + Tooltip
-- デザインの正は Claude Design handoff (`docs/design/handoff/project/mukuchi UI Proposal.dc.html`、git管理外) と `docs/plans/implementation-plan.md`。トークンは Minimal Portal DS (`docs/design/handoff/project/_ds/*/tokens/`) に従い、ダークモードはデザインの参考表示に従う
+- デザインの正は Claude Design handoff (`docs/design/handoff/project/mukuchi UI Proposal.dc.html`、社内デザインシステムを含むためgit管理外) と `docs/plans/implementation-plan.md`。色・モーション等は `apps/desktop/src/styles/tokens.css` に実装で使う値だけを置き、ダークモードはデザインの参考表示に従う
+- handoff の内容 (デザインシステムのトークン一式・コンポーネント定義・ソース) をリポジトリに転記しない。実装に必要な値だけを実装として書く。ブランド画像は例外
 - 常駐アプリなのでウィンドウは設定・セットアップ時のみ表示される前提で作る
 
 ## 守ること

@@ -13,7 +13,7 @@ export function DropdownMenuContent({ className, ...props }: React.ComponentProp
         sideOffset={4}
         collisionPadding={8}
         className={cn(
-          "z-50 flex max-h-[260px] min-w-[220px] animate-[ds-fade_var(--duration-fast)_var(--ease-out)] flex-col overflow-y-auto rounded-lg border border-line-default bg-surface-card p-1.5 text-sm text-fg-body shadow-md",
+          "z-50 flex max-h-[260px] min-w-[220px] animate-[fade-in_var(--duration-fast)_var(--ease-out)] flex-col overflow-y-auto rounded-lg border border-line-default bg-surface-card p-1.5 text-sm text-fg-body shadow-md",
           className,
         )}
         {...props}

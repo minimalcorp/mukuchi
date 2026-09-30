@@ -12,7 +12,7 @@ mukuchi.app (1プロセス)
 asr-server (別プロセス / Python + mlx-qwen3-asr)
 ```
 
-UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザインシステム: Minimal Portal)。実装計画は [docs/plans/implementation-plan.md](plans/implementation-plan.md)。
+UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デザインシステムを含むためgit管理外)。実装計画は [docs/plans/implementation-plan.md](plans/implementation-plan.md)。
 
 ## 決定事項
 
@@ -20,8 +20,8 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 |---|---|---|
 | 対象OS | macOS (Apple Silicon, aarch64のみ) | MLXがApple Silicon専用 |
 | フレームワーク | Tauri v2 + Rust | 入力送信・常駐の軽さ |
-| フロントエンド | React + TypeScript + Vite + Tailwind + shadcn/ui + lucide-react。トークンはMinimal Portal DS (HEX→CSS変数)。フォントはIBM Plex Sans JP / Mono を同梱 (オフラインで動くようGoogle Fontsは使わない) | |
-| ダークモード | システム設定に追従。DSにダークトークンがないため、デザインの参考表示(gray 700〜900を面に使用)に従う | |
+| フロントエンド | React + TypeScript + Vite + Tailwind + shadcn/ui + lucide-react。色・モーション等は `apps/desktop/src/styles/tokens.css` のCSS変数 (実装で使う値だけを置く)。フォントはIBM Plex Sans JP / Mono を同梱 (オフラインで動くようGoogle Fontsは使わない) | |
+| ダークモード | システム設定に追従。デザインの参考表示(gray 700〜900を面に使用)に従う | |
 | 録音 | Rust (cpal) | WebView経由のgetUserMediaは権限ダイアログ二重表示等の既知問題あり |
 | VAD | Silero VAD (`ort`、arm64は静的リンク)。差し替え可能なtraitの背後に置く | 代替: earshot |
 | ASR | Python + MLX (`mlx-qwen3-asr`)、モデルは `neosophie/Qwen3-ASR-1.7B-JA` を全層8bit量子化したもの(自前変換、約2.2GB。org配下のHFリポジトリに置き revision を固定して取得。配置までは開発で元の bf16 版を使う) | Rust実装(candle/MLX)は約3倍遅い (spikes/asr-bench)。8bitはfp16と同等精度・約2割速い・メモリ1/3 (spikes/asr-bench/MODEL_DECISION.md) |

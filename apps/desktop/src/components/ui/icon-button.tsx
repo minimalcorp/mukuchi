@@ -13,7 +13,7 @@ export interface IconButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLBut
   size?: keyof typeof SIZES;
 }
 
-// DS の IconButton (ghost)。ラベルは aria-label と title に使う
+// アイコンだけのボタン (ghost)。ラベルは aria-label と title に使う
 export function IconButton({ icon: Icon, label, size = "md", className, type = "button", ...props }: IconButtonProps) {
   const s = SIZES[size];
   return (

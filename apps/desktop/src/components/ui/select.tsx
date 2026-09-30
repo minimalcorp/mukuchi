@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 
 type Option = { value: string; label: string };
 
-// DS の Select はネイティブの select を装飾したもの。macOS のポップアップメニューがそのまま出る
+// ネイティブの select を装飾したもの。macOS のポップアップメニューがそのまま出る
 export function Select({
   label,
   options,

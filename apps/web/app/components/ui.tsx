@@ -62,7 +62,7 @@ export function Icon({
   return <C size={size} aria-hidden="true" className={`flex-none ${className ?? ""}`} />;
 }
 
-// Minimal Portal DS の Button (primary / secondary / ghost、sm / lg) と同じ見た目
+// ボタン (primary / secondary / ghost、sm / lg)。押下は 0.5px 沈み込み、無効は opacity .5
 type Variant = "primary" | "secondary" | "ghost";
 type Size = "sm" | "lg";
 
@@ -77,7 +77,7 @@ const VARIANTS: Record<Variant, string> = {
   secondary: "border-line-strong bg-white text-body shadow-xs",
   ghost: "border-transparent bg-transparent text-body",
 };
-// 無効なボタンは色を変えない (DS の Button と同じ)
+// 無効なボタンはホバーで色を変えない
 const HOVER: Record<Variant, string> = {
   primary: "hover:border-primary-hover hover:bg-primary-hover",
   secondary: "hover:bg-hover",
@@ -154,7 +154,7 @@ export function ButtonLink({
   );
 }
 
-// Minimal Portal DS の Badge (success / neutral)
+// バッジ (success / neutral)
 export function Badge({ tone, children }: { tone: "success" | "neutral"; children: ReactNode }) {
   const color = tone === "success" ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-600";
   return (

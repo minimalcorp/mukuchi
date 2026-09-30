@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # .app の Resources に同梱するもののうち、リポジトリにそのまま置けないものを
-# src-tauri/bundle-resources/ (gitignore) に用意する。tauri.conf.json の bundle.resources が参照する。
-#   bin/uv       … scripts/fetch-uv.sh で取得 (sha256 固定)
+# src-tauri/bundle-resources/ (gitignore) に用意する。tauri.conf.json の bundle.resources・bundle.macOS.files が参照する。
+#   bin/uv       … scripts/fetch-uv.sh で取得 (sha256 固定)。本番は Contents/Helpers/uv (bundle.macOS.files)、
+#                  tauri dev は Resources の bin/uv (tauri.dev.conf.json) に置かれる
 #   asr-server/  … pyproject.toml uv.lock .python-version src/ (テスト・キャッシュ・.venv は除く)
 # tauri-build は dev ビルドでも resources を target/ にコピーし、無いとビルドが失敗するため
 # make setup (make up) と make build* の両方から呼ぶ。

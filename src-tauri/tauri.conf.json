@@ -19,8 +19,7 @@
   "bundle": {
     "active": true,
     "targets": [
-      "app",
-      "dmg"
+      "app"
     ],
     "icon": [
       "icons/32x32.png",
@@ -31,12 +30,16 @@
     "resources": {
       "../THIRD_PARTY_NOTICES": "THIRD_PARTY_NOTICES",
       "resources/silero/LICENSE": "licenses/silero-vad-LICENSE",
-      "bundle-resources/bin/uv": "bin/uv",
       "bundle-resources/asr-server": "asr-server",
       "resources/verify.wav": "verify.wav"
     },
     "macOS": {
-      "entitlements": "Entitlements.plist"
+      "minimumSystemVersion": "13.0",
+      "hardenedRuntime": true,
+      "entitlements": "Entitlements.plist",
+      "files": {
+        "Helpers/uv": "bundle-resources/bin/uv"
+      }
     }
   }
 }

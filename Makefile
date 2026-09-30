@@ -21,24 +21,6 @@ ASR_PORT := 18765
 ASR_HEALTH := http://127.0.0.1:$(ASR_PORT)/health
 # 開発時に LISTEN するポート: asr-server / vite (strictPort)
 DEV_PORTS := $(ASR_PORT) 1420
-TARGET := aarch64-apple-darwin
-BUNDLE_DIR := src-tauri/target/$(TARGET)/release/bundle
-
-# 配布物が /nix/store にリンクしていると他のMacで起動しないため検出して失敗させる
-define check_no_nix_links
-	@bin=$(BUNDLE_DIR)/macos/mukuchi.app/Contents/MacOS/mukuchi; \
-	if otool -L "$$bin" | grep -q /nix/store; then \
-	  echo "error: $$bin が /nix/store にリンクしている:"; otool -L "$$bin" | grep /nix/store; exit 1; \
-	fi
-endef
-
-# 同梱 uv は Resources にあり Tauri は個別に署名しない (bundle.resources はコピーのみ)。
-# 開発元の署名のまま動くこと (コピーで壊れていない・実行権限がある) を確認する
-define check_bundled_uv
-	@uv=$(BUNDLE_DIR)/macos/mukuchi.app/Contents/Resources/bin/uv; \
-	test -x "$$uv" || { echo "error: $$uv がない・実行できない"; exit 1; }; \
-	/usr/bin/codesign --verify --strict "$$uv" || { echo "error: $$uv の署名が壊れている"; exit 1; }
-endef
 
 # UDS モード (TCP 8080 を使わない)。ソケットは固定パスにして別シェルからも操作できるようにする。
 # macOS の UDS パス上限 (sun_path 104 バイト、NUL 込み) を超える場合は /tmp の短いパスに逃がす。
@@ -113,23 +95,15 @@ endif
 setup: ## npm install / uv sync / モデル取得
 	@scripts/setup.sh
 
-# TODO(macos-release-engineer): Developer ID 署名 + 公証 (notarytool / stapler) を追加する。
-# 公証系はホスト Xcode のツールを使う (devShell の xcrun は nixpkgs の xcbuild 版のため /usr/bin/xcrun を明示する)
-build: ## 本番用 .dmg
-	@scripts/prepare-bundle-resources.sh
-	npm run tauri build -- --target $(TARGET) --bundles app,dmg
-	$(check_no_nix_links)
-	$(check_bundled_uv)
+# 署名・公証・.dmg 作成・検証は scripts/build-macos.sh / scripts/verify-macos.sh (手順・資格情報は docs/release.md)
+build: ## 本番用 .dmg (Developer ID 署名 + 公証 + staple)
+	@scripts/build-macos.sh
 
 build-local: ## ad-hoc 署名の .app (手元確認用)
-	@scripts/prepare-bundle-resources.sh
-	npm run tauri build -- --target $(TARGET) --bundles app --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
-	$(check_no_nix_links)
-	$(check_bundled_uv)
+	@scripts/build-macos.sh --local
 
-# TODO(macos-release-engineer): codesign --verify / spctl -a / stapler validate を実装する
-verify: ## 署名・公証の検証
-	@echo "verify: not implemented yet"
+verify: ## 署名・公証の検証 (ad-hoc なら Gatekeeper・公証の項目は SKIP)
+	@scripts/verify-macos.sh
 
 # 起動中に .process-compose (ソケット) を消すと make down で止められなくなるため先に停止する
 clean: ## 生成物を削除 (モデル等の dev データは残す)

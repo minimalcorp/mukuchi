@@ -104,7 +104,9 @@ fn real_provision_and_serve() {
         let paths = DataPaths::new(env_path("MUKUCHI_IT_DATA_DIR"));
         paths.ensure_root().unwrap();
         let logs = paths.root().join("logs");
-        let resources = Resources::resolve(None);
+        let uv = crate::paths::dev_path(crate::paths::ENV_DEV_UV)
+            .unwrap_or_else(|| std::path::PathBuf::from(crate::paths::DEV_UV_RESOURCE));
+        let resources = Resources::resolve(None, uv);
         let model = HfModel::distributed();
         let asr = Arc::new(AsrProcess::new());
         let spec = LaunchSpec {

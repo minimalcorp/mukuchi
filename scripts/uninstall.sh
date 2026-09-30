@@ -134,12 +134,15 @@ fi
 #    AppleScript の quit は「オートメーション」の許可を求めるため使わず、シグナルで止める
 if [ -n "$pids" ]; then
   echo "==> アプリを終了"
+  # $pids・$alive は空白区切りの PID 列なので分割させる
+  # shellcheck disable=SC2086
   kill -TERM $pids 2>/dev/null || true
   for _ in $(seq 1 20); do
     alive=""; for p in $pids; do kill -0 "$p" 2>/dev/null && alive="$alive $p"; done
     [ -z "$alive" ] && break
     sleep 0.25
   done
+  # shellcheck disable=SC2086
   [ -n "${alive:-}" ] && kill -KILL $alive 2>/dev/null || true
 fi
 if [ "$system_ops" = 1 ]; then

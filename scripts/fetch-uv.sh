@@ -40,7 +40,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 tar -xzf "$tarball" -C "$tmp"
 install -m 0755 "$tmp/uv-$UV_TARGET/uv" "$bin"
-# 開発元 (Astral) の Developer ID 署名・Hardened Runtime・公証済みのまま使う (再署名しない)。
+# 開発元 (astral-sh/uv の公式リリース) の Developer ID 署名・Hardened Runtime・公証済みのまま使う (再署名しない)。
 # ライセンスは tarball に含まれないため THIRD_PARTY_NOTICES に記載している
 /usr/bin/codesign --verify --strict "$bin"
 echo "$bin"

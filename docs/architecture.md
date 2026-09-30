@@ -66,15 +66,18 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 
 ### .app に同梱するもの (macos-release-engineer が bundle 設定、rust-engineer は下記パスを前提に実装)
 
-| Resources 配下 | 内容 |
+| .app 内の場所 | 内容 |
 |---|---|
-| `bin/uv` | uv の単一バイナリ (aarch64-apple-darwin。版は devShell の uv と揃え、sha256 を固定して `scripts/fetch-uv.sh` が取得)。公式リリースは開発元 (Astral) の Developer ID 署名・Hardened Runtime・タイムスタンプ付きで公証済みのため、再署名せずそのまま同梱する |
-| `asr-server/` | `pyproject.toml` `uv.lock` `.python-version` `src/` (テスト・キャッシュは除く) |
-| `verify.wav` | 検証用音声 (「確認します。」、Kyoko の合成音声、16kHz/mono/s16、約1.1秒)。`scripts/make-verify-wav.sh` で作りリポジトリに置く (`src-tauri/resources/verify.wav`) |
-| `THIRD_PARTY_NOTICES`, `licenses/` | ライセンス |
+| `Contents/Helpers/uv` | uv の単一バイナリ (aarch64-apple-darwin。版は devShell の uv と揃え、sha256 を固定して `scripts/fetch-uv.sh` が取得)。公式リリースは開発元の Developer ID 署名 (0.12.17 は `OpenAI OpCo, LLC (2DC432GLL2)`)・Hardened Runtime・タイムスタンプ付きで公証済みのため、再署名せずそのまま同梱する。Resources ではなく Helpers に置くのは、Apple の "Placing content in a bundle" で helper tool (Mach-O) の置き場所が `Contents/MacOS/` か `Contents/Helpers/` とされ、それ以外に置くと公証で問題になりうるため。`bundle.macOS.files` でコピーするので Tauri は再署名しない (externalBin にすると Tauri が自分の証明書と本体の entitlements で再署名する) |
+| `Contents/Resources/asr-server/` | `pyproject.toml` `uv.lock` `.python-version` `src/` (テスト・キャッシュは除く) |
+| `Contents/Resources/verify.wav` | 検証用音声 (「確認します。」、Kyoko の合成音声、16kHz/mono/s16、約1.1秒)。`scripts/make-verify-wav.sh` で作りリポジトリに置く (`src-tauri/resources/verify.wav`) |
+| `Contents/Resources/THIRD_PARTY_NOTICES`, `licenses/` | ライセンス |
 
-- `bin/uv` と `asr-server/` は `scripts/prepare-bundle-resources.sh` が `src-tauri/bundle-resources/` (gitignore) に用意する。tauri-build は dev でも resources を要求するため `make setup` と `make build*` から呼ぶ
-- Rust からは `app.path().resolve("bin/uv", BaseDirectory::Resource)` 等で解決する。本番は `mukuchi.app/Contents/Resources/`、`tauri dev` は `src-tauri/target/debug/` (tauri-build がコピー) を指す
+- uv と `asr-server/` は `scripts/prepare-bundle-resources.sh` が `src-tauri/bundle-resources/` (gitignore) に用意する。tauri-build は dev でも resources を要求するため `make setup` と `make build*` から呼ぶ
+- Rust からの解決:
+  - uv: .app から起動している時 (実行ファイルが `<X>.app/Contents/MacOS/` にある時) は `<実行ファイルのディレクトリ>/../Helpers/uv`。それ以外 (`tauri dev` の未バンドル実行) は `app.path().resolve("bin/uv", BaseDirectory::Resource)` (= `src-tauri/target/debug/bin/uv`。`tauri.dev.conf.json` が dev の時だけ resources に `bin/uv` を加え、tauri-build がコピーする)。正規化し、実在する実行可能ファイルでなければ起動は続けてログに記録し、セットアップの runtime ステップで「入れ直してください」を表示する。`MUKUCHI_DEV_UV` はデバッグビルドのみ (検査せずそのまま使う)
+  - asr-server・verify.wav: `app.path().resolve(..., BaseDirectory::Resource)`。本番は `mukuchi.app/Contents/Resources/`、`tauri dev` は `src-tauri/target/debug/`
+- 本体以外の Mach-O は `Contents/Helpers/uv` だけにする (`make verify` が確認)。署名は `scripts/build-macos.sh` が .app に `--deep` なしで行い、uv の署名は入れ子のコードとして検証・封印される
 
 ### セットアップ手順 (provisioning)
 
@@ -99,6 +102,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 `uninstall` の順序: (本番) 実行中のアプリ本体の場所が分からない・App Translocation (パスに `/AppTranslocation/` を含む。`SecTranslocateIsTranslocatedURL` は公開ヘッダにないため使わない) なら何も消さずにエラー (「アプリケーション」フォルダへの移動を促す) → 音声入力OFF・セットアップ停止 (削除中の扱い)・ASR停止 → ログイン項目の解除 → ファイル削除 (上記対象のうち存在するもの。名前にバンドルIDを含む・`~/Library` 配下かデータディレクトリ (目印あり) であることを確かめてから消す) → `defaults delete <バンドルID>` → `tccutil reset All <バンドルID>` → アプリ本体を `NSFileManager.trashItemAtURL` でゴミ箱へ → 終了。途中で失敗しても残りは続け、本体をゴミ箱に入れられなかった場合はエラーを返して終了しない。開発ビルドでは target ディレクトリ外のアプリ本体は対象にしない
 
 - `mukuchi.app/Contents/MacOS/mukuchi --unregister-login-item`: ログイン項目 (SMAppService) を解除して終了する (UI は起動しない。終了コード 0=成功 1=失敗)。`scripts/uninstall.sh` が本体をゴミ箱に入れる前に呼ぶ
+- `mukuchi.app/Contents/MacOS/mukuchi --print-uv-path`: 解決した同梱 uv のパス (正規化済み) を表示して終了する (隠しフラグ。UI は起動しない。終了コード 0=成功 1=見つからない・実行できない)。リリースビルドは `MUKUCHI_DEV_*` を無視するため、ビルドした .app が `Contents/Helpers/uv` を指すかの確認に使う
 
 ## インターフェース
 

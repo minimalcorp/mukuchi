@@ -30,10 +30,10 @@ macOS常駐の音声入力アプリ。ショートカットでON/OFFし、ONの�
 | `make up` / `make down` / `make restart` | 開発環境の起動(セットアップ込み) / 停止 / 再起動 |
 | `make ps` / `make logs [s=<name>]` | プロセス状態 / ログ追従 |
 | `make setup` | npm install・uv sync・モデル取得 (`up` から自動実行)。`MUKUCHI_HF_SEED=<HF_HOME>` で既存HFキャッシュから複製 |
-| `make build` | 本番用 (Developer ID署名 + 公証) .dmg (署名・公証は未実装) |
+| `make build` | 本番用 .dmg (Developer ID署名 + Hardened Runtime + 公証 + staple)。証明書・公証の資格情報が必要 ([docs/release.md](docs/release.md)) |
 | `make build-local` | ad-hoc署名の .app (手元確認用)。同梱物 (uv・asr-server) は `scripts/prepare-bundle-resources.sh` が用意する |
 | `scripts/uninstall.sh [--dev] [--dry-run]` | 完全アンインストール (既定は確認付き。`--dry-run` で対象の表示のみ) |
-| `make verify` / `make clean` | 署名・公証の検証 (未実装) / 生成物削除 (devデータは残す) |
+| `make verify` / `make clean` | 署名・公証の検証 (ad-hoc なら Gatekeeper・公証の項目は SKIP。`build*` の最後にも実行) / 生成物削除 (devデータは残す) |
 | `make help` | ターゲット一覧 |
 
 `make` はnix devShell外で実行された場合 `nix develop -c` 経由で実行される。flake はgit管理下のファイルしか見ないため、`flake.nix` 等の新規ファイルは `git add` してから使う。

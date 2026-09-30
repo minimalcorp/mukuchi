@@ -21,6 +21,7 @@ mod windows;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tauri::path::BaseDirectory;
 use tauri::{Manager, RunEvent, WindowEvent};
 
 use crate::core::Core;
@@ -28,6 +29,22 @@ use crate::core::Core;
 /// `scripts/uninstall.sh` 用: ログイン項目 (SMAppService) を解除して終了する (UI は起動しない)。
 /// シェルからは SMAppService を呼べないため、本体をゴミ箱に入れる前にこのフラグ付きで本体を実行する
 const ARG_UNREGISTER_LOGIN_ITEM: &str = "--unregister-login-item";
+/// 検証用 (隠し): 同梱 uv の解決結果を表示して終了する (UI は起動しない)。
+/// リリースビルドは `MUKUCHI_DEV_*` を無視するため、ビルドした .app が Helpers/uv を指すかをこれで確かめる
+const ARG_PRINT_UV_PATH: &str = "--print-uv-path";
+
+/// 同梱 uv を解決する。`resource` は Resource 相対パスの解決 (.app 外でのみ使う)
+fn resolve_uv(
+    resource: impl FnOnce(&str) -> anyhow::Result<std::path::PathBuf>,
+) -> paths::UvResolution {
+    let exe = tauri::utils::platform::current_exe().map_err(|e| {
+        (
+            None,
+            anyhow::Error::new(e).context("実行ファイルの場所を取得できません"),
+        )
+    })?;
+    paths::resolve_uv(&exe, || resource(paths::DEV_UV_RESOURCE))
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -38,6 +55,27 @@ pub fn run() {
                 0
             }
             Err(e) => {
+                eprintln!("{e:#}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
+    let context = tauri::generate_context!();
+    if std::env::args_os().any(|a| a == ARG_PRINT_UV_PATH) {
+        // App を作らずに Resource を解決する (PathResolver::resource_dir と同じ関数)
+        let package_info = context.package_info().clone();
+        let r = resolve_uv(|rel| {
+            tauri::utils::platform::resource_dir(&package_info, &tauri::Env::default())
+                .map(|d| d.join(rel))
+                .map_err(|e| anyhow::anyhow!("Resource ディレクトリを取得できません: {e}"))
+        });
+        let code = match r {
+            Ok(p) => {
+                println!("{}", p.display());
+                0
+            }
+            Err((_, e)) => {
                 eprintln!("{e:#}");
                 1
             }
@@ -64,8 +102,19 @@ pub fn run() {
             // 常駐アプリのため Dock に出さない (設定・セットアップ表示中のみ Regular にする)
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // 同梱物 (Resources)。tauri dev では target/debug/ にコピーされたものを指す
-            let resources = paths::Resources::resolve(app.path().resource_dir().ok().as_deref());
+            // 同梱物。tauri dev では target/debug/ にコピーされたものを指す
+            let uv = resolve_uv(|rel| {
+                app.path()
+                    .resolve(rel, BaseDirectory::Resource)
+                    .map_err(anyhow::Error::from)
+            })
+            .unwrap_or_else(|(candidate, e)| {
+                // 起動は止めない。セットアップの runtime ステップが「入れ直してください」を表示する
+                log::error!("{e:#}");
+                candidate.unwrap_or_default()
+            });
+            let resources =
+                paths::Resources::resolve(app.path().resource_dir().ok().as_deref(), uv);
             log::info!(
                 "同梱物: uv={} asr-server={} verify={}",
                 resources.uv.display(),
@@ -149,7 +198,7 @@ pub fn run() {
             commands::complete_setup,
             commands::set_panel_size,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application");
 
     app.run(|app, event| match event {

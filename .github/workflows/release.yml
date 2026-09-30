@@ -1,0 +1,144 @@
+# 署名・公証済み .dmg を作り、下書きの GitHub Release に添付する (手動実行)。
+# 手順・secret の作り方は docs/release.md。
+#
+# job を2つに分ける (scripts/build-macos.sh の --build-only / --sign-only):
+#   build … npm ci・cargo で署名なしの .app を作る。npm・cargo の依存 (postinstall・build.rs 等の第三者のコード) が動くため
+#           secret を一切渡さない (environment も付けない)。.app を tar にして artifact で渡す
+#   sign  … Environment "production-release" (Required reviewers で承認制) で動き、Apple の secret はここにだけ渡す。
+#           依存を入れず、ビルドもしない。受け取った .app を Apple のツールだけで署名・公証し .dmg にする。
+#           ビルドした本体を実行する検証 (verify-macos.sh の --print-uv-path) は資格情報を片付けた後に行う
+# 同じ job の別 step にしないのは、ビルド中に起動されたプロセスが job の終わりまで残り、後の step の secret や
+# 解錠したキーチェーンに触れうるため (runner は job の終わりにプロセスを片付ける)
+#
+# production-release の secret:
+#   APPLE_CERTIFICATE           Developer ID Application 証明書と秘密鍵の .p12 を base64 にしたもの
+#   APPLE_CERTIFICATE_PASSWORD  .p12 のパスワード
+#   APPLE_API_KEY               App Store Connect API キーのキーID
+#   APPLE_API_ISSUER            同 Issuer ID
+#   APPLE_API_KEY_P8            同 .p8 ファイルの中身 (PEM テキストそのまま)
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build unsigned .app
+    # environment の deployment branch policy に加えて main 以外からの実行を拒む
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: npm ci
+        run: nix develop -c npm ci
+      - name: Build (.app, unsigned)
+        run: nix develop -c scripts/build-macos.sh --build-only
+      # artifact は zip になり symlink・実行権限が崩れるため tar にしてから渡す
+      - name: Pack .app
+        run: tar -C src-tauri/target/aarch64-apple-darwin/release/bundle/macos -czf "$RUNNER_TEMP/mukuchi-app.tar.gz" mukuchi.app
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mukuchi-app-unsigned
+          path: ${{ runner.temp }}/mukuchi-app.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    name: Sign and notarize (.dmg)
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    environment: production-release
+    permissions:
+      contents: write # 下書きの Release の作成
+    timeout-minutes: 150
+    steps:
+      # scripts/ を build job の作業ツリーではなく同じコミットから取り直す (ビルド中に書き換えられたものを使わない)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mukuchi-app-unsigned
+          path: ${{ runner.temp }}
+      - name: Unpack .app
+        run: |
+          set -euo pipefail
+          dir=src-tauri/target/aarch64-apple-darwin/release/bundle/macos
+          mkdir -p "$dir"
+          tar -C "$dir" -xzf "$RUNNER_TEMP/mukuchi-app.tar.gz"
+
+      # 一時キーチェーンに証明書を読み込み、検索リストに加える (build-macos.sh は codesign / security find-identity でこれを使う)。
+      # 出典: https://docs.github.com/en/actions/use-cases-and-examples/deploying/installing-an-apple-certificate-on-macos-runners-for-xcode-development
+      - name: Import signing certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          # 書き出す .p12・.p8 を自分だけが読めるようにする
+          umask 077
+          keychain="$RUNNER_TEMP/mukuchi-signing.keychain-db"
+          keychain_password="$(openssl rand -base64 32)"
+          p12="$RUNNER_TEMP/cert.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          # -P / -p のパスワードはコマンドライン引数なので、実行中は同じマシンの他ユーザーからも ps で見える。
+          # GitHub-hosted runner は job ごとに使い捨ての VM なので許容する。self-hosted runner に移す場合は
+          # 共有マシンで動かさない (security import は -P を省くと GUI で尋ねるため CI では代わりがない)
+          security import "$p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          rm -f "$p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain"
+          # 公証用 API キー (.p8)。後の cleanup で消す
+          printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+
+      # devShell を使わない (Apple のツールと macOS 標準のコマンドだけで動く)
+      - name: Sign, notarize and staple
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8" scripts/build-macos.sh --sign-only
+
+      # 検証 (ビルドした本体を実行する) の前に資格情報を片付ける
+      - name: Clean up signing materials
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/mukuchi-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/cert.p12"
+
+      - name: Verify
+        run: scripts/verify-macos.sh
+
+      # 下書きで作る (公開は人が確認してから行う)。タグは公開時に target のコミットに作られる
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          app=src-tauri/target/aarch64-apple-darwin/release/bundle/macos/mukuchi.app
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
+          dmg="src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/mukuchi_${version}_aarch64.dmg"
+          (cd "$(dirname "$dmg")" && shasum -a 256 "$(basename "$dmg")" > "$(basename "$dmg").sha256")
+          if gh release view "v$version" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::v$version の Release が既にある。version を上げるか既存の下書きを消す"; exit 1
+          fi
+          gh release create "v$version" -R "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+            --title "mukuchi $version" --notes "macOS (Apple Silicon) / Developer ID 署名・公証済み" \
+            "$dmg" "$dmg.sha256"

@@ -80,7 +80,7 @@ Environment は3つ。どれも deployment branch policy は `main` のみ。値
 - `release-approval` の作り方: Settings > Environments > New environment で `release-approval` を作り、Required reviewers に承認者を入れる (必要なら Prevent self-review)。Deployment branches and tags は Selected branches and tags で `main` のみ。secret・変数は置かない
 - `production-desktop` / `production-web`: Required reviewers は付けない (付けるとその job でもう一度承認待ちになる)。Deployment branches は `main` のみ。secret・変数はここに置く
 - `RELEASE_DEPLOY_KEY`: 書き込み可の Deploy key の秘密鍵 (両 Environment に同じもの)。main の ruleset の bypass に Deploy key を入れ、版上げコミットとタグを push する
-- AWS の OIDC 用 IAM ロールの信頼ポリシーの `sub` は `repo:minimalcorp/mukuchi:environment:production-web` (手順は `.claude/plans/aws-web-deploy-setup.md`)
+- AWS の OIDC 用 IAM ロールの信頼ポリシーの `sub` は `repo:minimalcorp@93655726/mukuchi@1396207519:environment:production-web` (手順は `.claude/plans/aws-web-deploy-setup.md`)。このリポジトリは OIDC の immutable subject (所有者・リポジトリの ID 付き) が有効なため、`repo:minimalcorp/mukuchi:...` では一致しない。現在の形式は `gh api repos/minimalcorp/mukuchi/actions/oidc/customization/sub` の `sub_claim_prefix` で確かめる
 
 Apple の secret の登録:
 

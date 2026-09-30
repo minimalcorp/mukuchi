@@ -3,6 +3,7 @@
  * @tauri-apps/api/mocks で IPC とイベントを差し替え、?window= と ?mock= で画面・状態を選ぶ。
  * シナリオ一覧は src/mock/scenarios.ts。
  * &anchor=<top|bottom>-<left|center|right> で panel のアンカー (get_panel_anchor の値) を指定する。
+ * &style=<full|compact> で panel の表示形式 (Settings.panelStyle) を指定する。
  * &slow=<command,...> で指定した command の応答を 500ms 遅らせる (初期値取得と event の順序の確認用)。
  * window.__mukuchiMock.fail[<command>] = "<メッセージ>" でその command を失敗させられる (エラー表示の確認用)。
  */
@@ -52,6 +53,7 @@ export function installMock(params: URLSearchParams) {
   const db = createDb();
   scenario.setup?.(db);
   db.anchor = parseAnchor(params.get("anchor"));
+  if (params.get("style") === "compact") db.settings.panelStyle = "compact";
   // 静止状態のシナリオは確定結果・エラー表示を消さない
   devOverrides.holdResults = !scenario.live;
   const step = Number(params.get("step")) || scenario.step || null;

@@ -69,6 +69,8 @@
   --meter-track-strong: var(--gray-200);
   --meter-idle: var(--gray-400);
   --meter-active: var(--blue-500);
+  /* コンパクト表示の発話中に音量に合わせて広がるリング (ボタンの周りに薄く見える) */
+  --meter-ring: color-mix(in srgb, var(--blue-500) 22%, transparent);
   /* しきい値より右のトラック。バーがここに入ると発話として扱う */
   --meter-track-over: var(--blue-50);
   --switch-off: var(--gray-300);
@@ -148,6 +150,7 @@
     --meter-track-strong: var(--gray-700);
     --meter-idle: var(--gray-500);
     --meter-active: var(--blue-400);
+    --meter-ring: color-mix(in srgb, var(--blue-400) 30%, transparent);
     --meter-track-over: var(--blue-700);
     --switch-off: var(--gray-600);
     --progress-pending: var(--gray-700);

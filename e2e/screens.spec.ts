@@ -25,9 +25,9 @@ const cases: Case[] = [
   { name: "panel-idle", query: "window=panel&mock=idle", texts: ["待機中"], viewport: PANEL },
   { name: "panel-speaking", query: "window=panel&mock=speaking", texts: ["明日の打ち合わせは十時から", "に変更して", "認識中"], viewport: PANEL },
   { name: "panel-finalizing", query: "window=panel&mock=finalizing", texts: [TEXT, "確定しています…"], viewport: PANEL },
-  { name: "panel-inserted", query: "window=panel&mock=inserted", texts: [TEXT, "メモ に入力しました"], viewport: PANEL },
+  { name: "panel-inserted", query: "window=panel&mock=inserted", texts: [TEXT], viewport: PANEL },
   { name: "panel-command", query: "window=panel&mock=command", texts: ["確定", "Enter", "を送信しました", "音声コマンド"], viewport: PANEL },
-  { name: "panel-excluded", query: "window=panel&mock=excluded", texts: [TEXT, "このアプリには入力しません"], viewport: PANEL },
+  { name: "panel-excluded", query: "window=panel&mock=excluded", texts: [TEXT, "1Password は入力しない設定です"], viewport: PANEL },
   { name: "panel-failed", query: "window=panel&mock=failed", texts: ["アクセシビリティが未許可のため入力できません"], viewport: PANEL },
   { name: "panel-multi", query: "window=panel&mock=multi", texts: [TEXT, "資料は前日までに", "認識中"], viewport: PANEL },
   { name: "panel-overflow", query: "window=panel&mock=overflow", texts: ["認識中"], viewport: PANEL },
@@ -57,7 +57,7 @@ const cases: Case[] = [
   { name: "setup-2-permissions-dark", query: "window=setup&mock=permissions", texts: ["権限を許可してください"], viewport: SETUP, dark: true },
 
   // ---- 設定 (05) ----
-  { name: "settings-general", query: "window=settings&mock=default&category=general", texts: ["一般", "動作", "ログイン時に起動"], viewport: SETTINGS },
+  { name: "settings-general", query: "window=settings&mock=default&category=general", texts: ["一般", "動作", "ログイン時に起動", "パネル", "コンパクト表示"], viewport: SETTINGS },
   { name: "settings-voice", query: "window=settings&mock=default&category=voice", texts: ["マイク", "入力レベル", "発話検出の感度", "1.3 秒", "入力しないアプリ", "1Password", "アプリを追加"], viewport: SETTINGS },
   { name: "settings-commands", query: "window=settings&mock=default&category=commands", texts: ["音声コマンドを使う", "エンター", "Shift + Enter", "⌘ + Enter", "コマンドを追加"], viewport: SETTINGS },
   { name: "settings-recognition", query: "window=settings&mock=default&category=recognition", texts: ["Qwen3-ASR（日本語追加学習）", "読み込み済み", "語彙ヒント", "6 語", "Kubernetes"], viewport: SETTINGS },
@@ -75,6 +75,8 @@ async function open(page: Page, c: Case) {
   await page.setViewportSize(c.viewport);
   await page.goto(`/?${c.query}`);
   // 同梱フォントの読み込みを待ってから比較・撮影する
+  // 描画されてから待つ (描画前は同梱フォントの読み込みが始まっておらず、fonts.ready がすぐ解決する)
+  await page.waitForFunction(() => (document.getElementById("root")?.childElementCount ?? 0) > 0);
   await page.evaluate(() => document.fonts.ready);
   // モックの入力レベル (20Hz) が届くのを待つ
   await page.waitForTimeout(250);
@@ -178,14 +180,91 @@ test("setup: 動作テストでは欄に入力が入る", async ({ page }) => {
   await expect(page.getByLabel("テスト入力欄")).toHaveValue(/今日は晴れています。/);
 });
 
-test("panel: オンにすると発話が流れ、入力後 2 秒でピルに戻る", async ({ page }) => {
+test("panel: オンにすると発話が流れ、入力後 750ms でピルに戻る", async ({ page }) => {
   await open(page, { name: "", query: "window=panel&mock=default", texts: [], viewport: PANEL });
   await page.getByRole("button", { name: "音声入力をオン" }).click();
   await expect(page.getByText("待機中")).toBeVisible();
   await expect(page.getByText("認識中")).toBeVisible({ timeout: 5000 });
-  await expect(page.getByText("メモ に入力しました")).toBeVisible({ timeout: 10_000 });
-  // 2 秒表示してからピル (待機中) に戻る
-  await expect(page.getByText("待機中")).toBeVisible({ timeout: 3000 });
+  // 入力できた時は成功マークだけを出し、アプリ名の文言は出さない (文言は読み上げ用のみ)
+  const status = page.getByRole("status").filter({ hasText: "入力しました" });
+  await expect(status).toHaveCount(1, { timeout: 10_000 });
+  const shownAt = Date.now();
+  await expect(page.getByText("に入力しました")).toHaveCount(0);
+  await expect(page.getByText("メモ", { exact: false })).toHaveCount(0);
+  await expect(page.getByTestId("preview")).toContainText("明日の打ち合わせは十時からに変更してください。");
+  // 750ms 表示してからピル (待機中) に戻る
+  await expect(page.getByTestId("panel-card")).toHaveAttribute("data-expanded", "false", { timeout: 2000 });
+  expect(Date.now() - shownAt).toBeLessThan(1500);
+  await expect(page.getByText("待機中")).toBeVisible();
   await page.getByRole("button", { name: "音声入力をオフ" }).click();
   await expect(page.getByRole("button", { name: "音声入力をオン" })).toBeVisible();
+});
+
+test("panel: 入力できた時は成功マークだけを出す", async ({ page }) => {
+  await open(page, { name: "", query: "window=panel&mock=inserted", texts: [], viewport: PANEL });
+  const status = page.getByRole("status").filter({ hasText: "入力しました" });
+  await expect(status.locator("svg")).toBeVisible();
+  await expect(status.locator(".sr-only")).toHaveText("入力しました");
+  await expect(page.getByText("メモ に入力しました")).toHaveCount(0);
+});
+
+/** live のシナリオ (結果を時間経過で消す) で、発話の結果を 1 件流して表示時間を測る */
+async function resultDuration(page: Page, result: string, visible: () => Promise<void>) {
+  await open(page, { name: "", query: "window=panel&mock=default", texts: [], viewport: PANEL });
+  await expect(page.getByRole("button", { name: "音声入力をオン" })).toBeVisible();
+  await page.evaluate(`(() => {
+    const api = window.__mukuchiMock;
+    api.setStatus({ phase: "listening" });
+    api.started(1);
+    api.result(${result});
+  })()`);
+  await visible();
+  const shownAt = Date.now();
+  await expect(page.getByTestId("panel-card")).toHaveAttribute("data-expanded", "false", { timeout: 5000 });
+  return Date.now() - shownAt;
+}
+
+test("panel: 入力しないアプリの時は理由を 3 秒表示する", async ({ page }) => {
+  const ms = await resultDuration(
+    page,
+    `{ kind: "skipped_excluded", id: 1, text: "こんにちは", appName: "1Password" }`,
+    () => expect(page.getByRole("status").filter({ hasText: "1Password は入力しない設定です" })).toBeVisible(),
+  );
+  expect(ms).toBeGreaterThan(2500);
+  expect(ms).toBeLessThan(3800);
+});
+
+test("panel: 入力できなかった時は Rust のメッセージを理由として 3 秒表示する", async ({ page }) => {
+  const ms = await resultDuration(
+    page,
+    `{ kind: "failed", id: 1, text: "こんにちは", error: { code: "accessibility_denied", message: "アクセシビリティが未許可のため入力できません", action: "open_accessibility" } }`,
+    () =>
+      expect(page.getByRole("status").filter({ hasText: "アクセシビリティが未許可のため入力できません" })).toBeVisible(),
+  );
+  expect(ms).toBeGreaterThan(2500);
+  expect(ms).toBeLessThan(3800);
+});
+
+test("panel: 入力できた時は成功マークを 750ms 表示する", async ({ page }) => {
+  const ms = await resultDuration(
+    page,
+    `{ kind: "inserted", id: 1, text: "こんにちは", appName: "メモ" }`,
+    () => expect(page.getByRole("status").filter({ hasText: "入力しました" })).toHaveCount(1),
+  );
+  expect(ms).toBeLessThan(1500);
+});
+
+test("panel: 理由が長くてもメーターを潰さず、文言を省略する", async ({ page }) => {
+  await open(page, { name: "", query: "window=panel&mock=idle", texts: [], viewport: PANEL });
+  await page.evaluate(`(() => {
+    const api = window.__mukuchiMock;
+    api.started(1);
+    api.result({ kind: "failed", id: 1, text: "こんにちは", error: { code: "insert_failed", message: "${"とても長いエラーの説明".repeat(6)}", action: null } });
+  })()`);
+  await expect(page.getByTestId("panel-card")).toHaveCSS("width", "440px");
+  const meter = await page.getByTestId("level-meter").boundingBox();
+  expect(meter!.width).toBeGreaterThanOrEqual(64);
+  const card = await page.getByTestId("panel-card").boundingBox();
+  const status = await page.getByRole("status").boundingBox();
+  expect(status!.x + status!.width).toBeLessThanOrEqual(card!.x + card!.width);
 });

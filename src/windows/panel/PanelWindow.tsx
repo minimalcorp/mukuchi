@@ -3,10 +3,10 @@
  * ウィンドウは透明・枠なしで、描画内容 (ピル・カード + 影の余白) の大きさを set_panel_size で Rust に伝える。
  * Rust はウィンドウをその大きさにし、アンカー (panel-anchor) の辺・角を固定して広げる/縮める (透明部分がクリックを奪わないように)。
  * 描画内容もアンカーに寄せて配置し、展開・収縮がアンカーの辺・角から始まるようにする。
+ * 表示形式 (Settings.panelStyle) が compact の時はマイクの円形ボタンだけを出す。
  */
 import {
   AudioLines,
-  Ban,
   CircleAlert,
   CircleCheck,
   CornerDownLeft,
@@ -16,13 +16,23 @@ import {
   PackageX,
   ServerOff,
   ShieldAlert,
+  TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, type ReactNode, type Ref } from "react";
-import { commands, runCommand, type AppError, type AppStatus, type PanelAnchor } from "@/lib/ipc";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref, type RefObject } from "react";
+import {
+  commands,
+  runCommand,
+  subscribeWithInitial,
+  type AppError,
+  type AppStatus,
+  type PanelAnchor,
+  type PanelStyle,
+} from "@/lib/ipc";
 import { usePanelAnchor } from "@/lib/hooks";
 import { useAudioLevel } from "@/lib/audio-level";
 import { LevelMeter } from "@/components/app/level-meter";
+import { useLevelEnvelope } from "@/lib/level-envelope";
 import { env } from "@/lib/env";
 import { errorActionView } from "@/lib/error-actions";
 import { usePanelDrag } from "@/lib/panel-drag";
@@ -50,22 +60,53 @@ const GRID_JUSTIFY: Record<PanelAnchor["horizontal"], string> = {
   right: "justify-items-end",
 };
 
+type Size = { width: number; height: number };
+
+const sizeOf = (el: HTMLElement): Size => {
+  const rect = el.getBoundingClientRect();
+  return { width: rect.width, height: rect.height };
+};
+
+/** 表示形式と、切り替え直後のアニメーションの開始時の大きさ (切り替え前の描画内容の大きさ) */
+type StyleView = { style: PanelStyle; morphFrom: Size | null };
+
 export function PanelWindow() {
   const { status, items, lastShown, errorVisible } = usePanelModel();
   const anchor = usePanelAnchor();
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const morphRef = useRef<HTMLDivElement>(null);
+  const [view, setView] = useState<StyleView | null>(null);
   // WebView 標準のメニュー (再読み込み・要素の詳細を表示等) は出さない。ピル・カード上では独自のメニューを出す
   useEffect(() => {
     const suppress = (e: Event) => e.preventDefault();
     document.addEventListener("contextmenu", suppress);
     return () => document.removeEventListener("contextmenu", suppress);
   }, []);
-  if (!status) return null;
+  // 表示形式は右クリックメニュー・設定画面から変わる (settings-changed)
+  useEffect(
+    () =>
+      subscribeWithInitial("settings-changed", commands.getSettings, (s) => {
+        // 切り替えのアニメーション中に再び切り替わった時は、アニメーション中の大きさから始める
+        const shown = morphRef.current ?? bodyRef.current;
+        const from = shown ? sizeOf(shown) : null;
+        setView((prev) => {
+          if (prev?.style === s.panelStyle) return prev;
+          // 初回 (まだ何も描いていない) はアニメーションしない
+          return { style: s.panelStyle, morphFrom: prev ? from : null };
+        });
+      }),
+    [],
+  );
+  const endMorph = useCallback(() => setView((v) => (v && v.morphFrom ? { ...v, morphFrom: null } : v)), []);
+  if (!status || !view) return null;
 
   const isOn = ON_PHASES.includes(status.phase);
   const expanded = items.length > 0;
 
   let body: ReactNode;
-  if (expanded || isOn) {
+  if (view.style === "compact") {
+    body = <CompactPanel status={status} items={items} />;
+  } else if (expanded || isOn) {
     body = <ListeningPanel anchor={anchor} isOn={isOn} expanded={expanded} items={expanded ? items : lastShown} />;
   } else if (status.phase === "loading") {
     body = <LoadingPill progress={status.loadingProgress} />;
@@ -78,6 +119,7 @@ export function PanelWindow() {
   return (
     <div
       data-anchor={`${anchor.vertical}-${anchor.horizontal}`}
+      data-panel-style={view.style}
       className={cn(
         "flex h-full w-full overflow-hidden",
         // 実機ではウィンドウ = PanelFrame の大きさだが、大きさの反映が遅れる間もアンカー側を合わせておく
@@ -87,8 +129,58 @@ export function PanelWindow() {
         env.browserFrame && "bg-surface-app",
       )}
     >
-      <PanelFrame>{body}</PanelFrame>
+      <PanelFrame>
+        {/* 切り替えのアニメーション中は、切り替え後の内容を見えないまま置いて最終の大きさをウィンドウに伝え、
+            その上に大きさだけが変わる面を重ねる (ListeningPanel の展開・収縮と同じ考え方) */}
+        <div className={cn("grid", ALIGN[anchor.vertical], GRID_JUSTIFY[anchor.horizontal])}>
+          <div ref={bodyRef} className={cn("[grid-area:1/1]", view.morphFrom && "invisible")}>
+            {body}
+          </div>
+          {view.morphFrom ? (
+            <StyleMorph ref={morphRef} from={view.morphFrom} targetRef={bodyRef} onDone={endMorph} />
+          ) : null}
+        </div>
+      </PanelFrame>
     </div>
+  );
+}
+
+/**
+ * 表示形式の切り替え (通常 ⇄ コンパクト) のアニメーション。ピル・カードと同じ面の大きさを
+ * 切り替え前の大きさから切り替え後の大きさへ 180ms で変え、終わったら onDone で切り替え後の内容を出す。
+ * 終わりを知るため CSS transition ではなく Web Animations を使う (大きさが同じでも finished が解決する)
+ */
+function StyleMorph({ from, targetRef, onDone, ref }: {
+  from: Size;
+  targetRef: RefObject<HTMLDivElement | null>;
+  onDone: () => void;
+  ref: RefObject<HTMLDivElement | null>;
+}) {
+  useLayoutEffect(() => {
+    const el = ref.current;
+    const target = targetRef.current;
+    if (!el || !target) return;
+    const to = sizeOf(target);
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const anim = el.animate(
+      [
+        { width: `${from.width}px`, height: `${from.height}px` },
+        { width: `${to.width}px`, height: `${to.height}px` },
+      ],
+      { duration: reduced ? 0 : 180, easing: "cubic-bezier(0.2, 0, 0, 1)", fill: "forwards" },
+    );
+    // cancel (アンマウント・やり直し) の時は reject されるので何もしない
+    anim.finished.then(onDone, () => {});
+    return () => anim.cancel();
+  }, [from, ref, targetRef, onDone]);
+  return (
+    <div
+      ref={ref}
+      data-testid="panel-style-morph"
+      aria-hidden
+      className="rounded-[18px] border border-line-default bg-surface-card shadow-md [grid-area:1/1]"
+      style={{ width: from.width, height: from.height }}
+    />
   );
 }
 
@@ -305,14 +397,17 @@ function ListeningPanel({ anchor, isOn, expanded, items }: {
   );
 }
 
-function ToggleButton({ isOn }: { isOn: boolean }) {
+function ToggleButton({ isOn, className }: { isOn: boolean; className?: string }) {
   if (!isOn) {
     return (
       <button
         type="button"
         aria-label="音声入力をオン"
         onClick={() => runCommand(commands.setListening(true))}
-        className="press flex size-7 flex-none cursor-pointer items-center justify-center rounded-full border-0 bg-surface-active text-fg-muted transition-control"
+        className={cn(
+          "press flex size-7 flex-none cursor-pointer items-center justify-center rounded-full border-0 bg-surface-active text-fg-muted transition-control",
+          className,
+        )}
       >
         <MicOff size={14} aria-hidden />
       </button>
@@ -323,10 +418,109 @@ function ToggleButton({ isOn }: { isOn: boolean }) {
       type="button"
       aria-label="音声入力をオフ"
       onClick={() => runCommand(commands.setListening(false))}
-      className="press flex size-7 flex-none cursor-pointer items-center justify-center rounded-full border-0 bg-action-primary text-gray-0 transition-control hover:bg-action-primary-hover active:bg-action-primary-active"
+      className={cn(
+        "press flex size-7 flex-none cursor-pointer items-center justify-center rounded-full border-0 bg-action-primary text-gray-0 transition-control hover:bg-action-primary-hover active:bg-action-primary-active",
+        className,
+      )}
     >
       <Mic size={14} aria-hidden />
     </button>
+  );
+}
+
+/* ---------- コンパクト表示 (マイクの円形ボタンのみ) ---------- */
+
+type CompactState = "off" | "loading" | "listening" | "speaking" | "finalizing" | "error";
+
+function compactState(status: AppStatus, items: PanelItem[]): CompactState {
+  switch (status.phase) {
+    case "off":
+    case "loading":
+    case "error":
+    case "speaking":
+      return status.phase;
+    default:
+      // 話し終わった発話の確定処理中は、次の発話を待つ間 (listening) も確定中として出す
+      return status.phase === "finalizing" || items.some((it) => it.stage === "finalizing") ? "finalizing" : "listening";
+  }
+}
+
+/**
+ * プレビュー・文言は出さず、状態はボタンの周りの表示だけで示す。
+ * エラーは右上の赤い点のみ (内容と復旧は右クリックメニューに出る)。ドラッグ・右クリックは通常の表示と同じ
+ */
+function CompactPanel({ status, items }: { status: AppStatus; items: PanelItem[] }) {
+  const drag = usePanelDrag();
+  const state = compactState(status, items);
+  const isOn = ON_PHASES.includes(status.phase);
+  return (
+    <div
+      {...drag}
+      data-testid="panel-compact"
+      data-state={state}
+      // 36px の円 (枠 1px + 余白 3px + ボタン 28px)。ピルと同じ面・枠・影
+      className="relative flex size-9 items-center justify-center select-none rounded-full border border-line-default bg-surface-card shadow-md"
+    >
+      {isOn ? <CompactLevelRing active={state === "speaking"} /> : null}
+      {state === "finalizing" || state === "loading" ? <CompactSpinner muted={state === "loading"} /> : null}
+      {state === "loading" ? (
+        // 読み込み中は通常の表示と同じく切り替えを出さない
+        <span className="relative flex size-7 items-center justify-center rounded-full bg-surface-active text-fg-muted">
+          <MicOff size={14} aria-label="モデルを読み込んでいます" />
+        </span>
+      ) : (
+        // リング (absolute) より上に描くため relative にする
+        <ToggleButton isOn={isOn} className="relative" />
+      )}
+      {state === "error" && status.error ? (
+        <span
+          role="img"
+          aria-label={status.error.message}
+          data-testid="panel-compact-error"
+          className="pointer-events-none absolute -top-px -right-px size-2.5 rounded-full border-2 border-surface-card bg-red-500"
+        />
+      ) : null}
+    </div>
+  );
+}
+
+// レベル 1 の時のリングの倍率 (28px → 約 52px。影の余白の上 16px に収まる)
+const RING_GROWTH = 0.85;
+const writeRingScale = (el: HTMLElement, v: number) => {
+  el.style.transform = `scale(${1 + v * RING_GROWTH})`;
+};
+
+/**
+ * 発話中に音量に合わせて広がるリング。ボタンの後ろの薄い円で、ボタンからはみ出した分がリングに見える。
+ * 発話中でなければ 0 に戻して (ゆっくり縮めて) ボタンの後ろに隠す。約15Hz で更新されるのでここだけが購読する
+ */
+function CompactLevelRing({ active }: { active: boolean }) {
+  const { level } = useAudioLevel();
+  const ref = useLevelEnvelope<HTMLSpanElement>(active ? level : 0, writeRingScale);
+  return (
+    <span
+      ref={ref}
+      aria-hidden
+      data-testid="panel-compact-ring"
+      // 枠の内側 (34px) から 3px 内側 = ボタンと同じ 28px
+      className="pointer-events-none absolute inset-[3px] rounded-full bg-meter-ring"
+    />
+  );
+}
+
+/** 確定処理中 (読み込み中) の細い回転するリング。動きを減らす設定では回さず、全周を塗った静止したリングにする */
+function CompactSpinner({ muted }: { muted: boolean }) {
+  return (
+    <span
+      aria-hidden
+      data-testid="panel-compact-spinner"
+      className={cn(
+        "pointer-events-none absolute -inset-1 rounded-full border-2 motion-safe:animate-spin",
+        muted
+          ? "border-meter-track border-t-meter-idle motion-reduce:border-meter-idle"
+          : "border-meter-ring border-t-meter-active motion-reduce:border-meter-active",
+      )}
+    />
   );
 }
 
@@ -336,6 +530,8 @@ function PanelLevelMeter({ active }: { active: boolean }) {
   return (
     <LevelMeter
       testId="level-meter"
+      // 状態の文言 (入力できなかった理由など) が長くてもメーターを潰さない。文言の方を省略する
+      className="min-w-16"
       level={active ? level : 0}
       threshold={threshold}
       active={active && level >= threshold}
@@ -343,7 +539,8 @@ function PanelLevelMeter({ active }: { active: boolean }) {
   );
 }
 
-type StatusView = { icon: LucideIcon | null; className: string; label: string; spin?: boolean };
+// iconOnly: 文言は読み上げ用にだけ持ち、アイコンだけを表示する
+type StatusView = { icon: LucideIcon | null; className: string; label: string; spin?: boolean; iconOnly?: boolean };
 
 function statusView(items: PanelItem[]): StatusView | null {
   if (items.some((it) => it.stage === "speaking")) {
@@ -357,11 +554,13 @@ function statusView(items: PanelItem[]): StatusView | null {
   if (!r) return null;
   switch (r.kind) {
     case "inserted":
-      return { icon: CircleCheck, className: "text-fg-success", label: `${r.appName} に入力しました` };
+      // 入力先はフォーカスで分かるためアプリ名は出さず、成功マークだけにする
+      return { icon: CircleCheck, className: "text-fg-success", label: "入力しました", iconOnly: true };
     case "command":
       return { icon: CornerDownLeft, className: "text-fg-command", label: "音声コマンド" };
     case "skipped_excluded":
-      return { icon: Ban, className: "text-fg-warning", label: "このアプリには入力しません" };
+      // 入力しなかった理由。状態の欄 (約 370px から メーターの最小幅を除いた分) に収まる短さにする
+      return { icon: TriangleAlert, className: "text-fg-warning", label: `${r.appName} は入力しない設定です` };
     case "failed":
       return { icon: CircleAlert, className: "text-fg-danger", label: r.error.message };
   }
@@ -382,7 +581,7 @@ function StatusLabel({ expanded, items }: { expanded: boolean; items: PanelItem[
       )}
     >
       {Icon ? <Icon size={12} className={cn("flex-none", view.spin && "animate-spin")} aria-hidden /> : null}
-      <span className="truncate">{view.label}</span>
+      <span className={view.iconOnly ? "sr-only" : "truncate"}>{view.label}</span>
     </span>
   );
 }

@@ -9,7 +9,7 @@ import { GB, provisioning, type MockDb } from "./data";
 export type Scenario = {
   name: string;
   description: string;
-  /** true: 時間経過で状態が進む (結果表示も 2 秒で消える) */
+  /** true: 時間経過で状態が進む (結果表示も時間経過で消える) */
   live?: boolean;
   /** setup の初期ステップ (1-5) */
   step?: number;
@@ -146,7 +146,7 @@ const PANEL: Scenario[] = [
   },
   {
     name: "inserted",
-    description: "入力完了 (実機は 2 秒後にピルへ戻る)",
+    description: "入力完了 (実機は 750ms 後にピルへ戻る)",
     setup: (db) => listening(db, 0.06),
     script: (api) => {
       api.started(1);

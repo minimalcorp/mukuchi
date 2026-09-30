@@ -35,6 +35,7 @@ const DEFAULT_SETTINGS: Settings = {
   ],
   panelPosition: null,
   setupCompleted: true,
+  panelStyle: "full",
 };
 
 export const GB = 1_000_000_000;

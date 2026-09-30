@@ -80,7 +80,11 @@ export type Settings = {
    */
   panelPosition: { x: number; y: number; displayId: string; version?: number } | null;
   setupCompleted: boolean;
+  /** パネルの表示形式。compact はマイクの円形ボタンのみ (プレビュー・文言なし) */
+  panelStyle: PanelStyle;
 };
+
+export type PanelStyle = "full" | "compact";
 
 export type MicrophonePermission = "granted" | "denied" | "not_determined";
 export type Permissions = {

@@ -13,6 +13,8 @@ type Size = { width: number; height: number };
 async function open(page: Page, query: string, viewport: Size) {
   await page.setViewportSize(viewport);
   await page.goto(`/?${query}`);
+  // 描画されてから待つ (描画前は同梱フォントの読み込みが始まっておらず、fonts.ready がすぐ解決する)
+  await page.waitForFunction(() => (document.getElementById("root")?.childElementCount ?? 0) > 0);
   await page.evaluate(() => document.fonts.ready);
   // モックの API (main.tsx の boot 内で入る) が使えるまで待つ
   await page.waitForFunction(() => "__mukuchiMock" in window);

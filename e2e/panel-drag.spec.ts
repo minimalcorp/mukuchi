@@ -15,8 +15,10 @@ type Mock = { calls: Call[]; windowCalls: Call[] };
 async function open(page: Page, query: string, viewport: Size) {
   await page.setViewportSize(viewport);
   await page.goto(`/?${query}`);
-  await page.evaluate(() => document.fonts.ready);
   await page.waitForFunction(() => "__mukuchiMock" in window);
+  // 描画されてから待つ (描画前は同梱フォントの読み込みが始まっておらず、fonts.ready がすぐ解決する)
+  await page.waitForFunction(() => (document.getElementById("root")?.childElementCount ?? 0) > 0);
+  await page.evaluate(() => document.fonts.ready);
 }
 
 function calls(page: Page, cmd: string): Promise<Call[]> {

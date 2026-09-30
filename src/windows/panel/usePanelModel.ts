@@ -7,9 +7,14 @@ import { commands, latestStatusOnly, subscribeWithInitial, type AppStatus, type 
 import { resetAudioLevel } from "@/lib/audio-level";
 import { devOverrides } from "@/lib/env";
 
-/** 確定結果 (入力した内容) を表示する時間。tsunagi に準拠して 2 秒 */
+/**
+ * 入力できた発話の最終結果を表示する時間。入力先はフォーカスで分かるため、内容の確認に足りる短さにする
+ * (docs/plans/implementation-plan.md「確定結果の表示」)
+ */
+export const INSERTED_DISPLAY_MS = 750;
+/** 音声コマンドの結果を表示する時間。tsunagi に準拠して 2 秒 */
 export const RESULT_DISPLAY_MS = 2000;
-/** 入力に失敗した発話の表示時間。エラー表示 (06) と同じ 3 秒 */
+/** 入力しなかった・できなかった発話の表示時間 (理由を読めるように)。エラー表示 (06) と同じ 3 秒 */
 export const FAILED_DISPLAY_MS = 3000;
 /** エラー発生時にパネルへ短く表示する時間 (06: 3 秒後にオフの表示へ戻す) */
 export const ERROR_DISPLAY_MS = 3000;
@@ -141,7 +146,13 @@ export function usePanelModel() {
       "utterance-result": (r) => {
         dispatch({ type: "result", r });
         if (r.kind !== "empty" && r.kind !== "discarded") {
-          later(r.kind === "failed" ? FAILED_DISPLAY_MS : RESULT_DISPLAY_MS, { type: "expire", id: r.id });
+          const ms =
+            r.kind === "inserted"
+              ? INSERTED_DISPLAY_MS
+              : r.kind === "command"
+                ? RESULT_DISPLAY_MS
+                : FAILED_DISPLAY_MS;
+          later(ms, { type: "expire", id: r.id });
         }
       },
     });

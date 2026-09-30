@@ -4,7 +4,9 @@
 //!   (`MUKUCHI_IT_HF_HOME` に書く)
 //! - `real_provision_and_serve`: `MUKUCHI_IT_DATA_DIR` を データディレクトリとして runtime → model → verify を行い、
 //!   本番と同じ起動のサーバーで `MUKUCHI_IT_WAV` を文字起こしする。uv と asr-server は
-//!   `MUKUCHI_DEV_UV` / `MUKUCHI_DEV_ASR_SERVER_DIR`、検証音声は `MUKUCHI_DEV_VERIFY_WAV`
+//!   `MUKUCHI_DEV_UV` / `MUKUCHI_DEV_ASR_SERVER_DIR`、検証音声は `MUKUCHI_DEV_VERIFY_WAV`。
+//!   モデルは既定 (`MUKUCHI_IT_MODEL=<カタログの id>` で変える)
+//! - `real_catalog_sizes`: カタログの容量 (size_bytes) が固定した revision の tree API の合計と一致するか
 
 use std::sync::atomic::AtomicU64;
 
@@ -22,7 +24,7 @@ fn env_path(name: &str) -> PathBuf {
 fn real_hf_range_resume() {
     tauri::async_runtime::block_on(async {
         let hf_home = env_path("MUKUCHI_IT_HF_HOME");
-        let model = HfModel::distributed();
+        let model = models::Catalog::distributed().default_model().hf.clone();
         let http = hf::http_client().unwrap();
         let (_tx, never) = Cancel::pair();
         let files: Vec<_> = hf::list_files(&http, &model, &never)
@@ -107,7 +109,13 @@ fn real_provision_and_serve() {
         let uv = crate::paths::dev_path(crate::paths::ENV_DEV_UV)
             .unwrap_or_else(|| std::path::PathBuf::from(crate::paths::DEV_UV_RESOURCE));
         let resources = Resources::resolve(None, uv);
-        let model = HfModel::distributed();
+        let catalog = models::Catalog::distributed();
+        let model = std::env::var("MUKUCHI_IT_MODEL")
+            .ok()
+            .and_then(|id| catalog.get(&id).cloned())
+            .unwrap_or_else(|| catalog.default_model().clone())
+            .hf;
+        println!("model: {}", model.version());
         let asr = Arc::new(AsrProcess::new());
         let spec = LaunchSpec {
             python: paths.venv_python(),
@@ -118,9 +126,10 @@ fn real_provision_and_serve() {
         };
         let last = Arc::new(Mutex::new(None::<ProvisioningStatus>));
         let l = last.clone();
+        let m = model.clone();
         let p = Provisioner::new(
             paths.clone(),
-            model.clone(),
+            Arc::new(move || m.clone()),
             Arc::new(runtime::UvRuntime {
                 paths: paths.clone(),
                 resources: resources.clone(),
@@ -128,7 +137,10 @@ fn real_provision_and_serve() {
             }),
             Arc::new(ServerVerify {
                 asr: asr.clone(),
-                spec: spec.clone(),
+                spec: Arc::new({
+                    let spec = spec.clone();
+                    move || spec.clone()
+                }),
                 wav: resources.verify_wav.clone(),
             }),
             move |s| {
@@ -188,5 +200,20 @@ fn real_provision_and_serve() {
         assert!(!tr.text.trim().is_empty());
         asr.stop().await;
         assert!(client.health().await.is_err(), "停止後は応答しない");
+    });
+}
+
+#[test]
+#[ignore]
+fn real_catalog_sizes() {
+    tauri::async_runtime::block_on(async {
+        let http = hf::http_client().unwrap();
+        let (_tx, never) = Cancel::pair();
+        for m in models::Catalog::distributed().iter() {
+            let files = hf::list_files(&http, &m.hf, &never).await.unwrap();
+            let total: u64 = files.iter().map(|f| f.size).sum();
+            println!("{}: {} files, {total} bytes", m.id, files.len());
+            assert_eq!(total, m.size_bytes, "{}", m.id);
+        }
     });
 }

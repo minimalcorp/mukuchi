@@ -25,15 +25,25 @@ pub enum Behavior {
     WrongRange(u64),
 }
 
+#[derive(Clone)]
 pub struct File {
     pub path: String,
     pub content: Vec<u8>,
     pub lfs: bool,
 }
 
+/// REPO@REVISION 以外のリポジトリ・revision (モデルの管理のテスト用)
+pub struct Repo {
+    pub repo: String,
+    pub revision: String,
+    pub files: Vec<File>,
+}
+
 #[derive(Default)]
 pub struct State {
+    /// REPO@REVISION のファイル
     pub files: Vec<File>,
+    pub other_repos: Vec<Repo>,
     pub script: VecDeque<Behavior>,
     /// 1KiB ごとの待ち (一時停止のテスト用)
     pub throttle: Option<Duration>,
@@ -133,19 +143,43 @@ fn handle(stream: TcpStream, st: &Arc<Mutex<State>>) -> std::io::Result<()> {
         }
     }
     let mut out = stream;
-    let tree_prefix = format!("/api/models/{REPO}/tree/{REVISION}");
-    let resolve_prefix = format!("/{REPO}/resolve/{REVISION}/");
-    if path.starts_with(&tree_prefix) {
-        let body = tree_json(&st.lock().unwrap().files);
-        return respond(&mut out, 200, &[], body.as_bytes());
+    // (repo, revision) → 何番目か (None = REPO@REVISION)
+    let repos: Vec<(String, String, Option<usize>)> = {
+        let s = st.lock().unwrap();
+        std::iter::once((REPO.to_string(), REVISION.to_string(), None))
+            .chain(
+                s.other_repos
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (r.repo.clone(), r.revision.clone(), Some(i))),
+            )
+            .collect()
+    };
+    let files_of = |s: &State, i: Option<usize>| -> Vec<File> {
+        let files = match i {
+            None => &s.files,
+            Some(i) => &s.other_repos[i].files,
+        };
+        files.clone()
+    };
+    for (repo, rev, i) in &repos {
+        if path.starts_with(&format!("/api/models/{repo}/tree/{rev}")) {
+            let body = tree_json(&files_of(&st.lock().unwrap(), *i));
+            return respond(&mut out, 200, &[], body.as_bytes());
+        }
     }
-    let Some(file) = path.strip_prefix(&resolve_prefix) else {
+    let Some((file, index)) = repos.iter().find_map(|(repo, rev, i)| {
+        path.strip_prefix(&format!("/{repo}/resolve/{rev}/"))
+            .map(|f| (f.to_string(), *i))
+    }) else {
         return respond(&mut out, 404, &[], b"not found");
     };
+    let file = file.as_str();
     let (content, behavior, throttle) = {
         let mut s = st.lock().unwrap();
         s.requests.push((file.to_string(), range));
-        let Some(f) = s.files.iter().find(|f| f.path == file) else {
+        let files = files_of(&s, index);
+        let Some(f) = files.iter().find(|f| f.path == file) else {
             drop(s);
             return respond(&mut out, 404, &[], b"not found");
         };

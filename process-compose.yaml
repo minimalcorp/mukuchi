@@ -16,9 +16,11 @@ processes:
   asr:
     namespace: desktop
     working_dir: ./apps/desktop
-    command: uv run --project asr-server mukuchi-asr --port 18765 --model neosophie/Qwen3-ASR-1.7B-JA
+    # モデルは版を固定したスナップショットのディレクトリを渡す (本番と同じ。リポジトリIDだとオフラインでは refs/main を引き、
+    # commit 指定で取得したキャッシュには refs/main が無いため)。パスは空白を含むので引用する
+    command: uv run --project asr-server mukuchi-asr --port 18765 --model "${MUKUCHI_MODEL_SNAPSHOT}"
     # 本番と同じレイアウトで dev 用バンドルIDのデータディレクトリを使う (docs/architecture.md)。
-    # MUKUCHI_DEV_DATA は Makefile が export する (process-compose は起動時に YAML 中の ${VAR} を環境変数で展開する)
+    # MUKUCHI_DEV_DATA・MUKUCHI_MODEL_SNAPSHOT は Makefile が export する (process-compose は起動時に YAML 中の ${VAR} を環境変数で展開する)
     environment:
       - "HF_HOME=${MUKUCHI_DEV_DATA}/models"
       - "UV_CACHE_DIR=${MUKUCHI_DEV_DATA}/cache"

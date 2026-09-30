@@ -34,11 +34,11 @@ monorepo。JS/TS の依存はルートの pnpm workspace (`pnpm-workspace.yaml`�
 |---|---|
 | `make up` / `make down` / `make restart` | 開発環境の起動(desktop + web、セットアップ込み) / 停止 / 再起動 |
 | `make up-desktop` / `make up-web` | desktop (asr + tauri dev) / web (LP の vite dev、http://127.0.0.1:5174/) だけを起動 (process-compose の namespace `desktop` / `web`。片方の起動中に別の `up-*` は不可。`make down` してから) |
-| `make reset [PROVISION=1] [ALL=1] [PERMISSIONS=1]` | 停止して dev の設定・WebKit/Caches 等を消し初回起動の状態に (models/・実行環境・導入記録・ログは残すのでセットアップのダウンロードは完了済みで表示される。`PROVISION=1` で導入記録を消しダウンロード・導入をやり直す。`ALL=1` で実行環境も消す。`PERMISSIONS=1` で `tccutil reset All <devのID>` と権限の案内) |
+| `make reset [PROVISION=1] [ALL=1] [PERMISSIONS=1]` | 停止して dev の設定・WebKit/Caches 等を消し初回起動の状態に (models/・実行環境・導入記録・ログは残すのでセットアップのダウンロードは完了済みで表示される。`PROVISION=1` で導入記録を消し導入をやり直す (models/ は残るため取得済みのモデルは再ダウンロードしない。取得から確かめるなら models/ を手で消す)。`ALL=1` で実行環境も消す。`PERMISSIONS=1` で `tccutil reset All <devのID>` と権限の案内)。モデルの選択 (導入記録) も残る |
 | `make up-fresh [PROVISION=1] [ALL=1]` | `reset` して `MUKUCHI_DEV_SHOW_SETUP=1` で起動 (セットアップ画面の確認用。この起動のみ) |
 | `make ps` / `make logs [s=<name>]` | プロセス状態・ASR の /health・web の応答 / ログ追従 (`s=asr\|app\|web`) |
 | `make lint` / `make test` | 全アプリの lint・型検査 (JS/TS・`sst.config.ts`・cargo fmt/clippy・ruff) / テスト (Playwright・cargo test・pytest・`scripts/` のリリース用スクリプト)。CI と同じ検査 |
-| `make setup` | pnpm install (workspace)・uv sync・モデル取得 (`up` から自動実行)。`MUKUCHI_HF_SEED=<HF_HOME>` で既存HFキャッシュから複製 |
+| `make setup` | pnpm install (workspace)・uv sync・モデル取得 (`up` から自動実行)。モデルは本番の既定と同じ `minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit` (約2.2GB) を版固定で取得 (`MUKUCHI_MODEL`・`MUKUCHI_MODEL_REVISION` で変更可、既定は `Makefile`)。取得済みならネットワークに出ない。`MUKUCHI_HF_SEED=<HF_HOME>` で既存HFキャッシュから複製 (複製元に huggingface_hub 2.0 の共通 blob 置き場 `hub/blobs/` があれば複製しない)。アプリのセットアップ済みの dev データなら取得したモデルを導入記録に載せる。**dev で使うモデルは process-compose (この値) で決まり、設定画面のモデルの選択・表示とは食い違いうる** (docs/architecture.md「モデルの管理」の開発) |
 | `make build` | 本番用 .dmg (Developer ID署名 + Hardened Runtime + 公証 + staple)。証明書・公証の資格情報が必要 ([docs/release.md](docs/release.md)) |
 | `make build-local` | ad-hoc署名の .app (手元確認用)。同梱物 (uv・asr-server) は `apps/desktop/scripts/prepare-bundle-resources.sh` が用意する |
 | `make dmg-local` | `build-local` + 署名なしの .dmg (dmg ウィンドウの見た目の確認用。公証しない) |

@@ -4,6 +4,7 @@ import type { Settings } from "@/lib/ipc";
 import type { SettingsErrors } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { HelpTip } from "@/components/ui/tooltip";
+import { DialogDescription, DialogTitle } from "@/components/ui/dialog";
 
 export type SectionProps = {
   settings: Settings;
@@ -55,5 +56,36 @@ export function TitleWithSub({ title, sub }: { title: ReactNode; sub: ReactNode 
       <span className="text-sm leading-[1.4] font-medium">{title}</span>
       <span className="text-xs leading-[1.4] text-fg-muted">{sub}</span>
     </div>
+  );
+}
+
+/** 確認ダイアログの中身 (タイトル・説明・任意の内容・エラー・ボタン) */
+export function ConfirmLayout({
+  title,
+  description,
+  error,
+  children,
+  actions,
+}: {
+  title: string;
+  description: string;
+  error?: string | null;
+  children?: ReactNode;
+  actions: ReactNode;
+}) {
+  return (
+    <>
+      <div className="flex flex-col gap-2 px-5 pt-5">
+        <DialogTitle className="m-0 text-lg leading-[1.4] font-semibold text-fg-strong">{title}</DialogTitle>
+        <DialogDescription className="m-0 text-sm text-fg-muted">{description}</DialogDescription>
+      </div>
+      {children ?? <div className="h-3.5" />}
+      {error ? (
+        <p role="alert" className="mx-5 mt-0 mb-3.5 text-xs leading-[1.5] text-fg-danger">
+          {error}
+        </p>
+      ) : null}
+      <div className="flex justify-end gap-2 px-5 pb-5">{actions}</div>
+    </>
   );
 }

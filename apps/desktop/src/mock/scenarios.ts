@@ -4,7 +4,7 @@
  */
 import type { AppError, AppStatus } from "@/lib/ipc";
 import type { MockApi } from "./index";
-import { GB, provisioning, type MockDb } from "./data";
+import { GB, model, provisioning, type MockDb } from "./data";
 
 export type Scenario = {
   name: string;
@@ -391,6 +391,43 @@ const SETTINGS: Scenario[] = [
     setup: (db) => {
       setStatus(db, { phase: "error", loadingProgress: null, error: ERRORS.runtime });
       db.provisioning = provisioning("idle");
+    },
+  },
+  // ---- モデルの管理 (認識) ----
+  {
+    name: "models-both",
+    description: "モデル: 両方取得済み (bf16 を使用中)",
+    setup: (db) => {
+      db.models = [model("ja-8bit", "downloaded"), model("ja-bf16", "downloaded", { selected: true })];
+    },
+  },
+  {
+    name: "models-downloading",
+    description: "モデル: bf16 を取得中 (進捗は止まったまま)",
+    setup: (db) => {
+      db.models = [model("ja-8bit", "downloaded", { selected: true }), model("ja-bf16", "downloading", { bytesDone: 1.5 * GB })];
+    },
+  },
+  {
+    name: "models-paused",
+    description: "モデル: bf16 を一時停止",
+    setup: (db) => {
+      db.models = [model("ja-8bit", "downloaded", { selected: true }), model("ja-bf16", "paused", { bytesDone: 1.5 * GB })];
+    },
+  },
+  {
+    name: "models-error",
+    description: "モデル: bf16 の取得に失敗",
+    setup: (db) => {
+      db.models = [model("ja-8bit", "downloaded", { selected: true }), model("ja-bf16", "error", { bytesDone: 1.5 * GB })];
+    },
+  },
+  {
+    name: "models-setup-incomplete",
+    description: "モデル: セットアップ未完了 (操作不可)",
+    setup: (db) => {
+      db.provisioning = provisioning("paused");
+      db.models = [model("ja-8bit", "paused", { selected: true }), model("ja-bf16", "not_downloaded")];
     },
   },
 ];

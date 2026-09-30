@@ -7,6 +7,7 @@ import {
   latestStatusOnly,
   subscribeWithInitial,
   type AppStatus,
+  type ModelInfo,
   type PanelAnchor,
   type Permissions,
   type ProvisioningStatus,
@@ -110,6 +111,29 @@ export function useProvisioning(): ProvisioningStatus | null {
   const [status, setStatus] = useState<ProvisioningStatus | null>(null);
   useEffect(() => subscribeWithInitial("provisioning-progress", commands.getProvisioningStatus, setStatus), []);
   return status;
+}
+
+/** モデルの一覧。null は取得前。取得の失敗は error に入れる (一覧が無くても他の設定は使えるため) */
+export function useModels(): { models: ModelInfo[] | null; error: string | null } {
+  const [models, setModels] = useState<ModelInfo[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(
+    () =>
+      subscribeWithInitial(
+        "models-changed",
+        () =>
+          commands.listModels().catch((e: unknown) => {
+            setError(errorMessage(e));
+            throw e;
+          }),
+        (m) => {
+          setModels(m);
+          setError(null);
+        },
+      ),
+    [],
+  );
+  return { models, error };
 }
 
 /** エラーの表示用メッセージ (Rust の表示用メッセージ) */

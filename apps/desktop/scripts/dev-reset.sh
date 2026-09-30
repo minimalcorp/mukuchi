@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 開発版 (com.minimalcorp.mukuchi.dev) の状態を消し、次回の起動を初回起動と同じにする。make reset から呼ぶ。
-# モデル (models/, 約4GB) は常に残す。導入済みの記録 (provisioned.json) は PROVISION=1、
+# モデル (models/。既定の 8bit 版で約2.2GB) は常に残す。導入済みの記録 (provisioned.json) は PROVISION=1、
 # 実行環境 (python・venv・uv・cache・asr-server) は ALL=1 の時だけ消す (ALL=1 は記録も消す)。
 # PERMISSIONS=1 で dev のバンドルIDの TCC もリセットする。
 # 消す対象は docs/architecture.md「識別子・パス」のアンインストール対象のうち dev のもの (ログは残す)。
@@ -46,7 +46,9 @@ if [ -d "$data" ]; then
     remove "$data/settings.json"
     remove "$data/settings.json.tmp"
     # 導入済みの記録を残すと、セットアップの「ダウンロード」画面は完了済みで表示され待たされない。
-    # ダウンロード・導入の流れ自体を確かめる時だけ PROVISION=1 (または ALL=1) で消す
+    # ダウンロード・導入の流れ自体を確かめる時だけ PROVISION=1 (または ALL=1) で消す。
+    # models/ は残るため、取得済みの blob (名前と大きさが合うもの) は取り直さない (src-tauri/src/provisioning/hf.rs)。
+    # 8bit (約2.2GB) を実際に取り直すところから確かめるなら models/ も手で消す
     if [ "${PROVISION:-}" = 1 ] || [ "${ALL:-}" = 1 ]; then
       remove "$data/provisioned.json"
       remove "$data/provisioned.json.tmp"

@@ -64,7 +64,7 @@ const cases: Case[] = [
   { name: "settings-recognition", query: "window=settings&mock=default&category=recognition", texts: ["Qwen3-ASR（日本語追加学習）", "読み込み済み", "語彙ヒント", "6 語", "Kubernetes"], viewport: SETTINGS },
   { name: "settings-recognition-stopped", query: "window=settings&mock=asr-stopped&category=recognition", texts: ["停止中", "再起動"], viewport: SETTINGS },
   { name: "settings-permissions", query: "window=settings&mock=perm-denied&category=permissions", texts: ["アクセシビリティ", "未許可", "システム設定を開く"], viewport: SETTINGS },
-  { name: "settings-storage", query: "window=settings&mock=default&category=storage", texts: ["3.6 GB", "使用中", "モデル", "12 MB", "完全にアンインストール"], viewport: SETTINGS },
+  { name: "settings-storage", query: "window=settings&mock=default&category=storage", texts: ["3.4 GB", "使用中", "モデル", "12 MB", "完全にアンインストール"], viewport: SETTINGS },
   { name: "settings-storage-runtime-missing", query: "window=settings&mock=runtime-missing&category=storage", texts: ["12 MB", "実行環境とモデルがありません。", "セットアップを開く"], viewport: SETTINGS },
   { name: "settings-about", query: "window=settings&mock=default&category=about", texts: ["mukuchi", "バージョン 0.1.0（build 42）", "ライセンス", "Finder で開く"], viewport: SETTINGS },
   { name: "settings-about-dark", query: "window=settings&mock=default&category=about", texts: ["ライセンス"], viewport: SETTINGS, dark: true },

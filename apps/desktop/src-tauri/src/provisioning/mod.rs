@@ -5,14 +5,17 @@
 //!   runtime は uv を止め、再開時にやり直す (uv のキャッシュで続きから進む)。verify はやり直す
 //! - 失敗: `ProvisioningStatus.error` に表示用の文言を入れる。再試行 (start) は一時停止からの再開と同じ
 //! - 完了した段階は `provisioned.json` に版と時刻を記録し、版が変わった段階 (とそれ以降の verify) だけやり直す
+//! - model は選択中のモデル (models.rs) を取る。モデルごとの取得・削除・選択は models.rs
 
 pub mod hf;
+pub mod models;
 pub mod runtime;
 #[cfg(test)]
 mod test_server;
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -32,7 +35,7 @@ use hf::{Cache, Downloader, HfModel};
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 /// 進捗の送信間隔 (約4Hz)
-const EMIT_INTERVAL: Duration = Duration::from_millis(250);
+pub(crate) const EMIT_INTERVAL: Duration = Duration::from_millis(250);
 /// 残り時間の見積もりに使う直近の期間
 const RATE_WINDOW: Duration = Duration::from_secs(10);
 
@@ -199,14 +202,15 @@ pub trait VerifyStep: Send + Sync {
 /// 成功したサーバーはそのまま使い続ける (読み込みをやり直さないため)。失敗したら止める
 pub struct ServerVerify {
     pub asr: Arc<AsrProcess>,
-    pub spec: LaunchSpec,
+    /// 起動方法。選択中のモデルで決まるため、確かめる時に求める
+    pub spec: Arc<dyn Fn() -> LaunchSpec + Send + Sync>,
     pub wav: PathBuf,
 }
 
 impl VerifyStep for ServerVerify {
     fn verify(&self, cancel: Cancel) -> BoxFuture<Result<(), StepError>> {
         let asr = self.asr.clone();
-        let spec = self.spec.clone();
+        let spec = (self.spec)();
         let wav_path = self.wav.clone();
         Box::pin(async move {
             let result = verify_server(&asr, spec, &wav_path, &cancel).await;
@@ -257,11 +261,25 @@ async fn verify_server(
 pub struct Provisioned {
     #[serde(default)]
     pub runtime: Option<StepRecord>,
+    /// 旧形式 (モデルが1つだった頃)。読み込み時に `models` へ移し、書き込まない
+    #[serde(default, skip_serializing)]
+    model: Option<StepRecord>,
+    /// 取得を終えたモデル。キーは版 (`<repo>@<revision>`)。revision が変わると別のキーになり未取得扱い
     #[serde(default)]
-    pub model: Option<StepRecord>,
+    pub models: BTreeMap<String, ModelRecord>,
+    /// 選択中のモデル (カタログの id)。無ければ起動時に決める (models::resolve_selection)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_model: Option<String>,
     /// 動作確認したときの runtime/model の版
     #[serde(default)]
     pub verify: Option<VerifyRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRecord {
+    /// UNIX 時刻 (秒)
+    pub completed_at: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,19 +294,30 @@ pub struct StepRecord {
 #[serde(rename_all = "camelCase")]
 pub struct VerifyRecord {
     pub runtime: String,
+    /// 確かめたモデルの版 (記録のみ。モデルを切り替えても verify はやり直さない)
     pub model: String,
     pub completed_at: u64,
 }
 
+/// provisioned.json の読み書きを直列にする (セットアップとモデルの管理が互いの記録を上書きしないため)
+static RECORD_LOCK: Mutex<()> = Mutex::new(());
+
 impl Provisioned {
     pub fn load(path: &std::path::Path) -> Self {
-        match std::fs::read(path) {
+        let mut rec: Self = match std::fs::read(path) {
             Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
                 log::warn!("provisioned.json が読めないため未導入とみなす: {e}");
                 Self::default()
             }),
             Err(_) => Self::default(),
+        };
+        // 旧形式の移行: 取得済みのモデルが1つだった頃の記録
+        if let Some(m) = rec.model.take() {
+            rec.models.entry(m.version).or_insert(ModelRecord {
+                completed_at: m.completed_at,
+            });
         }
+        rec
     }
 
     fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
@@ -300,12 +329,27 @@ impl Provisioned {
         std::fs::rename(&tmp, path).context("provisioned.json を保存できません")
     }
 
-    fn is_empty(&self) -> bool {
-        self.runtime.is_none() && self.model.is_none() && self.verify.is_none()
+    /// 読み直して `f` で書き換え、保存する。書き換え後の記録を返す
+    pub fn update(path: &std::path::Path, f: impl FnOnce(&mut Self)) -> anyhow::Result<Self> {
+        let _g = lock(&RECORD_LOCK);
+        let mut rec = Self::load(path);
+        f(&mut rec);
+        rec.save(path)?;
+        Ok(rec)
+    }
+
+    /// 導入の記録 (runtime・models・verify) が無いか。選択 (selectedModel) だけでは記録とみなさない
+    /// (「実行環境とモデルのみ削除」の後に、選択の書き込みで自動のやり直しが始まらないように)
+    pub fn is_empty(&self) -> bool {
+        self.runtime.is_none() && self.models.is_empty() && self.verify.is_none()
+    }
+
+    pub fn has_model(&self, version: &str) -> bool {
+        self.models.contains_key(version)
     }
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -326,8 +370,9 @@ impl Plan {
     }
 }
 
-/// 記録と現在の版から、やり直す段階を決める。
-/// `runtime_version` が None (同梱物がなく版が分からない。開発時) なら、記録があれば済みとみなす
+/// 記録と現在の版から、やり直す段階を決める。`model_version` は選択中のモデルの版。
+/// `runtime_version` が None (同梱物がなく版が分からない。開発時) なら、記録があれば済みとみなす。
+/// verify はモデルの版を見ない (モデルの切り替えでやり直さない。model をやり直す時は run_steps が verify の記録も消す)
 pub fn plan(
     rec: &Provisioned,
     runtime_version: Option<&str>,
@@ -340,16 +385,13 @@ pub fn plan(
             .runtime
             .as_ref()
             .is_some_and(|r| runtime_version.is_none_or(|v| r.version == v));
-    let model_ok = model_present
-        && rec
-            .model
-            .as_ref()
-            .is_some_and(|m| m.version == model_version);
+    let model_ok = model_present && rec.has_model(model_version);
     let verify_ok = runtime_ok
         && model_ok
-        && rec.verify.as_ref().is_some_and(|v| {
-            rec.runtime.as_ref().is_some_and(|r| r.version == v.runtime) && v.model == model_version
-        });
+        && rec
+            .verify
+            .as_ref()
+            .is_some_and(|v| rec.runtime.as_ref().is_some_and(|r| r.version == v.runtime));
     Plan {
         runtime: !runtime_ok,
         model: !model_ok,
@@ -420,12 +462,12 @@ impl Shared {
 
 /// 直近の転送速度
 #[derive(Default)]
-struct RateMeter {
+pub(crate) struct RateMeter {
     samples: std::collections::VecDeque<(Instant, u64)>,
 }
 
 impl RateMeter {
-    fn push(&mut self, t: Instant, bytes: u64) {
+    pub(crate) fn push(&mut self, t: Instant, bytes: u64) {
         // 最初からやり直した等でバイト数が減ったら測り直す
         if self.samples.back().is_some_and(|(_, b)| *b > bytes) {
             self.samples.clear();
@@ -440,11 +482,11 @@ impl RateMeter {
         }
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.samples.clear();
     }
 
-    fn eta(&self, remaining: u64) -> Option<u64> {
+    pub(crate) fn eta(&self, remaining: u64) -> Option<u64> {
         let (t0, b0) = self.samples.front()?;
         let (t1, b1) = self.samples.back()?;
         let secs = t1.duration_since(*t0).as_secs_f64();
@@ -467,9 +509,12 @@ struct Running {
 /// 終了時 (完了・一時停止・失敗) に最後の段階を渡す
 type FinishHook = Arc<dyn Fn(Stage) + Send + Sync>;
 
+/// 選択中のモデル (models::ModelManager)。セットアップの model はこれを取る
+pub type SelectedModel = Arc<dyn Fn() -> HfModel + Send + Sync>;
+
 pub struct Provisioner {
     paths: DataPaths,
-    model: HfModel,
+    model: SelectedModel,
     http: reqwest::Client,
     runtime: Arc<dyn RuntimeStep>,
     verify: Arc<dyn VerifyStep>,
@@ -495,18 +540,19 @@ impl Drop for Suspended {
 impl Provisioner {
     pub fn new(
         paths: DataPaths,
-        model: HfModel,
+        model: SelectedModel,
         runtime: Arc<dyn RuntimeStep>,
         verify: Arc<dyn VerifyStep>,
         emit: impl Fn(&ProvisioningStatus) + Send + Sync + 'static,
     ) -> anyhow::Result<Arc<Self>> {
         let rec = Provisioned::load(&paths.provisioned());
+        let selected = model();
         let p = plan(
             &rec,
             runtime.version().as_deref(),
             runtime.is_present(),
-            &model.version(),
-            model_present(&paths, &model),
+            &selected.version(),
+            model_present(&paths, &selected),
         );
         let status = ProvisioningStatus::new([!p.runtime, !p.model, !p.verify]);
         Ok(Arc::new(Self {
@@ -693,16 +739,21 @@ impl Provisioner {
     async fn run_steps(self: &Arc<Self>, cancel: &Cancel) -> Result<(), StepError> {
         let sh = &self.shared;
         let path = self.paths.provisioned();
-        let mut rec = Provisioned::load(&path);
+        let rec = Provisioned::load(&path);
         let runtime_version = self.runtime.version();
-        let model_version = self.model.version();
+        // 実行中に選択が変わることはない (モデルの操作はセットアップ完了後のみ)
+        let model = (self.model)();
+        let model_version = model.version();
         let p = plan(
             &rec,
             runtime_version.as_deref(),
             self.runtime.is_present(),
             &model_version,
-            model_present(&self.paths, &self.model),
+            model_present(&self.paths, &model),
         );
+        let update = |f: &mut dyn FnMut(&mut Provisioned)| {
+            Provisioned::update(&path, |r| f(r)).map_err(|e| failed(SAVE_ERROR, e))
+        };
         log::info!("セットアップ開始: {p:?}");
         sh.update_now(|s| {
             s.error = None;
@@ -722,9 +773,9 @@ impl Provisioner {
 
         // 取得するモデルの一覧を先に求め、全体の大きさを最初から出す
         let files = if p.model {
-            let files = hf::list_files(&self.http, &self.model, cancel).await?;
+            let files = hf::list_files(&self.http, &model, cancel).await?;
             let total: u64 = files.iter().map(|f| f.size).sum();
-            let cache = Cache::new(&self.model, &self.paths.models());
+            let cache = Cache::new(&model, &self.paths.models());
             let on_disk = cache.bytes_on_disk(&files);
             sh.update_now(|s| {
                 let it = s.item(ItemId::Model);
@@ -739,33 +790,35 @@ impl Provisioner {
         if p.runtime {
             self.begin(ItemId::Runtime, Stage::Runtime);
             // 版の違う記録を先に消す (途中で止まった時に古い版のまま済み扱いにしない)
-            rec.runtime = None;
-            rec.verify = None;
-            rec.save(&path).map_err(|e| failed(SAVE_ERROR, e))?;
+            update(&mut |r| {
+                r.runtime = None;
+                r.verify = None;
+            })?;
             self.runtime.install(cancel.clone()).await?;
             let version = match &runtime_version {
                 Some(v) => v.clone(),
                 None => self.runtime.version().unwrap_or_else(|| "unknown".into()),
             };
-            rec.runtime = Some(StepRecord {
+            let mut record = Some(StepRecord {
                 version,
                 completed_at: now_secs(),
             });
-            rec.save(&path).map_err(|e| failed(SAVE_ERROR, e))?;
+            update(&mut |r| r.runtime = record.take())?;
             self.finish(ItemId::Runtime);
         }
 
         if let Some(files) = files {
             self.begin(ItemId::Model, Stage::Model);
-            rec.model = None;
-            rec.verify = None;
-            rec.save(&path).map_err(|e| failed(SAVE_ERROR, e))?;
-            let cache = Cache::new(&self.model, &self.paths.models());
+            update(&mut |r| {
+                r.models.remove(&model_version);
+                r.verify = None;
+            })?;
+            let cache = Cache::new(&model, &self.paths.models());
             let shared = sh.clone();
             let progress = move |delta: i64| shared.add_bytes(ItemId::Model, delta);
             Downloader {
                 http: &self.http,
-                model: &self.model,
+                model: &model,
                 cache: &cache,
                 cancel,
                 progress: &progress,
@@ -778,27 +831,35 @@ impl Provisioner {
                     anyhow!("スナップショットが揃っていない"),
                 ));
             }
-            rec.model = Some(StepRecord {
-                version: model_version.clone(),
-                completed_at: now_secs(),
-            });
-            rec.save(&path).map_err(|e| failed(SAVE_ERROR, e))?;
+            if let Err(e) = cache.prune_other_revisions(&files) {
+                // 古い版が残るだけで動作には影響しない
+                log::warn!("古い版のモデルを消せません: {e:#}");
+            }
+            update(&mut |r| {
+                r.models.insert(
+                    model_version.clone(),
+                    ModelRecord {
+                        completed_at: now_secs(),
+                    },
+                );
+            })?;
             self.finish(ItemId::Model);
         }
 
         if p.verify {
             self.begin(ItemId::Verify, Stage::Verify);
             self.verify.verify(cancel.clone()).await?;
-            rec.verify = Some(VerifyRecord {
-                runtime: rec
-                    .runtime
-                    .as_ref()
-                    .map(|r| r.version.clone())
-                    .unwrap_or_default(),
-                model: model_version,
-                completed_at: now_secs(),
-            });
-            rec.save(&path).map_err(|e| failed(SAVE_ERROR, e))?;
+            update(&mut |r| {
+                r.verify = Some(VerifyRecord {
+                    runtime: r
+                        .runtime
+                        .as_ref()
+                        .map(|r| r.version.clone())
+                        .unwrap_or_default(),
+                    model: model_version.clone(),
+                    completed_at: now_secs(),
+                });
+            })?;
             self.finish(ItemId::Verify);
         }
         Ok(())
@@ -823,16 +884,16 @@ impl Provisioner {
     }
 }
 
-const SAVE_ERROR: &str = "セットアップの状態を保存できません";
+pub(crate) const SAVE_ERROR: &str = "セットアップの状態を保存できません";
 
-fn model_present(paths: &DataPaths, model: &HfModel) -> bool {
+pub fn model_present(paths: &DataPaths, model: &HfModel) -> bool {
     model
         .snapshot_dir(&paths.models())
         .join("config.json")
         .is_file()
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 #[cfg(test)]

@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { commands, runCommand, type AppStatus } from "@/lib/ipc";
 import { Card, FieldError, FieldHeading, TitleWithSub, type SectionProps } from "./common";
+import { ModelList } from "./ModelList";
 
 function modelState(status: AppStatus | null): { tone: BadgeTone; label: string; sub: string } {
   if (!status) return { tone: "neutral", label: "確認中", sub: "" };
@@ -72,6 +73,7 @@ export function RecognitionSection({
           {model.label}
         </Badge>
       </Card>
+      <ModelList />
       <div className="flex flex-col gap-2.5">
         <FieldHeading
           label="語彙ヒント"

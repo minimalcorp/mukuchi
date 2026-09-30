@@ -143,7 +143,7 @@ test("setup: complete_setup の失敗を表示する", async ({ page }) => {
 
 test("settings: 実行環境とモデルを削除すると使用量を取り直し、セットアップへの案内を出す", async ({ page }) => {
   await open(page, "window=settings&mock=default&category=storage", SETTINGS);
-  await expect(page.getByText("3.6 GB")).toBeVisible();
+  await expect(page.getByText("3.4 GB")).toBeVisible();
   await expect(page.getByTestId("runtime-missing")).toHaveCount(0);
   await page.getByRole("button", { name: "削除", exact: true }).click();
   const dialog = page.getByRole("dialog");

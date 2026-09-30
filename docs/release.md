@@ -119,6 +119,7 @@ Environment `production-release` (Required reviewers で承認制。作成は `.
 - `Rust (fmt, clippy, test)`
 - `Frontend (lint, build, e2e)`
 - `ASR server (ruff, pytest)`
+- `Web (lint, typecheck, build)`
 
 ## 確認コマンド (`make verify` の内容)
 

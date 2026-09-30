@@ -20,6 +20,7 @@ import {
   RotateCw,
   ShieldCheck,
 } from "lucide-react";
+import { AppLogo } from "@/components/app/app-logo";
 import { TrafficLights, WindowFrame } from "@/components/app/window-frame";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -130,14 +131,6 @@ function Title({ large = false, children }: { large?: boolean; children: ReactNo
   );
 }
 
-function AppMark() {
-  return (
-    <div className="flex size-11 items-center justify-center rounded-[10px] bg-gray-900 text-gray-0 dark:bg-gray-700">
-      <Mic size={20} aria-hidden />
-    </div>
-  );
-}
-
 /* ---------- 1. ようこそ ---------- */
 
 function WelcomeStep({ provisioning, onNext }: { provisioning: ProvisioningStatus | null; onNext: () => void }) {
@@ -146,7 +139,7 @@ function WelcomeStep({ provisioning, onNext }: { provisioning: ProvisioningStatu
   return (
     <>
       <StepBody hero>
-        <AppMark />
+        <AppLogo size={44} />
         <Title large>mukuchi へようこそ</Title>
         <p className="m-0 text-md leading-[1.6] text-fg-body">
           画面下のパネルで音声入力をオンにすると、話した内容が前面のアプリに入力されます。

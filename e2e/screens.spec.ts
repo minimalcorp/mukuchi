@@ -54,6 +54,7 @@ const cases: Case[] = [
   { name: "setup-3-download-done", query: "window=setup&mock=download-done", texts: ["実行環境とモデルの準備ができました"], viewport: SETUP },
   { name: "setup-4-test", query: "window=setup&mock=test", texts: ["試しに話してみてください", "Enter を送信", "正しく認識できました。"], viewport: SETUP },
   { name: "setup-5-done", query: "window=setup&mock=done", texts: ["準備ができました", "ログイン時に起動", "閉じる"], viewport: SETUP },
+  { name: "setup-1-welcome-dark", query: "window=setup&mock=default", texts: ["mukuchi へようこそ"], viewport: SETUP, dark: true },
   { name: "setup-2-permissions-dark", query: "window=setup&mock=permissions", texts: ["権限を許可してください"], viewport: SETUP, dark: true },
 
   // ---- 設定 (05) ----
@@ -66,6 +67,7 @@ const cases: Case[] = [
   { name: "settings-storage", query: "window=settings&mock=default&category=storage", texts: ["3.6 GB", "使用中", "モデル", "12 MB", "完全にアンインストール"], viewport: SETTINGS },
   { name: "settings-storage-runtime-missing", query: "window=settings&mock=runtime-missing&category=storage", texts: ["12 MB", "実行環境とモデルがありません。", "セットアップを開く"], viewport: SETTINGS },
   { name: "settings-about", query: "window=settings&mock=default&category=about", texts: ["mukuchi", "バージョン 0.1.0（build 42）", "ライセンス", "Finder で開く"], viewport: SETTINGS },
+  { name: "settings-about-dark", query: "window=settings&mock=default&category=about", texts: ["ライセンス"], viewport: SETTINGS, dark: true },
   { name: "settings-voice-dark", query: "window=settings&mock=default&category=voice", texts: ["発話検出の感度"], viewport: SETTINGS, dark: true },
   { name: "settings-commands-dark", query: "window=settings&mock=default&category=commands", texts: ["音声コマンドを使う"], viewport: SETTINGS, dark: true },
 ];
@@ -267,4 +269,13 @@ test("panel: 理由が長くてもメーターを潰さず、文言を省略す�
   const card = await page.getByTestId("panel-card").boundingBox();
   const status = await page.getByRole("status").boundingBox();
   expect(status!.x + status!.width).toBeLessThanOrEqual(card!.x + card!.width);
+});
+
+test("ロゴタイルに mukuchi のロゴ画像が読み込まれる", async ({ page }) => {
+  for (const query of ["window=settings&mock=default&category=about", "window=setup&mock=default"]) {
+    await open(page, { name: "", query, texts: [], viewport: query.startsWith("window=setup") ? SETUP : SETTINGS });
+    const logo = page.getByRole("img", { name: "mukuchi" });
+    await expect(logo).toBeVisible();
+    expect(await logo.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
+  }
 });

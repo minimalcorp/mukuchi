@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, FolderOpen, Mic } from "lucide-react";
+import { ChevronRight, FolderOpen } from "lucide-react";
+import { AppLogo } from "@/components/app/app-logo";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { commands, runCommand, type AppInfo } from "@/lib/ipc";
@@ -17,9 +18,7 @@ export function AboutSection() {
   return (
     <>
       <div className="flex items-center gap-3.5">
-        <div className="flex size-12 items-center justify-center rounded-[10px] bg-gray-900 text-gray-0 dark:bg-gray-700">
-          <Mic size={20} aria-hidden />
-        </div>
+        <AppLogo size={48} />
         <div className="flex flex-col gap-0.5">
           <span className="text-lg leading-[1.4] font-semibold text-fg-strong">mukuchi</span>
           <span className="font-mono text-xs text-fg-muted">

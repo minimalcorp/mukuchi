@@ -2,10 +2,22 @@
  * 開発用モック (npm run dev のブラウザ表示・Playwright 用)。本番ビルドには含まれない。
  * @tauri-apps/api/mocks で IPC とイベントを差し替え、?window= と ?mock= で画面・状態を選ぶ。
  * シナリオ一覧は src/mock/scenarios.ts。
+ * &unimplemented=<command,...> で指定した command を未実装 (`not_implemented:` で reject) にできる。
+ * &slow=<command,...> で指定した command の応答を 500ms 遅らせる (初期値取得と event の順序の確認用)。
  */
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
-import type { AppStatus, AudioLevel, EventMap, EventName, Settings, Utterance, UtteranceResult } from "@/lib/ipc";
+import { invoke } from "@tauri-apps/api/core";
+import type {
+  AppStatus,
+  AudioLevel,
+  EventMap,
+  EventName,
+  Settings,
+  SettingsCategory,
+  Utterance,
+  UtteranceResult,
+} from "@/lib/ipc";
 import { devOverrides } from "@/lib/env";
 import { findScenario } from "./scenarios";
 import { createDb, provisioning, GB, type MockDb } from "./data";
@@ -25,6 +37,12 @@ export function installMock(params: URLSearchParams) {
   devOverrides.setupStep = step;
 
   mockWindows(windowLabel, "panel", "settings", "setup");
+  // Rust の現状に合わせて未実装の command を指定できる
+  const unimplemented = new Set([
+    ...(scenario.unimplemented ?? []),
+    ...(params.get("unimplemented")?.split(",").filter(Boolean) ?? []),
+  ]);
+  const slow = new Set(params.get("slow")?.split(",").filter(Boolean) ?? []);
 
   let scriptStarted = false;
   let levelTimer: ReturnType<typeof setInterval> | null = null;
@@ -35,7 +53,7 @@ export function installMock(params: URLSearchParams) {
     fire("status-changed", db.status);
   };
 
-  // 入力レベルを 20Hz で流す。静止シナリオでは同じ値を流し続ける (購読が後から始まっても表示されるように)
+  // 入力レベルを約15Hz で流す。静止シナリオでは同じ値を流し続ける (購読が後から始まっても表示されるように)
   const startLevel = () => {
     if (levelTimer) return;
     let t = 0;
@@ -45,12 +63,14 @@ export function installMock(params: URLSearchParams) {
       const jitter = db.levelStream ? (Math.sin(t / 2) + Math.sin(t / 3.7)) * 0.06 : 0;
       const level: AudioLevel = { ...base, level: Math.min(1, Math.max(0, base.level + jitter)) };
       fire("audio-level", level);
-    }, 50);
+    }, 66);
   };
   startLevel();
 
   const api: MockApi = {
     db,
+    calls: [],
+    invoke: (cmd, args) => invoke(cmd, args),
     setStatus,
     fire,
     started: (id) => fire("utterance-started", { id }),
@@ -88,6 +108,17 @@ export function installMock(params: URLSearchParams) {
   mockIPC(
     async (cmd, args) => {
       const a = (args ?? {}) as Record<string, unknown>;
+      if (!cmd.startsWith("plugin:")) api.calls.push({ cmd, args: a });
+      if (unimplemented.has(cmd)) {
+        // Rust と同じく文字列で reject する
+        return Promise.reject(`not_implemented: ${cmd} は未実装です`);
+      }
+      if (slow.has(cmd)) {
+        // 応答時点の値ではなく、呼ばれた時点の値を返す (遅れて届く古い応答を再現する)
+        const snapshot = cmd === "get_status" ? db.status : undefined;
+        await new Promise((r) => setTimeout(r, 500));
+        if (snapshot) return snapshot;
+      }
       switch (cmd) {
         case "get_status":
           if (!scriptStarted && scenario.script) {
@@ -170,8 +201,14 @@ export function installMock(params: URLSearchParams) {
             { bundleId: "com.apple.Terminal", name: "ターミナル" },
             { bundleId: "com.microsoft.VSCode", name: "Visual Studio Code" },
           ];
-        case "open_logs_folder":
         case "open_settings":
+          // Rust は設定ウィンドウが開いていれば前面に出して settings-navigate を送る
+          if (windowLabel === "settings" && a.category) {
+            fire("settings-navigate", { category: a.category as SettingsCategory });
+          }
+          return null;
+        case "set_panel_size":
+        case "open_logs_folder":
         case "complete_setup":
           return null;
         case "get_app_info":
@@ -190,6 +227,10 @@ export function installMock(params: URLSearchParams) {
 
 export type MockApi = {
   db: MockDb;
+  /** 呼ばれた command と引数 (plugin:* を除く)。Playwright から確認する */
+  calls: { cmd: string; args: Record<string, unknown> }[];
+  /** Tauri の invoke (他ウィンドウからの command 呼び出しを再現する) */
+  invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
   setStatus: (patch: Partial<AppStatus>) => void;
   fire: typeof fire;
   started: (id: number) => void;

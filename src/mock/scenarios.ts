@@ -15,7 +15,20 @@ export type Scenario = {
   step?: number;
   setup?: (db: MockDb) => void;
   script?: (api: MockApi) => void;
+  /** 未実装 (`not_implemented:` で reject) にする command */
+  unimplemented?: string[];
 };
+
+/** P2 時点で Rust が未実装の command (P4 で実装) */
+const P4_COMMANDS = [
+  "get_provisioning_status",
+  "start_provisioning",
+  "pause_provisioning",
+  "get_storage_usage",
+  "delete_runtime_and_model",
+  "get_uninstall_targets",
+  "uninstall",
+];
 
 const TEXT = "明日の打ち合わせは十時からに変更してください。";
 const THRESHOLD = 0.55;
@@ -305,6 +318,12 @@ const SETUP: Scenario[] = [
       }, 600);
     },
   },
+  {
+    name: "download-unimplemented",
+    step: 3,
+    description: "ダウンロードが未実装 (P4 まで)",
+    unimplemented: P4_COMMANDS,
+  },
   { name: "test-empty", step: 4, description: "動作テスト (まだ話していない)", setup: (db) => listening(db, 0.1) },
   { name: "done", step: 5, description: "完了" },
 ];
@@ -335,6 +354,14 @@ const SETTINGS: Scenario[] = [
   {
     name: "asr-stopped",
     description: "文字起こしサーバー停止",
+    setup: (db) => {
+      db.status = { phase: "error", loadingProgress: null, error: ERRORS.asr };
+    },
+  },
+  {
+    name: "unimplemented",
+    description: "P4 の command と restart_asr が未実装 (ASR 停止中)",
+    unimplemented: [...P4_COMMANDS, "restart_asr"],
     setup: (db) => {
       db.status = { phase: "error", loadingProgress: null, error: ERRORS.asr };
     },

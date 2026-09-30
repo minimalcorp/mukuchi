@@ -1,6 +1,6 @@
 /*
- * 入力レベル (audio-level, 約20Hz) の外部ストア。
- * React の state に載せるとパネル全体が 20Hz で再描画されるため、
+ * 入力レベル (audio-level, 約15Hz) の外部ストア。
+ * React の state に載せるとパネル全体が 15Hz で再描画されるため、
  * useSyncExternalStore で購読するメーター部分だけを再描画する。
  */
 import { useSyncExternalStore } from "react";

@@ -27,8 +27,16 @@ import { HelpTip } from "@/components/ui/tooltip";
 import { useAudioLevel } from "@/lib/audio-level";
 import { devOverrides } from "@/lib/env";
 import { formatBytes, formatBytesPair, formatEta } from "@/lib/format";
-import { isPermissionsGranted, useAppStatus, usePermissions, useProvisioning, useSettings } from "@/lib/hooks";
-import { commands, subscribeEvents, type Permissions, type ProvisioningStatus } from "@/lib/ipc";
+import {
+  isPermissionsGranted,
+  useAppStatus,
+  usePermissions,
+  useProvisioning,
+  useSettings,
+  useUnimplemented,
+} from "@/lib/hooks";
+import { Unimplemented } from "@/components/app/unimplemented";
+import { commands, runCommand, subscribeEvents, type Permissions, type ProvisioningStatus } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 
 const STEPS = 5;
@@ -225,14 +233,14 @@ function PermissionGuide({ perms, onChange }: { perms: Permissions; onChange: (p
   } else if (perms.microphone === "denied") {
     text = "システム設定のマイクで mukuchi をオンにしてください。許可するとここに自動で反映されます。";
     button = (
-      <Button size="sm" iconRight={ExternalLink} onClick={() => void commands.openSystemSettings("microphone")}>
+      <Button size="sm" iconRight={ExternalLink} onClick={() => runCommand(commands.openSystemSettings("microphone"))}>
         システム設定を開く
       </Button>
     );
   } else {
     text = "システム設定で mukuchi をオンにしてください。許可するとここに自動で反映されます。";
     button = (
-      <Button size="sm" iconRight={ExternalLink} onClick={() => void commands.openSystemSettings("accessibility")}>
+      <Button size="sm" iconRight={ExternalLink} onClick={() => runCommand(commands.openSystemSettings("accessibility"))}>
         システム設定を開く
       </Button>
     );
@@ -259,10 +267,12 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
     // このステップに来た時点で未開始なら開始する
     if (p?.stage === "idle" && !started.current) {
       started.current = true;
-      void commands.startProvisioning();
+      runCommand(commands.startProvisioning());
     }
   }, [p?.stage]);
+  const unimplemented = useUnimplemented("get_provisioning_status", "start_provisioning");
 
+  if (unimplemented) return <DownloadUnimplemented onNext={onNext} />;
   if (!p) return <StepBody>{null}</StepBody>;
 
   const done = p.stage === "done";
@@ -349,7 +359,7 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
               {p.error ?? "ダウンロードに失敗しました。"}
               {resumeBytes > 0 ? `取得済みの ${formatBytes(resumeBytes)} から再開します。` : ""}
             </span>
-            <Button size="sm" iconLeft={RotateCw} onClick={() => void commands.startProvisioning()}>
+            <Button size="sm" iconLeft={RotateCw} onClick={() => runCommand(commands.startProvisioning())}>
               再試行
             </Button>
           </div>
@@ -357,15 +367,37 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
       </StepBody>
       <StepFooter align="between">
         {paused ? (
-          <Button iconLeft={Play} onClick={() => void commands.startProvisioning()}>
+          <Button iconLeft={Play} onClick={() => runCommand(commands.startProvisioning())}>
             再開
           </Button>
         ) : (
-          <Button iconLeft={Pause} disabled={!running} onClick={() => void commands.pauseProvisioning()}>
+          <Button iconLeft={Pause} disabled={!running} onClick={() => runCommand(commands.pauseProvisioning())}>
             一時停止
           </Button>
         )}
         <Button variant="primary" disabled={!done} onClick={onNext}>
+          次へ
+        </Button>
+      </StepFooter>
+    </>
+  );
+}
+
+/** ダウンロードが未実装の版 (開発中)。導入済みの前提で先に進めるようにする */
+function DownloadUnimplemented({ onNext }: { onNext: () => void }) {
+  return (
+    <>
+      <StepBody dense>
+        <Title>実行環境とモデルのダウンロード</Title>
+        <div className="flex items-start gap-2.5 rounded-md bg-surface-muted px-3 py-2.5 text-xs text-fg-body">
+          <CircleAlert size={16} className="mt-0.5 flex-none text-fg-muted" aria-hidden />
+          <span className="flex-1 leading-[1.5]">
+            この版ではダウンロードに未対応です。実行環境とモデルが導入済みであれば、そのまま次へ進めます。
+          </span>
+        </div>
+      </StepBody>
+      <StepFooter>
+        <Button variant="primary" onClick={onNext}>
           次へ
         </Button>
       </StepFooter>
@@ -458,6 +490,7 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
 
 function DoneStep() {
   const [settings, update] = useSettings();
+  const completeUnimplemented = useUnimplemented("complete_setup");
   return (
     <>
       <StepBody hero>
@@ -479,9 +512,15 @@ function DoneStep() {
         />
       </StepBody>
       <StepFooter>
-        <Button variant="primary" onClick={() => void commands.completeSetup()}>
-          閉じる
-        </Button>
+        <Unimplemented active={completeUnimplemented}>
+          <Button
+            variant="primary"
+            disabled={completeUnimplemented}
+            onClick={() => runCommand(commands.completeSetup())}
+          >
+            閉じる
+          </Button>
+        </Unimplemented>
       </StepFooter>
     </>
   );

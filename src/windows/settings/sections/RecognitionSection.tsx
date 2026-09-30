@@ -3,7 +3,9 @@ import { Cpu, Plus, RotateCw, X } from "lucide-react";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { commands, type AppStatus } from "@/lib/ipc";
+import { Unimplemented } from "@/components/app/unimplemented";
+import { useUnimplemented } from "@/lib/hooks";
+import { commands, runCommand, type AppStatus } from "@/lib/ipc";
 import { Card, FieldHeading, TitleWithSub, type SectionProps } from "./common";
 
 function modelState(status: AppStatus | null): { tone: BadgeTone; label: string; sub: string } {
@@ -25,6 +27,7 @@ export function RecognitionSection({ settings, update, status }: SectionProps & 
   const [draft, setDraft] = useState("");
   const vocab = settings.vocabulary;
   const model = modelState(status);
+  const restartUnimplemented = useUnimplemented("restart_asr");
 
   const add = () => {
     const words = draft
@@ -41,9 +44,16 @@ export function RecognitionSection({ settings, update, status }: SectionProps & 
         <Cpu size={20} className="flex-none text-fg-muted" aria-hidden />
         <TitleWithSub title="Qwen3-ASR（日本語追加学習）" sub={model.sub} />
         {status?.error?.code === "asr_stopped" ? (
-          <Button size="sm" iconLeft={RotateCw} onClick={() => void commands.restartAsr()}>
-            再起動
-          </Button>
+          <Unimplemented active={restartUnimplemented}>
+            <Button
+              size="sm"
+              iconLeft={RotateCw}
+              disabled={restartUnimplemented}
+              onClick={() => runCommand(commands.restartAsr())}
+            >
+              再起動
+            </Button>
+          </Unimplemented>
         ) : null}
         <Badge tone={model.tone} dot>
           {model.label}

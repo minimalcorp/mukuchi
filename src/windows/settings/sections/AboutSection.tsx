@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { ChevronRight, FolderOpen, Mic } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { commands, type AppInfo } from "@/lib/ipc";
+import { commands, runCommand, type AppInfo } from "@/lib/ipc";
 // アプリ本体のライセンス。オフラインで表示できるようバンドルに含める
 import licenseText from "../../../../LICENSE?raw";
 import { Card } from "./common";
@@ -37,7 +37,7 @@ export function AboutSection() {
         </div>
         <div className="flex items-center px-3.5 py-2.5">
           <span className="flex-1">ログ</span>
-          <Button size="sm" variant="ghost" iconLeft={FolderOpen} onClick={() => void commands.openLogsFolder()}>
+          <Button size="sm" variant="ghost" iconLeft={FolderOpen} onClick={() => runCommand(commands.openLogsFolder())}>
             Finder で開く
           </Button>
         </div>

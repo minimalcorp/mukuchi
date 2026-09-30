@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { ExternalLink, Keyboard, Mic } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { commands, type Permissions } from "@/lib/ipc";
+import { commands, runCommand, type Permissions } from "@/lib/ipc";
 import { Card, TitleWithSub } from "./common";
 
 export function PermissionsSection({
@@ -82,7 +82,7 @@ function Guide({ text, action }: { text: string; action: ReactNode }) {
 
 function OpenSettingsButton({ pane }: { pane: "microphone" | "accessibility" }) {
   return (
-    <Button size="sm" iconRight={ExternalLink} onClick={() => void commands.openSystemSettings(pane)}>
+    <Button size="sm" iconRight={ExternalLink} onClick={() => runCommand(commands.openSystemSettings(pane))}>
       システム設定を開く
     </Button>
   );

@@ -1,10 +1,12 @@
 /*
  * 設定 (デザイン 05、760×560、サイドバー 200px)。
- * 初期カテゴリは URL の ?category= で指定できる (エラーからの復旧で該当カテゴリを開くため)。
+ * 初期カテゴリは URL の ?category= で指定する (ウィンドウを作る時に Rust が付ける)。
+ * 開いている間は open_settings(category) で Rust から settings-navigate が届き、カテゴリを切り替える。
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { TrafficLights, WindowFrame } from "@/components/app/window-frame";
 import { isPermissionsGranted, useAppStatus, usePermissions, useSettings } from "@/lib/hooks";
+import { subscribeEvents } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { GeneralSection } from "./sections/GeneralSection";
 import { VoiceSection } from "./sections/VoiceSection";
@@ -13,15 +15,24 @@ import { RecognitionSection } from "./sections/RecognitionSection";
 import { PermissionsSection } from "./sections/PermissionsSection";
 import { StorageSection } from "./sections/StorageSection";
 import { AboutSection } from "./sections/AboutSection";
-import { CATEGORIES, type CategoryId } from "./categories";
+import { CATEGORIES, toCategory, type CategoryId } from "./categories";
 
 function initialCategory(): CategoryId {
-  const q = new URLSearchParams(window.location.search).get("category");
-  return CATEGORIES.find((c) => c.id === q)?.id ?? "general";
+  return toCategory(new URLSearchParams(window.location.search).get("category")) ?? "general";
 }
 
 export function SettingsWindow() {
   const [category, setCategory] = useState<CategoryId>(initialCategory);
+  useEffect(
+    () =>
+      subscribeEvents({
+        "settings-navigate": ({ category: next }) => {
+          const c = toCategory(next);
+          if (c) setCategory(c);
+        },
+      }),
+    [],
+  );
   const [settings, updateSettings] = useSettings();
   // システム設定での変更は通知されないことがあるため、開いている間は 1 秒ごとに再取得する
   const [permissions, setPermissions] = usePermissions(1000);

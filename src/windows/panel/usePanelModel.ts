@@ -3,7 +3,7 @@
  * 値・挙動は docs/plans/implementation-plan.md「2. 音声入力の体験」に従う。
  */
 import { useEffect, useReducer, useRef } from "react";
-import { commands, subscribeEvents, type AppStatus, type Utterance, type UtteranceResult } from "@/lib/ipc";
+import { commands, subscribeWithInitial, type AppStatus, type Utterance, type UtteranceResult } from "@/lib/ipc";
 import { resetAudioLevel } from "@/lib/audio-level";
 import { devOverrides } from "@/lib/env";
 
@@ -134,23 +134,17 @@ export function usePanelModel() {
       lastPhase = status.phase;
     };
 
-    const unsubscribe = subscribeEvents(
-      {
-        "status-changed": onStatus,
-        "utterance-started": ({ id }) => dispatch({ type: "started", id }),
-        "utterance-partial": (u) => dispatch({ type: "partial", u }),
-        "utterance-result": (r) => {
-          dispatch({ type: "result", r });
-          if (r.kind !== "empty" && r.kind !== "discarded") {
-            later(r.kind === "failed" ? FAILED_DISPLAY_MS : RESULT_DISPLAY_MS, { type: "expire", id: r.id });
-          }
-        },
+    // 購読してから初期値を取る (取りこぼし防止)。初期値より新しい status-changed が先に届いた場合は初期値を捨てる
+    const unsubscribe = subscribeWithInitial("status-changed", commands.getStatus, onStatus, {
+      "utterance-started": ({ id }) => dispatch({ type: "started", id }),
+      "utterance-partial": (u) => dispatch({ type: "partial", u }),
+      "utterance-result": (r) => {
+        dispatch({ type: "result", r });
+        if (r.kind !== "empty" && r.kind !== "discarded") {
+          later(r.kind === "failed" ? FAILED_DISPLAY_MS : RESULT_DISPLAY_MS, { type: "expire", id: r.id });
+        }
       },
-      // 購読してから初期値を取る (取りこぼし防止)
-      () => {
-        commands.getStatus().then(onStatus, () => {});
-      },
-    );
+    });
     return () => {
       unsubscribe();
       timerSet.forEach(clearTimeout);

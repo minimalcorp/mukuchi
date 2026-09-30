@@ -136,6 +136,7 @@ type ProvisioningStatus = {
 type StorageUsage = { runtimeBytes: number; modelBytes: number; otherBytes: number };
 type AudioDevice = { id: string; name: string; isDefault: boolean };
 type AppInfo = { version: string; build: string };
+type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "permissions" | "storage" | "about";
 ```
 
 #### commands
@@ -161,18 +162,21 @@ type AppInfo = { version: string; build: string };
 | `list_running_apps` | → `{ bundleId: string; name: string }[]` | 入力しないアプリの追加候補 |
 | `open_logs_folder` | → `()` | Finderで開く |
 | `get_app_info` | → `AppInfo` | |
-| `open_settings` | `{ category?: string }` → `()` | エラー復旧から該当カテゴリを開く |
+| `open_settings` | `{ category?: SettingsCategory }` → `()` | 設定ウィンドウを開く(開いていれば前面に出し `settings-navigate` を送る)。エラー復旧から該当カテゴリを開く |
+| `set_panel_size` | `{ width: number; height: number }` → `()` | panelの描画内容(影の余白込み)の大きさ。Rustはpanelウィンドウをこの大きさにし、下端中央を基準位置に保つ(透明部分がクリックを奪わないようにするため) |
 | `complete_setup` | → `()` | セットアップ完了(setupウィンドウを閉じる) |
+| `open_setup` | → `()` | セットアップウィンドウを開く(エラー `start_setup` の復旧・実行環境の再導入) |
 
 #### events (Rust → 全ウィンドウ)
 
 | event | payload | 頻度・備考 |
 |---|---|---|
 | `status-changed` | `AppStatus` | 状態遷移時 |
-| `audio-level` | `{ level: number; threshold: number; speech: boolean }` (0..1) | ON中のみ、約20Hz。levelはRMSを表示用に正規化、thresholdは感度から求めたしきい値の位置 |
+| `audio-level` | `{ level: number; threshold: number; speech: boolean }` (0..1) | ON中のみ、約15Hz (VADフレーム2つごと)。levelはRMSを表示用に正規化、thresholdは感度から求めたしきい値の位置 |
 | `utterance-started` | `{ id: number }` | 発話検出。前の発話の確定処理中に次の発話が始まることがある(idで区別) |
 | `utterance-partial` | `Utterance` | リアルタイムプレビュー |
 | `utterance-result` | `UtteranceResult` | 最終結果と入力結果 |
 | `settings-changed` | `Settings` | 他ウィンドウからの変更の反映 |
+| `settings-navigate` | `{ category: SettingsCategory }` | settingsウィンドウ宛。表示中のカテゴリを切り替える |
 | `permissions-changed` | `Permissions` | 権限の変化を検知した時 |
 | `provisioning-progress` | `ProvisioningStatus` | 約4Hz |

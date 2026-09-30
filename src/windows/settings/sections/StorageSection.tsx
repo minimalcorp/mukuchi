@@ -1,14 +1,21 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { formatBytes } from "@/lib/format";
-import { commands, type StorageUsage, type UninstallTarget } from "@/lib/ipc";
+import { Unimplemented } from "@/components/app/unimplemented";
+import { errorMessage, useUnimplemented } from "@/lib/hooks";
+import { commands, isNotImplemented, type StorageUsage, type UninstallTarget } from "@/lib/ipc";
 import { Card, TitleWithSub } from "./common";
 
 export function StorageSection() {
   const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [confirm, setConfirm] = useState<"delete" | "uninstall" | null>(null);
+  const closeConfirm = useCallback(() => setConfirm(null), []);
+  // 容量の取得・削除・アンインストールは同時に実装される (P4) ため、どれかが未実装なら全部を未対応として示す
+  const deleteUnimplemented = useUnimplemented("get_storage_usage", "delete_runtime_and_model");
+  const uninstallUnimplemented = useUnimplemented("get_storage_usage", "get_uninstall_targets", "uninstall");
   const refresh = () => {
+    // 未実装なら容量は「—」のまま、操作を「未対応」にする (useUnimplemented)
     commands.getStorageUsage().then(setUsage, () => {});
   };
   useEffect(refresh, []);
@@ -59,26 +66,39 @@ export function StorageSection() {
             title="実行環境とモデルのみ削除"
             sub="設定は残ります。次回オンにしたときに再ダウンロードします。"
           />
-          <Button size="sm" disabled={!usage || usage.runtimeBytes + usage.modelBytes === 0} onClick={() => setConfirm("delete")}>
-            削除
-          </Button>
+          <Unimplemented active={deleteUnimplemented}>
+            <Button
+              size="sm"
+              disabled={deleteUnimplemented || !usage || usage.runtimeBytes + usage.modelBytes === 0}
+              onClick={() => setConfirm("delete")}
+            >
+              削除
+            </Button>
+          </Unimplemented>
         </div>
         <div className="flex items-center gap-3 px-3.5 py-3">
           <TitleWithSub title="完全にアンインストール" sub="すべてのデータとアプリ本体を削除します。" />
-          <Button size="sm" variant="danger" onClick={() => setConfirm("uninstall")}>
-            アンインストール…
-          </Button>
+          <Unimplemented active={uninstallUnimplemented}>
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={uninstallUnimplemented}
+              onClick={() => setConfirm("uninstall")}
+            >
+              アンインストール…
+            </Button>
+          </Unimplemented>
         </div>
       </Card>
       <DeleteRuntimeDialog
         open={confirm === "delete"}
-        onClose={() => setConfirm(null)}
+        onClose={closeConfirm}
         onDone={() => {
           setConfirm(null);
           refresh();
         }}
       />
-      <UninstallDialog open={confirm === "uninstall"} onClose={() => setConfirm(null)} />
+      <UninstallDialog open={confirm === "uninstall"} onClose={closeConfirm} />
     </>
   );
 }
@@ -86,11 +106,13 @@ export function StorageSection() {
 function ConfirmLayout({
   title,
   description,
+  error,
   children,
   actions,
 }: {
   title: string;
   description: string;
+  error?: string | null;
   children?: ReactNode;
   actions: ReactNode;
 }) {
@@ -101,6 +123,11 @@ function ConfirmLayout({
         <DialogDescription className="m-0 text-sm text-fg-muted">{description}</DialogDescription>
       </div>
       {children ?? <div className="h-3.5" />}
+      {error ? (
+        <p role="alert" className="mx-5 mt-0 mb-3.5 text-xs leading-[1.5] text-fg-danger">
+          {error}
+        </p>
+      ) : null}
       <div className="flex justify-end gap-2 px-5 pb-5">{actions}</div>
     </>
   );
@@ -108,15 +135,21 @@ function ConfirmLayout({
 
 function DeleteRuntimeDialog({ open, onClose, onDone }: { open: boolean; onClose: () => void; onDone: () => void }) {
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const close = () => {
+    setError(null);
+    onClose();
+  };
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && !busy && onClose()}>
+    <Dialog open={open} onOpenChange={(o) => !o && !busy && close()}>
       <DialogContent>
         <ConfirmLayout
           title="実行環境とモデルを削除しますか？"
           description="設定は残ります。次回オンにしたときに再ダウンロードします。"
+          error={error}
           actions={
             <>
-              <Button disabled={busy} onClick={onClose}>
+              <Button disabled={busy} onClick={close}>
                 キャンセル
               </Button>
               <Button
@@ -124,9 +157,14 @@ function DeleteRuntimeDialog({ open, onClose, onDone }: { open: boolean; onClose
                 loading={busy}
                 onClick={() => {
                   setBusy(true);
+                  setError(null);
                   commands
                     .deleteRuntimeAndModel()
-                    .then(onDone, () => {})
+                    .then(onDone, (e: unknown) => {
+                      // 未実装なら閉じる (削除ボタンが「未対応」表示になる)
+                      if (isNotImplemented(e)) close();
+                      else setError(errorMessage(e));
+                    })
                     .finally(() => setBusy(false));
                 }}
               >
@@ -143,19 +181,30 @@ function DeleteRuntimeDialog({ open, onClose, onDone }: { open: boolean; onClose
 function UninstallDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [targets, setTargets] = useState<UninstallTarget[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const close = () => {
+    setError(null);
+    onClose();
+  };
   useEffect(() => {
-    if (open) commands.getUninstallTargets().then(setTargets, () => setTargets([]));
-  }, [open]);
+    if (!open) return;
+    commands.getUninstallTargets().then(setTargets, (e: unknown) => {
+      // 削除対象を示せない状態ではアンインストールさせない
+      if (isNotImplemented(e)) onClose();
+      else setError(errorMessage(e));
+    });
+  }, [open, onClose]);
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && !busy && onClose()}>
+    <Dialog open={open} onOpenChange={(o) => !o && !busy && close()}>
       <DialogContent>
         <ConfirmLayout
           title="mukuchi を完全にアンインストールしますか？"
           description="以下を削除します。この操作は取り消せません。"
+          error={error}
           actions={
             <>
-              <Button disabled={busy} onClick={onClose}>
+              <Button disabled={busy} onClick={close}>
                 キャンセル
               </Button>
               <Button
@@ -165,7 +214,12 @@ function UninstallDialog({ open, onClose }: { open: boolean; onClose: () => void
                 onClick={() => {
                   // 完了するとアプリは終了する
                   setBusy(true);
-                  commands.uninstall().catch(() => setBusy(false));
+                  setError(null);
+                  commands.uninstall().catch((e: unknown) => {
+                    setBusy(false);
+                    if (isNotImplemented(e)) close();
+                    else setError(errorMessage(e));
+                  });
                 }}
               >
                 アンインストール
@@ -188,7 +242,9 @@ function UninstallDialog({ open, onClose }: { open: boolean; onClose: () => void
                 <span className="tabular flex-none text-fg-muted">{formatBytes(t.bytes)}</span>
               </div>
             ))}
-            {targets === null ? <div className="px-2.5 py-[7px] text-fg-muted">確認しています…</div> : null}
+            {targets === null && !error ? (
+              <div className="px-2.5 py-[7px] text-fg-muted">確認しています…</div>
+            ) : null}
           </div>
         </ConfirmLayout>
       </DialogContent>

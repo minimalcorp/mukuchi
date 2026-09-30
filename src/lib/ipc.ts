@@ -97,31 +97,97 @@ export type AppInfo = { version: string; build: string };
 export type UninstallTarget = { path: string; bytes: number };
 export type RunningApp = { bundleId: string; name: string };
 export type AudioLevel = { level: number; threshold: number; speech: boolean };
+export type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "permissions" | "storage" | "about";
+
+// ---------- エラー ----------
+
+/** Rust は表示用の日本語メッセージで reject し、未実装の command は `not_implemented:` で始まる文字列を返す */
+const NOT_IMPLEMENTED_PREFIX = "not_implemented:";
+
+export class IpcError extends Error {
+  readonly command: string;
+  readonly notImplemented: boolean;
+  constructor(command: string, message: string) {
+    super(message);
+    this.name = "IpcError";
+    this.command = command;
+    this.notImplemented = message.startsWith(NOT_IMPLEMENTED_PREFIX);
+  }
+}
+
+export function isNotImplemented(e: unknown): boolean {
+  return e instanceof IpcError && e.notImplemented;
+}
+
+// 未実装と分かった command。操作を無効化して「未対応」と示すために、一度 reject されたら覚えておく
+const unimplemented = new Set<string>();
+const unimplementedListeners = new Set<() => void>();
+let unimplementedVersion = 0;
+
+export const unimplementedStore = {
+  has: (command: string) => unimplemented.has(command),
+  subscribe(listener: () => void) {
+    unimplementedListeners.add(listener);
+    return () => {
+      unimplementedListeners.delete(listener);
+    };
+  },
+  /** useSyncExternalStore 用。集合が変わるたびに変わる値 */
+  version: () => unimplementedVersion,
+};
+
+function markUnimplemented(command: string) {
+  if (unimplemented.has(command)) return;
+  unimplemented.add(command);
+  unimplementedVersion += 1;
+  unimplementedListeners.forEach((l) => l());
+}
+
+function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return invoke<T>(command, args).catch((e: unknown) => {
+    const message = typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
+    const err = new IpcError(command, message);
+    if (err.notImplemented) markUnimplemented(command);
+    throw err;
+  });
+}
+
+/**
+ * 結果を待たない操作用。失敗は状態の変化 (status-changed 等) で表示されるため、ここではログだけ残す
+ * (捕捉しないと unhandled rejection になる)。未実装は useUnimplemented で表示するので記録しない。
+ */
+export function runCommand(p: Promise<unknown>): void {
+  p.catch((e: unknown) => {
+    if (!isNotImplemented(e)) console.warn(e);
+  });
+}
 
 // ---------- commands ----------
 
 export const commands = {
-  getStatus: () => invoke<AppStatus>("get_status"),
-  setListening: (on: boolean) => invoke<void>("set_listening", { on }),
-  getSettings: () => invoke<Settings>("get_settings"),
-  updateSettings: (patch: Partial<Settings>) => invoke<Settings>("update_settings", { patch }),
-  listInputDevices: () => invoke<AudioDevice[]>("list_input_devices"),
-  getPermissions: () => invoke<Permissions>("get_permissions"),
-  requestMicrophone: () => invoke<Permissions>("request_microphone"),
-  openSystemSettings: (pane: "microphone" | "accessibility") => invoke<void>("open_system_settings", { pane }),
-  restartAsr: () => invoke<void>("restart_asr"),
-  getProvisioningStatus: () => invoke<ProvisioningStatus>("get_provisioning_status"),
-  startProvisioning: () => invoke<void>("start_provisioning"),
-  pauseProvisioning: () => invoke<void>("pause_provisioning"),
-  getStorageUsage: () => invoke<StorageUsage>("get_storage_usage"),
-  deleteRuntimeAndModel: () => invoke<void>("delete_runtime_and_model"),
-  getUninstallTargets: () => invoke<UninstallTarget[]>("get_uninstall_targets"),
-  uninstall: () => invoke<void>("uninstall"),
-  listRunningApps: () => invoke<RunningApp[]>("list_running_apps"),
-  openLogsFolder: () => invoke<void>("open_logs_folder"),
-  getAppInfo: () => invoke<AppInfo>("get_app_info"),
-  openSettings: (category?: string) => invoke<void>("open_settings", { category }),
-  completeSetup: () => invoke<void>("complete_setup"),
+  getStatus: () => call<AppStatus>("get_status"),
+  setListening: (on: boolean) => call<void>("set_listening", { on }),
+  getSettings: () => call<Settings>("get_settings"),
+  updateSettings: (patch: Partial<Settings>) => call<Settings>("update_settings", { patch }),
+  listInputDevices: () => call<AudioDevice[]>("list_input_devices"),
+  getPermissions: () => call<Permissions>("get_permissions"),
+  requestMicrophone: () => call<Permissions>("request_microphone"),
+  openSystemSettings: (pane: "microphone" | "accessibility") => call<void>("open_system_settings", { pane }),
+  restartAsr: () => call<void>("restart_asr"),
+  getProvisioningStatus: () => call<ProvisioningStatus>("get_provisioning_status"),
+  startProvisioning: () => call<void>("start_provisioning"),
+  pauseProvisioning: () => call<void>("pause_provisioning"),
+  getStorageUsage: () => call<StorageUsage>("get_storage_usage"),
+  deleteRuntimeAndModel: () => call<void>("delete_runtime_and_model"),
+  getUninstallTargets: () => call<UninstallTarget[]>("get_uninstall_targets"),
+  uninstall: () => call<void>("uninstall"),
+  listRunningApps: () => call<RunningApp[]>("list_running_apps"),
+  openLogsFolder: () => call<void>("open_logs_folder"),
+  getAppInfo: () => call<AppInfo>("get_app_info"),
+  openSettings: (category?: SettingsCategory) => call<void>("open_settings", { category }),
+  /** panel の描画内容 (影の余白込み) の大きさ。論理ピクセル (CSS px) */
+  setPanelSize: (width: number, height: number) => call<void>("set_panel_size", { width, height }),
+  completeSetup: () => call<void>("complete_setup"),
 };
 
 // ---------- events ----------
@@ -133,6 +199,7 @@ export type EventMap = {
   "utterance-partial": Utterance;
   "utterance-result": UtteranceResult;
   "settings-changed": Settings;
+  "settings-navigate": { category: SettingsCategory };
   "permissions-changed": Permissions;
   "provisioning-progress": ProvisioningStatus;
 };
@@ -155,16 +222,68 @@ export function subscribeEvents(
   let disposed = false;
   const unlistens: UnlistenFn[] = [];
   const entries = Object.entries(handlers) as [EventName, (p: unknown) => void][];
-  Promise.all(entries.map(([name, h]) => onEvent(name, h as (p: EventMap[typeof name]) => void))).then((fns) => {
-    if (disposed) {
-      fns.forEach((f) => f());
-      return;
-    }
-    unlistens.push(...fns);
-    onReady?.();
-  });
+  // 一部だけ登録に成功した場合も解除できるよう、個別に保持する
+  const pending = entries.map(([name, h]) =>
+    onEvent(name, h as (p: EventMap[typeof name]) => void).then((f) => {
+      if (disposed) f();
+      else unlistens.push(f);
+    }),
+  );
+  Promise.all(pending).then(
+    () => {
+      if (!disposed) onReady?.();
+    },
+    (e: unknown) => console.warn("イベントの購読に失敗しました", e),
+  );
   return () => {
     disposed = true;
     unlistens.forEach((f) => f());
+  };
+}
+
+/**
+ * 状態を表す event を購読してから fetch で現在値を取る (購読前の遷移を取りこぼさないため)。
+ * fetch の応答より後に event が届いていれば、応答は古い可能性があるので捨てる。
+ * ウィンドウが再表示された時 (focus / visibilitychange) も取り直す。
+ * 非表示中や再作成直後に event を取りこぼしても、表示時に現在値へ戻すため。
+ */
+export function subscribeWithInitial<E extends EventName>(
+  event: E,
+  fetch: () => Promise<EventMap[E]>,
+  apply: (value: EventMap[E]) => void,
+  others: { [K in EventName]?: (payload: EventMap[K]) => void } = {},
+): () => void {
+  let disposed = false;
+  // event を受け取るたびに進める。fetch 開始時から変わっていれば、その応答は event より古い可能性がある
+  let seq = 0;
+  const refetch = () => {
+    const at = seq;
+    fetch().then(
+      (v) => {
+        if (!disposed && at === seq) apply(v);
+      },
+      (e: unknown) => {
+        if (!isNotImplemented(e)) console.warn(e);
+      },
+    );
+  };
+  const handlers = {
+    ...others,
+    [event]: (payload: EventMap[E]) => {
+      seq += 1;
+      apply(payload);
+    },
+  } as { [K in EventName]?: (payload: EventMap[K]) => void };
+  const unsubscribe = subscribeEvents(handlers, refetch);
+  const onVisibility = () => {
+    if (document.visibilityState === "visible") refetch();
+  };
+  window.addEventListener("focus", refetch);
+  document.addEventListener("visibilitychange", onVisibility);
+  return () => {
+    disposed = true;
+    unsubscribe();
+    window.removeEventListener("focus", refetch);
+    document.removeEventListener("visibilitychange", onVisibility);
   };
 }

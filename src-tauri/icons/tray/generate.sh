@@ -1,7 +1,8 @@
 #!/bin/bash
 # メニューバーのアイコン (18pt、@1x/@2x の PNG) をロゴ (assets/brand/macos/MenuBarIcon(@2x).png) から作る。
 # 元画像は黒い線 + 白い塗りのため、テンプレート画像 (黒 + アルファ。色は AppKit がメニューバーの明暗に合わせる) に
-# するには「黒さ」をアルファにする (白い塗りは透明になり、線だけが残る)。
+# するには「白さ」をアルファにする (白い塗りが残り、黒い線は透明に抜ける = シルエットに線が切り抜かれた形)。
+# 線だけを残す形より面積が大きく、メニューバーで見やすいため (利用者の要望)。
 #   logo      聞いている (Listening)
 #   logo-off  オフ。デザイン (02 メニューバー) に従い 50% の濃さ
 #   logo-dot  発話中・文字起こし中。右下に小さな点 (周りを切り抜いてロゴと分ける)
@@ -18,14 +19,14 @@ DOT_R=2.5
 DOT_RING=1.5
 
 for scale in 1 2; do
-  # @1x は線が 1px 未満になり灰色に薄まる (最大の濃さ約 78%) ため、濃さを引き上げて線を不透明にする
-  if [ "$scale" = 1 ]; then in="$src/MenuBarIcon.png"; suffix=""; level="0%,75%"; else in="$src/MenuBarIcon@2x.png"; suffix="@2x"; level="0%,100%"; fi
+  # @1x は線が 1px 未満になり灰色に混ざるため、抜いた線が消えないよう明るい側を持ち上げずに少し締める
+  if [ "$scale" = 1 ]; then in="$src/MenuBarIcon.png"; suffix=""; level="25%,100%"; else in="$src/MenuBarIcon@2x.png"; suffix="@2x"; level="0%,100%"; fi
   px=$((18 * scale))
   tmp=$(mktemp -d)
-  # アルファ = 元のアルファ × (1 - 輝度)
+  # アルファ = 元のアルファ × 輝度
   magick "$in" -resize "${px}x${px}!" \
     \( -clone 0 -alpha extract \) \
-    \( -clone 0 -alpha off -colorspace gray -negate \) \
+    \( -clone 0 -alpha off -colorspace gray \) \
     -delete 0 -compose multiply -composite -level "$level" "$tmp/mask.png"
   shape() { magick "$1" -background black -alpha shape -define png:color-type=6 "$2"; }
   shape "$tmp/mask.png" "logo$suffix.png"

@@ -2,10 +2,12 @@
 # 手順・secret の作り方は docs/release.md。
 #
 # job を2つに分ける (scripts/build-macos.sh の --build-only / --sign-only):
-#   build … npm ci・cargo で署名なしの .app を作る。npm・cargo の依存 (postinstall・build.rs 等の第三者のコード) が動くため
-#           secret を一切渡さない (environment も付けない)。.app を tar にして artifact で渡す
+#   build … npm ci・cargo で署名なしの .app と、dmgbuild で .dmg のテンプレート (背景・アイコン位置。.app なし) を作る。
+#           npm・cargo・uv の依存 (postinstall・build.rs 等の第三者のコード) が動くため
+#           secret を一切渡さない (environment も付けない)。両方を tar にして artifact で渡す
 #   sign  … Environment "production-release" (Required reviewers で承認制) で動き、Apple の secret はここにだけ渡す。
-#           依存を入れず、ビルドもしない。受け取った .app を Apple のツールだけで署名・公証し .dmg にする。
+#           依存を入れず、ビルドもしない。受け取った .app を Apple のツールだけで署名・公証し、テンプレートに入れて .dmg にする
+#           (テンプレートは入れる前に scripts/check-dmg-layout.py で余計なファイルがないことを確かめる)。
 #           ビルドした本体を実行する検証 (verify-macos.sh の --print-uv-path) は資格情報を片付けた後に行う
 # 同じ job の別 step にしないのは、ビルド中に起動されたプロセスが job の終わりまで残り、後の step の secret や
 # 解錠したキーチェーンに触れうるため (runner は job の終わりにプロセスを片付ける)
@@ -43,11 +45,11 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - name: npm ci
         run: nix develop -c npm ci
-      - name: Build (.app, unsigned)
+      - name: Build (.app, unsigned + .dmg template)
         run: nix develop -c scripts/build-macos.sh --build-only
       # artifact は zip になり symlink・実行権限が崩れるため tar にしてから渡す
-      - name: Pack .app
-        run: tar -C src-tauri/target/aarch64-apple-darwin/release/bundle/macos -czf "$RUNNER_TEMP/mukuchi-app.tar.gz" mukuchi.app
+      - name: Pack .app and .dmg template
+        run: tar -C src-tauri/target/aarch64-apple-darwin/release/bundle -czf "$RUNNER_TEMP/mukuchi-app.tar.gz" macos/mukuchi.app dmg-template/mukuchi.dmg
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mukuchi-app-unsigned
@@ -73,12 +75,12 @@ jobs:
         with:
           name: mukuchi-app-unsigned
           path: ${{ runner.temp }}
-      - name: Unpack .app
+      - name: Unpack .app and .dmg template
         run: |
           set -euo pipefail
-          dir=src-tauri/target/aarch64-apple-darwin/release/bundle/macos
+          dir=src-tauri/target/aarch64-apple-darwin/release/bundle
           mkdir -p "$dir"
-          tar -C "$dir" -xzf "$RUNNER_TEMP/mukuchi-app.tar.gz"
+          tar -C "$dir" -xzf "$RUNNER_TEMP/mukuchi-app.tar.gz" macos/mukuchi.app dmg-template/mukuchi.dmg
 
       # 一時キーチェーンに証明書を読み込み、検索リストに加える (build-macos.sh は codesign / security find-identity でこれを使う)。
       # 出典: https://docs.github.com/en/actions/use-cases-and-examples/deploying/installing-an-apple-certificate-on-macos-runners-for-xcode-development

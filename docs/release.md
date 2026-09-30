@@ -6,17 +6,28 @@
 ## 流れ (`make build` = `scripts/build-macos.sh`)
 
 1. 資格情報を確認 (無ければビルド前に日本語のエラーで止まる)
-2. `tauri build --bundles app --no-sign` で .app
+2. `tauri build --bundles app --no-sign` で .app。dmgbuild で .dmg のテンプレート (見た目だけ。.app なし) を作る (下記「.dmg の見た目」)
 3. `codesign --options runtime --timestamp --entitlements src-tauri/Entitlements.plist` で .app に署名 (`--deep` なし。同梱 uv `Contents/Helpers/uv` は開発元の署名のまま)
 4. .app を zip にして `notarytool submit --wait` → `stapler staple`
-5. staple 済みの .app と `/Applications` へのリンクを入れた .dmg を `hdiutil` で作成・署名 → 公証 → staple
+5. テンプレートに staple 済みの .app を `hdiutil`・`ditto` で入れて UDZO の .dmg にし、署名 → 公証 → staple
 6. `scripts/verify-macos.sh` (`make verify`)
 
 生成物: `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/mukuchi_<version>_aarch64.dmg`
 
-手順 2 だけを `scripts/build-macos.sh --build-only` (資格情報を見ない)、3〜5 だけを `--sign-only` (Apple のツールのみ。npm・cargo・本体を実行しない。6 は行わない) で実行できる。`make build` は両方を続けて行う。CI はこれを別 job に分け、第三者の依存が動くビルドを secret のない場所で行う。
+手順 2 だけを `scripts/build-macos.sh --build-only` (資格情報を見ない)、3〜5 だけを `--sign-only` (Apple のツールと標準ライブラリだけの python3 のみ。npm・cargo・uv の依存・本体を実行しない。6 は行わない) で実行できる。`make build` は両方を続けて行う。CI はこれを別 job に分け、第三者の依存が動くビルドを secret のない場所で行う。
 
-`make build-local` は手順 2・3 を ad-hoc 署名で行う (公証しない)。`make verify` は ad-hoc の場合 Gatekeeper・公証の項目を SKIP と表示する。
+`make build-local` は手順 2・3 を ad-hoc 署名で行う (公証しない)。`make dmg-local` はそれに加えて .dmg を作る (署名・公証しない。ウィンドウの見た目の確認用)。`make verify` は ad-hoc の場合 Gatekeeper・公証・.dmg の署名の項目を SKIP と表示する。
+
+### .dmg の見た目
+
+開いた時のウィンドウ: 背景 `assets/brand/dmg/background(@2x).png` (660x400pt)、左に mukuchi.app (中心 160,170)、右に Applications へのリンク (中心 500,170)、アイコン 128pt・文字 13pt、ツールバー・サイドバー・ステータスバーなし、アイコン表示・整列なし。ボリューム名 `mukuchi`、ボリュームアイコンはアプリアイコン (`src-tauri/icons/icon.icns`)。
+
+- 設定: `scripts/dmg-settings.py` (dmgbuild の settings)。値を変えたら `scripts/check-dmg-layout.py` の期待値も直す
+- [dmgbuild](https://github.com/dmgbuild/dmgbuild) 1.6.7 を `scripts/run-dmgbuild.py` (uv スクリプト、依存は `scripts/run-dmgbuild.py.lock` に sha256 付きで固定) で動かす。Finder・AppleScript を使わず `.DS_Store` を直接書くため、画面に何も出ずに CI でも動く
+- 背景は `tiffutil -cathidpicheck` で 1x と 2x を1つの TIFF にまとめて渡す (Retina では 2x が使われる)
+- dmgbuild は第三者のコードなので、資格情報のない build 側でテンプレート (`bundle/dmg-template/mukuchi.dmg`、UDRW) だけを作る。sign 側はテンプレートの中身を確かめてから .app を入れる。`hdiutil convert` は同じ HFS+ ボリュームを写すので、`.DS_Store` 内の背景のエイリアスは有効なまま
+- ウィンドウの高さ (`window_rect`) はタイトルバー込みなので 400 + 28pt にしている。macOS 26 はタイトルバーが 32pt で背景の下端 4pt (無地) が隠れる
+- `make verify` は `.DS_Store` を標準ライブラリだけで読み、アイコン位置・表示設定・背景 (1x+2x)・ボリュームアイコン・余計なファイルがないことを確かめる。見た目そのものは Finder で開いて目で確認する
 
 ## 最初に1回だけ行うこと
 
@@ -102,7 +113,7 @@ Environment `production-release` (Required reviewers で承認制。作成は `.
 |---|---|
 | .app | `codesign --verify --deep --strict`、Hardened Runtime、secure timestamp、entitlements がマイクのみ、Info.plist (バンドルID・`LSMinimumSystemVersion` 13.0・マイクの説明文)、`/nix/store` へのリンクなし、`mukuchi --print-uv-path` が `Contents/Helpers/uv`、`spctl -a -vv -t exec` が `Notarized Developer ID`、`stapler validate` |
 | 同梱 uv | 開発元の Developer ID 署名 (Team ID 固定)・Hardened Runtime・timestamp。MacOS/・Helpers/ 以外に Mach-O がない |
-| .dmg | `codesign --verify --strict`、`spctl -a -vv -t open --context context:primary-signature`、`stapler validate`、中の .app が同じ CDHash で staple 済み |
+| .dmg | `codesign --verify --strict`、`spctl -a -vv -t open --context context:primary-signature`、`stapler validate`、中の .app が同じ CDHash で staple 済み、見た目 (`scripts/check-dmg-layout.py`) |
 
 ## 出典
 
@@ -110,4 +121,5 @@ Environment `production-release` (Required reviewers で承認制。作成は `.
 - [Customizing the notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow) / [Resolving common notarization issues](https://developer.apple.com/documentation/security/resolving-common-notarization-issues)
 - [Create Developer ID certificates](https://developer.apple.com/help/account/certificates/create-developer-id-certificates) / [Creating API keys for App Store Connect API](https://developer.apple.com/documentation/appstoreconnectapi/creating-api-keys-for-app-store-connect-api)
 - [Installing an Apple certificate on macOS runners](https://docs.github.com/en/actions/use-cases-and-examples/deploying/installing-an-apple-certificate-on-macos-runners-for-xcode-development)
+- [dmgbuild settings](https://dmgbuild.readthedocs.io/en/latest/settings.html)。HiDPI 背景の扱い・`--no-hidpi`・ボリュームアイコン (`SetFile -a C`) は dmgbuild 1.6.7 のソース (`src/dmgbuild/core.py`, `__main__.py`)
 - Tauri の署名・公証の実装: tauri-cli 2.12.0 (`crates/tauri-bundler/src/bundle/macos/{app,sign}.rs`、`crates/tauri-macos-sign/src/lib.rs`)

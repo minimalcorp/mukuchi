@@ -3,7 +3,8 @@
 #
 # .app の署名を見てモードを決める:
 #   Developer ID … 全項目を検証する (spctl・staple を含む)。.dmg も必須
-#   ad-hoc       … Gatekeeper (spctl)・公証 (stapler) は通らないのが正しいため SKIP と表示する。.dmg は無ければ SKIP
+#   ad-hoc       … Gatekeeper (spctl)・公証 (stapler) は通らないのが正しいため SKIP と表示する。.dmg は無ければ SKIP、
+#                  あれば (make dmg-local。署名しない) 署名・公証以外 (中身・見た目) を検証する
 # 1つでも FAIL があれば終了コード 1。
 # pass は常に成功するため `条件 && pass || fail` で fail が誤って走ることはない
 # shellcheck disable=SC2015
@@ -130,20 +131,24 @@ fi
 dmg=""
 for f in "$BUNDLE_DIR"/dmg/*.dmg; do [ -f "$f" ] && { dmg="$f"; break; }; done
 if [ -z "$dmg" ]; then
-  if [ "$mode" = devid ]; then fail ".dmg がない ($BUNDLE_DIR/dmg/)"; else skip ".dmg の検証 (make build-local は .dmg を作らない)"; fi
+  if [ "$mode" = devid ]; then fail ".dmg がない ($BUNDLE_DIR/dmg/)"; else skip ".dmg の検証 (make build-local は .dmg を作らない。make dmg-local で作る)"; fi
 else
   echo "verify: $dmg"
-  dsig="$(/usr/bin/codesign -dvv "$dmg" 2>&1 || true)"
-  check "dmg: codesign --verify --strict" /usr/bin/codesign --verify --strict --verbose=2 "$dmg"
-  grep -q '^Authority=Developer ID Application:' <<<"$dsig" && grep -q '^Timestamp=' <<<"$dsig" \
-    && pass "dmg: Developer ID 署名 + secure timestamp" || fail "dmg: Developer ID 署名 / secure timestamp がない"
-  out="$(/usr/sbin/spctl -a -vv -t open --context context:primary-signature "$dmg" 2>&1)"
-  if grep -q ': accepted' <<<"$out" && grep -q 'source=Notarized Developer ID' <<<"$out"; then
-    pass "dmg: spctl -t open (Notarized Developer ID)"
+  if [ "$mode" = devid ]; then
+    dsig="$(/usr/bin/codesign -dvv "$dmg" 2>&1 || true)"
+    check "dmg: codesign --verify --strict" /usr/bin/codesign --verify --strict --verbose=2 "$dmg"
+    grep -q '^Authority=Developer ID Application:' <<<"$dsig" && grep -q '^Timestamp=' <<<"$dsig" \
+      && pass "dmg: Developer ID 署名 + secure timestamp" || fail "dmg: Developer ID 署名 / secure timestamp がない"
+    out="$(/usr/sbin/spctl -a -vv -t open --context context:primary-signature "$dmg" 2>&1)"
+    if grep -q ': accepted' <<<"$out" && grep -q 'source=Notarized Developer ID' <<<"$out"; then
+      pass "dmg: spctl -t open (Notarized Developer ID)"
+    else
+      fail "dmg: spctl -t open"; printf '%s\n' "$out" | sed 's/^/        /'
+    fi
+    check "dmg: stapler validate" hostxcrun stapler validate "$dmg"
   else
-    fail "dmg: spctl -t open"; printf '%s\n' "$out" | sed 's/^/        /'
+    skip "dmg: 署名・spctl・stapler (make dmg-local の .dmg は署名しない)"
   fi
-  check "dmg: stapler validate" hostxcrun stapler validate "$dmg"
 
   # 中の .app が今回の .app と同じ署名・staple 済みであること (古い dmg の取り違え防止)。
   # Finder に表示しないよう -nobrowse、書き込まないよう -readonly で一時ディレクトリに繋ぐ
@@ -153,8 +158,13 @@ else
     check "dmg: 中の .app の codesign --verify --deep --strict" /usr/bin/codesign --verify --deep --strict "$inner"
     a="$(/usr/bin/codesign -dvvv "$APP" 2>&1 | grep '^CDHash=')"; b="$(/usr/bin/codesign -dvvv "$inner" 2>&1 | grep '^CDHash=')"
     [ -n "$a" ] && [ "$a" = "$b" ] && pass "dmg: 中の .app = $APP ($a)" || fail "dmg: 中の .app が $APP と違う ($b / $a)"
-    check "dmg: 中の .app の stapler validate" hostxcrun stapler validate "$inner"
-    [ -L "$mnt/Applications" ] && pass "dmg: Applications へのリンク" || fail "dmg: Applications へのリンクがない"
+    if [ "$mode" = devid ]; then
+      check "dmg: 中の .app の stapler validate" hostxcrun stapler validate "$inner"
+    else
+      skip "dmg: 中の .app の stapler validate (ad-hoc は公証しない)"
+    fi
+    # 見える項目 (.app と Applications へのリンクのみ)・背景 (1x+2x)・アイコン位置・ボリュームアイコン
+    check "dmg: 見た目 (scripts/check-dmg-layout.py)" python3 "$root/scripts/check-dmg-layout.py" "$mnt"
     /usr/bin/hdiutil detach -quiet "$mnt" || /usr/bin/hdiutil detach -force -quiet "$mnt"
   else
     fail "dmg: hdiutil attach できない"

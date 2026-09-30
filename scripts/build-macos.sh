@@ -4,10 +4,13 @@
 #   scripts/build-macos.sh               Developer ID 署名 + Hardened Runtime + 公証 + staple の .dmg (make build)。
 #                                        --build-only と --sign-only を続けて行い、最後に make verify 相当
 #   scripts/build-macos.sh --local       ad-hoc 署名の .app (make build-local。公証しない)
-#   scripts/build-macos.sh --build-only  署名なしの .app を作るだけ (資格情報を見ない・要らない)
-#   scripts/build-macos.sh --sign-only   既存の .app を署名 → 公証・staple → .dmg 作成・署名 → 公証・staple。
-#                                        Apple のツール (codesign/notarytool/stapler/hdiutil) だけを使い、
-#                                        npm・cargo・ビルドした本体を実行しない。検証は呼び出し側で行う
+#   scripts/build-macos.sh --local-dmg   --local に加えて .dmg も作る (make dmg-local。ウィンドウの見た目の確認用。
+#                                        .dmg は署名・公証しない)
+#   scripts/build-macos.sh --build-only  署名なしの .app と .dmg のテンプレートを作るだけ (資格情報を見ない・要らない)
+#   scripts/build-macos.sh --sign-only   既存の .app を署名 → 公証・staple → テンプレートに入れて .dmg 作成・署名 → 公証・staple。
+#                                        Apple のツール (codesign/notarytool/stapler/hdiutil) と標準ライブラリだけの
+#                                        python3 (check-dmg-layout.py) だけを使い、npm・cargo・uv の依存・ビルドした本体を
+#                                        実行しない。検証は呼び出し側で行う
 #
 # build と sign を分ける理由: npm・cargo の依存 (postinstall・build.rs 等の第三者のコード) を資格情報がある場所で
 # 動かさないため。CI (release.yml) では別 job にし、署名 job は依存を入れずに .app だけを受け取る。
@@ -21,7 +24,13 @@
 #   - PATH の xcrun を呼ぶため、devShell では nixpkgs の xcbuild 版 xcrun になり notarytool が見つからない
 #   - staple の失敗を検査しない。entitlements を externalBin にも付ける。codesign に --timestamp を明示しない
 #   - Tauri の dmg は staple 前の .app を入れることができない (dmg だけの bundle でも .app を作り直す) ため、
-#     .dmg は自前で作る (Finder の AppleScript による見た目の調整もしない)
+#     .dmg は自前で作る
+#
+# .dmg の見た目 (背景・アイコン位置・ボリュームアイコン): ビルド側で dmgbuild (scripts/run-dmgbuild.py、
+# scripts/dmg-settings.py) が .app を含まないテンプレート (UDRW) を作る。dmgbuild は Finder・AppleScript を使わず
+# .DS_Store を直接書くため画面に何も出ない。署名側は staple 済みの .app を hdiutil・ditto でテンプレートに入れて
+# UDZO に変換するだけにする (第三者のコードである dmgbuild を資格情報のある所で動かさないため)。
+# hdiutil convert は同じ HFS+ ボリュームをそのまま写すので、.DS_Store 内の背景のエイリアスは有効なまま
 #
 # 資格情報 (リポジトリに置かない):
 #   署名: APPLE_SIGNING_IDENTITY (証明書名の一部か SHA-1。未設定ならキーチェーン内の "Developer ID Application" が
@@ -37,16 +46,19 @@ cd "$root"
 mode=release
 case "${1:-}" in
   --local) mode=local ;;
+  --local-dmg) mode=local-dmg ;;
   --build-only) mode=build-only ;;
   --sign-only) mode=sign-only ;;
   "") ;;
-  *) echo "usage: $0 [--local | --build-only | --sign-only]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--local | --local-dmg | --build-only | --sign-only]" >&2; exit 2 ;;
 esac
 
 TARGET=aarch64-apple-darwin
 BUNDLE_DIR="$root/src-tauri/target/$TARGET/release/bundle"
 APP="$BUNDLE_DIR/macos/mukuchi.app"
 ENTITLEMENTS="$root/src-tauri/Entitlements.plist"
+# .app を入れる前の .dmg (見た目だけを持つ UDRW)。CI では .app と一緒に build job から sign job へ渡す
+DMG_TEMPLATE="$BUNDLE_DIR/dmg-template/mukuchi.dmg"
 
 die() { echo "error: $*" >&2; exit 1; }
 step() { echo "==> $*"; }
@@ -149,8 +161,44 @@ if [ "$mode" != sign-only ]; then
   rm -rf "$BUNDLE_DIR/dmg"
 fi
 
+# ---- .dmg のテンプレート (ビルド側) ---------------------------------------------------------------
+
+# mnt_attach <image> <mountpoint> [hdiutil attach の追加引数...]: Finder に表示せず (-nobrowse) 一時ディレクトリに繋ぐ
+mnt_attach() {
+  local img="$1" mnt="$2"; shift 2
+  /usr/bin/hdiutil attach -nobrowse -noautoopen -mountpoint "$mnt" "$@" "$img" >/dev/null
+}
+mnt_detach() { /usr/bin/hdiutil detach -quiet "$1" || /usr/bin/hdiutil detach -force -quiet "$1"; }
+
+make_dmg_template() {
+  local tmp bg ok=0
+  step "dmg template (dmgbuild)"
+  tmp="$(mktemp -d)"
+  # Retina 用に 1x と 2x を1つの TIFF にまとめる (Finder は背景に複数解像度の TIFF を使える)。
+  # -cathidpicheck は 2x がちょうど2倍の大きさかも確かめる。dmgbuild にも @2x を探して同じことをする機能があるが、
+  # 同じディレクトリの他のファイルを拾わないよう自前でまとめて --no-hidpi で渡す
+  bg="$tmp/background.tiff"
+  /usr/bin/tiffutil -cathidpicheck "$root/assets/brand/dmg/background.png" "$root/assets/brand/dmg/background@2x.png" -out "$bg" >/dev/null
+  rm -rf "$(dirname "$DMG_TEMPLATE")"
+  mkdir -p "$(dirname "$DMG_TEMPLATE")"
+  # dmgbuild は /usr/bin/hdiutil・SetFile (ボリュームアイコンの属性) を呼ぶ。SetFile は xcrun 経由のため
+  # devShell の DEVELOPER_DIR (nixpkgs の SDK) を外す。SetFile の失敗を dmgbuild は無視するので下で検査する
+  # size は .app を入れる前の仮の大きさ (dmgbuild が最後に最小まで縮め、.app を入れる時に広げ直す)
+  env -u DEVELOPER_DIR -u SDKROOT uv run --locked --script "$root/scripts/run-dmgbuild.py" --no-hidpi \
+    -s "$root/scripts/dmg-settings.py" -D "background=$bg" -D "icon=$root/src-tauri/icons/icon.icns" -D size=64m \
+    mukuchi "$DMG_TEMPLATE"
+  mkdir "$tmp/mnt"
+  mnt_attach "$DMG_TEMPLATE" "$tmp/mnt" -readonly
+  python3 "$root/scripts/check-dmg-layout.py" --template "$tmp/mnt" || ok=1
+  mnt_detach "$tmp/mnt"
+  rm -rf "$tmp"
+  [ "$ok" -eq 0 ] || die "dmg テンプレートの見た目が想定と違う ($DMG_TEMPLATE)"
+}
+
+case "$mode" in release | build-only | local-dmg) make_dmg_template ;; esac
+
 if [ "$mode" = build-only ]; then
-  echo "done (署名なし): $APP"
+  echo "done (署名なし): $APP, $DMG_TEMPLATE"
   exit 0
 fi
 [ -d "$APP" ] || die "$APP がない (先に scripts/build-macos.sh --build-only)"
@@ -168,11 +216,47 @@ sign_app() {
   /usr/bin/codesign --force --sign "$id" --options runtime "$ts" --entitlements "$ENTITLEMENTS" "$APP"
 }
 
-if [ "$mode" = local ]; then
+# ---- .dmg の作成 (署名側。Apple のツールと標準ライブラリだけの python3 のみ) ----------------------------
+
+# テンプレートに .app を入れて UDZO の .dmg を作る。dmg_file に結果のパスを入れる
+dmg_file=""
+make_dmg() {
+  local tmp rw mnt version kb ok=0
+  [ -f "$DMG_TEMPLATE" ] || die "$DMG_TEMPLATE がない (先に scripts/build-macos.sh --build-only)"
+  version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+  dmg_file="$BUNDLE_DIR/dmg/mukuchi_${version}_aarch64.dmg"
+  step "create $(basename "$dmg_file")"
+  tmp="$(mktemp -d)"; rw="$tmp/rw.dmg"; mnt="$tmp/mnt"
+  mkdir -p "$BUNDLE_DIR/dmg" "$mnt"
+  /bin/cp "$DMG_TEMPLATE" "$rw"
+  # .app + 余裕 32MB まで広げる (HFS+ はそのまま広げられる)
+  kb="$(du -sk "$APP" | cut -f1)"
+  /usr/bin/hdiutil resize -size "$((kb + 32 * 1024))k" "$rw"
+  mnt_attach "$rw" "$mnt" -owners off
+  # テンプレートは build job から来るため、入れる前に余計なファイルがないことを確かめる
+  # 失敗しても切断してから止まるよう、途中の失敗は ok で受ける
+  { python3 "$root/scripts/check-dmg-layout.py" --template "$mnt" \
+      && /usr/bin/ditto "$APP" "$mnt/mukuchi.app" \
+      && rm -rf "$mnt/.fseventsd" "$mnt/.Trashes" \
+      && python3 "$root/scripts/check-dmg-layout.py" "$mnt"; } || ok=1
+  mnt_detach "$mnt"
+  [ "$ok" -eq 0 ] || { rm -rf "$tmp"; die "dmg の見た目が想定と違う"; }
+  /usr/bin/hdiutil resize -sectors min "$rw"
+  # UDZO (zlib): Apple は強く圧縮した dmg を避けるよう案内している (Customizing the notarization workflow)
+  /usr/bin/hdiutil convert "$rw" -format UDZO -ov -o "$dmg_file" >/dev/null
+  rm -rf "$tmp"
+  /usr/bin/hdiutil verify "$dmg_file"
+}
+
+if [ "$mode" = local ] || [ "$mode" = local-dmg ]; then
   step "codesign (ad-hoc)"
   sign_app -
+  # 見た目の確認用なので .dmg は署名しない
+  [ "$mode" = local-dmg ] && make_dmg
   step "verify (ad-hoc)"
-  exec scripts/verify-macos.sh
+  scripts/verify-macos.sh
+  [ "$mode" = local-dmg ] && echo "done: $dmg_file (Finder で開いてウィンドウを確認する)"
+  exit 0
 fi
 
 # 別の版の古い .dmg が残っていると verify が取り違えるため消す (--sign-only はビルドを経ない)
@@ -224,16 +308,8 @@ staple "$APP"
 
 # ---- .dmg --------------------------------------------------------------------------------------
 
-version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
-dmg_dir="$BUNDLE_DIR/dmg"
-dmg="$dmg_dir/mukuchi_${version}_aarch64.dmg"
-step "create $(basename "$dmg")"
-mkdir -p "$dmg_dir" "$work/dmg"
-/usr/bin/ditto "$APP" "$work/dmg/mukuchi.app"
-ln -s /Applications "$work/dmg/Applications"
-# UDZO (zlib): Apple は強く圧縮した dmg を避けるよう案内している (Customizing the notarization workflow)
-/usr/bin/hdiutil create -volname mukuchi -srcfolder "$work/dmg" -fs HFS+ -format UDZO -ov "$dmg"
-/usr/bin/hdiutil verify "$dmg"
+make_dmg
+dmg="$dmg_file"
 /usr/bin/codesign --force --sign "$identity" --timestamp "$dmg"
 
 # 2回目: .dmg を公証して staple する (ダウンロードした dmg を開く時の確認用)

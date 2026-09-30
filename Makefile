@@ -41,7 +41,7 @@ pids=$$(for p in $(DEV_PORTS); do lsof -nP -ti tcp:$$p -sTCP:LISTEN; done 2>/dev
 }
 endef
 
-.PHONY: help up down restart reset up-fresh ps logs setup build build-local verify clean
+.PHONY: help up down restart reset up-fresh ps logs setup build build-local dmg-local verify clean
 
 help: ## ターゲット一覧
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -112,6 +112,9 @@ build: ## 本番用 .dmg (Developer ID 署名 + 公証 + staple)
 
 build-local: ## ad-hoc 署名の .app (手元確認用)
 	@scripts/build-macos.sh --local
+
+dmg-local: ## ad-hoc 署名の .app + 署名なしの .dmg (ウィンドウの見た目の確認用)
+	@scripts/build-macos.sh --local-dmg
 
 verify: ## 署名・公証の検証 (ad-hoc なら Gatekeeper・公証の項目は SKIP)
 	@scripts/verify-macos.sh

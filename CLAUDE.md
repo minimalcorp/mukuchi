@@ -34,6 +34,7 @@ macOS常駐の音声入力アプリ。ショートカットでON/OFFし、ONの�
 | `make setup` | npm install・uv sync・モデル取得 (`up` から自動実行)。`MUKUCHI_HF_SEED=<HF_HOME>` で既存HFキャッシュから複製 |
 | `make build` | 本番用 .dmg (Developer ID署名 + Hardened Runtime + 公証 + staple)。証明書・公証の資格情報が必要 ([docs/release.md](docs/release.md)) |
 | `make build-local` | ad-hoc署名の .app (手元確認用)。同梱物 (uv・asr-server) は `scripts/prepare-bundle-resources.sh` が用意する |
+| `make dmg-local` | `build-local` + 署名なしの .dmg (dmg ウィンドウの見た目の確認用。公証しない) |
 | `scripts/uninstall.sh [--dev] [--dry-run]` | 完全アンインストール (既定は確認付き。`--dry-run` で対象の表示のみ) |
 | `make verify` / `make clean` | 署名・公証の検証 (ad-hoc なら Gatekeeper・公証の項目は SKIP。`build*` の最後にも実行) / 生成物削除 (devデータは残す) |
 | `make help` | ターゲット一覧 |

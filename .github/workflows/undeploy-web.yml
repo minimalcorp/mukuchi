@@ -1,6 +1,8 @@
 # LP の本番 (SST の production ステージ) を撤去する。手動実行のみ。
 # sst.config.ts は production を retain・protect にしており、SST_ALLOW_REMOVE=true の時だけ撤去できる。
 # retain のため S3 バケット等の一部のリソースは残る (必要なら AWS 側で手動で消す)
+# 承認は先頭の approve job (Environment release-approval) で1回だけ求める。production-web は secret・変数の置き場で
+# 承認者を置かない (理由は release.yml の先頭のコメント)
 name: Undeploy web
 
 on:
@@ -19,7 +21,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 承認だけを行う (checkout もしない)。release-approval には secret・変数を置かない
+  approve:
+    name: Approve (undeploy web production)
+    runs-on: ubuntu-24.04
+    environment: release-approval
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: Approved
+        run: echo "承認済み (web production の撤去)"
+
   remove:
+    needs: approve
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: production-web

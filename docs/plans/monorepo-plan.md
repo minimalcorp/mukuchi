@@ -10,7 +10,7 @@
 | ASRサーバー | `apps/desktop/asr-server` (desktop に同梱する部品。`scripts/` からの相対パスが保てる) |
 | web の技術 | tech (tech.minimalcorp.com) と同じ: React Router v8 の事前生成 (静的サイト) + Vite + Tailwind v4 |
 | 公開 | SST v4 (`sst.aws.Router` + `StaticSite`) で AWS へ。ドメイン `mukuchi.minimalcorp.com`。DNS は別アカウントの Route53 で手動登録、証明書は us-east-1 の ACM を事前発行 (tech と同じ方式) |
-| デプロイ | GitHub Actions。承認制の Environment `production-web` + OIDC で AWS のロールを引き受ける |
+| デプロイ | GitHub Actions。承認 (Environment `release-approval`) の後、Environment `production-web` + OIDC で AWS のロールを引き受ける |
 
 ## ディレクトリ構成
 

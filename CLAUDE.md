@@ -46,7 +46,7 @@ monorepo。JS/TS の依存はルートの pnpm workspace (`pnpm-workspace.yaml`�
 | `make verify` / `make clean` | 署名・公証の検証 (ad-hoc なら Gatekeeper・公証の項目は SKIP。`build*` の最後にも実行) / 生成物削除 (devデータは残す) |
 | `make web-build` | web の静的ビルド (`apps/web/build/client`) |
 | `make web-deploy` | web を本番へ `sst deploy --stage production` (手元から。版・タグは変えない。AWS の認証情報と `MUKUCHI_WEB_CERT_ARN` が必要。通常は下の Release で行う) |
-| Actions > Release (`.github/workflows/release.yml`、main で手動実行) | リリース・デプロイの唯一の経路。入力 `target` (`desktop`\|`web`)・`bump` (`patch`\|`minor`\|`major`)。承認 (Environment `production-desktop` / `production-web`) → ビルド・署名・公証 or `sst deploy` → 成功時のみ版上げコミットとタグ (`desktop-v<ver>` / `web-v<ver>`) を Deploy Key で main へ push (main が進んでいたら止まる)。desktop は GitHub Release を公開 ([docs/release.md](docs/release.md)) |
+| Actions > Release (`.github/workflows/release.yml`、main で手動実行) | リリース・デプロイの唯一の経路。入力 `target` (`desktop`\|`web`)・`bump` (`patch`\|`minor`\|`major`)。承認 (Environment `release-approval`、先頭で1回) → ビルド・署名・公証 or `sst deploy` → 成功時のみ版上げコミットとタグ (`desktop-v<ver>` / `web-v<ver>`) を Deploy Key で main へ push (main が進んでいたら止まる)。desktop は GitHub Release を公開 ([docs/release.md](docs/release.md)) |
 | `node scripts/bump-version.mjs <desktop\|web> <patch\|minor\|major> [--dry-run]` | 版の書き換え (release.yml が使う。desktop は tauri.conf.json・Cargo.toml・Cargo.lock・package.json をそろえる)。テストは `node --test scripts/*.test.mjs` (`make test` に含む) |
 | `make help` | ターゲット一覧 |
 | `pnpm lint` / `pnpm build` / `pnpm test` (`apps/desktop` で実行) | desktop のフロントエンドの lint / 型チェック+ビルド / Playwright (スクリーンショットは `apps/desktop/e2e/screenshots/`) |

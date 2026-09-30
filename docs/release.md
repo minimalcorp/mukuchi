@@ -69,13 +69,16 @@ notarytool で使えるのは **Team キー** のみ (Individual キーは notar
 
 ### 3. GitHub Actions (`.github/workflows/release.yml`) の secret・変数
 
-Environment はどちらも Required reviewers (承認制) と deployment branch policy `main` のみ。値は Environment の secret・変数に登録し、repo secret にはしない (承認された job だけが読める)。作成は `.claude/plans/github-setup.md`。
+Environment は3つ。どれも deployment branch policy は `main` のみ。値は Environment の secret・変数に登録し、repo secret にはしない (その Environment を指定した job だけが読める)。作成は `.claude/plans/github-setup.md`。
 
-| Environment | 用途 | secret | 変数 |
-|---|---|---|---|
-| `production-desktop` | desktop の署名・公証・公開 | `APPLE_CERTIFICATE` `APPLE_CERTIFICATE_PASSWORD` `APPLE_API_KEY` `APPLE_API_ISSUER` `APPLE_API_KEY_P8` `RELEASE_DEPLOY_KEY` | - |
-| `production-web` | web のデプロイ・版上げの push | `RELEASE_DEPLOY_KEY` | `AWS_DEPLOY_ROLE_ARN` `AWS_REGION` `MUKUCHI_WEB_CERT_ARN` |
+| Environment | 用途 | 承認者 (Required reviewers) | secret | 変数 |
+|---|---|---|---|---|
+| `release-approval` | 承認専用 (`approve` job。Release・Undeploy web の先頭で1回) | あり | なし (置かない) | なし |
+| `production-desktop` | desktop の署名・公証・公開 | なし | `APPLE_CERTIFICATE` `APPLE_CERTIFICATE_PASSWORD` `APPLE_API_KEY` `APPLE_API_ISSUER` `APPLE_API_KEY_P8` `RELEASE_DEPLOY_KEY` | - |
+| `production-web` | web のデプロイ・版上げの push・撤去 | なし | `RELEASE_DEPLOY_KEY` | `AWS_DEPLOY_ROLE_ARN` `AWS_REGION` `MUKUCHI_WEB_CERT_ARN` |
 
+- `release-approval` の作り方: Settings > Environments > New environment で `release-approval` を作り、Required reviewers に承認者を入れる (必要なら Prevent self-review)。Deployment branches and tags は Selected branches and tags で `main` のみ。secret・変数は置かない
+- `production-desktop` / `production-web`: Required reviewers は付けない (付けるとその job でもう一度承認待ちになる)。Deployment branches は `main` のみ。secret・変数はここに置く
 - `RELEASE_DEPLOY_KEY`: 書き込み可の Deploy key の秘密鍵 (両 Environment に同じもの)。main の ruleset の bypass に Deploy key を入れ、版上げコミットとタグを push する
 - AWS の OIDC 用 IAM ロールの信頼ポリシーの `sub` は `repo:minimalcorp/mukuchi:environment:production-web` (手順は `.claude/plans/aws-web-deploy-setup.md`)
 
@@ -112,16 +115,15 @@ Apple の secret の登録:
 
 ### desktop
 
-jobs: `prepare` → `build` → `sign` (承認1) → `publish-desktop` (承認2)
+jobs: `approve` (承認) → `prepare` → `build` → `sign` → `publish-desktop`
 
-1. `Prepare`: main 以外からの実行を止める → 版上げコミットをローカルで作る → 同じタグ・公開済みの Release があれば止める
-2. `Build unsigned .app` (secret なし): Kyoko の有無を確認 → 同じ版上げコミットを作る (ID を確認) → `pnpm install --frozen-lockfile` → `build-macos.sh --build-only`。.app と .dmg テンプレートを artifact で渡す
-3. `Sign and notarize (.dmg)` (`production-desktop`、承認): .app の版を確認 → 証明書を一時キーチェーンに入れて `build-macos.sh --sign-only` → 資格情報を削除 → `verify-macos.sh` → 添付を用意して artifact `mukuchi-dmg-signed` (7日保存) にする。添付は4つ (中身は同じ .dmg):
-   - `mukuchi_<version>_aarch64.dmg` と `.sha256`
-   - `mukuchi_aarch64.dmg` と `.sha256` (LP の固定 URL 用)
-4. `Publish desktop` (`production-desktop`、承認。Deploy Key で checkout し、第三者のパッケージを入れない):
+1. `Approve` (`release-approval`): 承認を待つだけ。承認後の job は承認を求めない
+2. `Prepare`: main 以外からの実行を止める → 版上げコミットをローカルで作る → 同じタグ・公開済みの Release があれば止める
+3. `Build unsigned .app` (secret なし): Kyoko の有無を確認 → 同じ版上げコミットを作る (ID を確認) → `pnpm install --frozen-lockfile` → `build-macos.sh --build-only`。.app と .dmg テンプレートを artifact で渡す
+4. `Sign and notarize (.dmg)` (`production-desktop`): .app の版を確認 → 証明書を一時キーチェーンに入れて `build-macos.sh --sign-only` → 資格情報を削除 → `verify-macos.sh` → 添付を用意して artifact `mukuchi-dmg-signed` (7日保存) にする。添付は `mukuchi_aarch64.dmg` と `mukuchi_aarch64.dmg.sha256` の2つ (版番号なし。LP の固定 URL 用。版は Release のタイトル・タグで分かる)
+5. `Publish desktop` (`production-desktop`。Deploy Key で checkout し、第三者のパッケージを入れない):
    1. sha256 を確認 → 同じ版上げコミットを作る (ID を確認) → main が開始時のままでタグがないことを確認
-   2. 下書きの Release `desktop-v<version>` を作って4つを添付する (下書きはタグを作らない。アップロードの失敗はここで起き、main は変わらない)
+   2. 下書きの Release `desktop-v<version>` を作って2つを添付する (下書きはタグを作らない。アップロードの失敗はここで起き、main は変わらない)
    3. 版上げコミットとタグを push (失敗したら下書きを消して止める。公開されない)
    4. 下書きを公開して Latest にし、`releases/latest` がこのタグであることを確かめる
 
@@ -131,23 +133,27 @@ LP の表示 (`apps/web/app/lib/site.ts` の `VERSION`・`DMG_SIZE`) は自動�
 
 ### web
 
-jobs: `prepare` → `deploy-web` (承認1) → `publish-web` (承認2)
+jobs: `approve` (承認) → `prepare` → `deploy-web` → `publish-web`
 
-1. `Prepare`: desktop と同じ
-2. `Deploy web` (`production-web`、承認): 同じ版上げコミットを作る (ID を確認) → `pnpm install --frozen-lockfile` → OIDC で AWS のロール → main が開始時のままか確認 → `sst deploy --stage production`
-3. `Publish web` (`production-web`、承認。Deploy Key): 同じ版上げコミットを作る → main が開始時のままでタグ `web-v<version>` がないことを確認 → push。GitHub Release は作らない
+1. `Approve`・`Prepare`: desktop と同じ
+2. `Deploy web` (`production-web`): 同じ版上げコミットを作る (ID を確認) → `pnpm install --frozen-lockfile` → OIDC で AWS のロール → main が開始時のままか確認 → `sst deploy --stage production`
+3. `Publish web` (`production-web`。Deploy Key): 同じ版上げコミットを作る → main が開始時のままでタグ `web-v<version>` がないことを確認 → push。GitHub Release は作らない
 
-残るずれ: `deploy-web` の確認から `publish-web` の push までの間 (2回目の承認待ちを含む) に main が進むと、デプロイは済んだが版上げ・タグは push されない (`publish-web` が止まる)。その時は Release (web) を実行し直す。前回と同じ版番号で、新しい main をデプロイしてタグを付ける (前回のデプロイは記録に残らない)。
+残るずれ: `deploy-web` の確認から `publish-web` の push までの間に main が進むと、デプロイは済んだが版上げ・タグは push されない (`publish-web` が止まる)。その時は Release (web) を実行し直す。前回と同じ版番号で、新しい main をデプロイしてタグを付ける (前回のデプロイは記録に残らない)。
 
-### 承認が2回ある理由
+### 承認
 
-Environment の Required reviewers は job ごとに承認を求める。Deploy Key を読む publish の job を、第三者のコード (pnpm・cargo の依存、ビルドした本体、sst) が動いた job と分けている (起動されたプロセスは job の終わりまで残りうるため、同じ job で鍵を読むと盗まれうる)。1回目 (sign / deploy-web) がリリースの判断、2回目 (publish) は結果を見て公開・push する確認。
+- 承認は run の先頭の `approve` job (`release-approval`) で1回だけ。承認するまで run のどの job も動かない (build も)。承認を拒否すれば何も変わらない
+- 承認は job 単位で、Required reviewers のある Environment を使う job が始まる時にだけ求められる。そのため承認者は `release-approval` にだけ置く。`production-*` に承認者を置くと sign・publish 等でもう一度止まる
+- 承認に secret のない専用の Environment を使うのは、承認のためだけの job に署名・デプロイの鍵を渡さないため
+- 承認待ちの間も run は concurrency (group `release`) を占めるため、後から実行した Release・Undeploy web は待つ。待てるのは1件だけで、さらに実行すると待っていた方は取り消される ([Control the concurrency of workflows and jobs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency))
+- Deploy Key を読む publish の job を、第三者のコード (pnpm・cargo の依存、ビルドした本体、sst) が動いた job と分けている (起動されたプロセスは job の終わりまで残りうるため、同じ job で鍵を読むと盗まれうる)。承認者がいないので、分けても承認は増えない
 
 ### 失敗した時
 
 | 失敗した所 | 状態 | 対処 |
 |---|---|---|
-| prepare・build・sign・deploy-web | main・タグ・Release は変わらない (web の deploy 中の失敗はデプロイが途中の可能性あり) | 原因を直して実行し直す |
+| approve (拒否・期限切れ)・prepare・build・sign・deploy-web | main・タグ・Release は変わらない (web の deploy 中の失敗はデプロイが途中の可能性あり) | 原因を直して実行し直す |
 | publish-desktop の push まで (main が進んだ等) | main・タグは変わらない。下書きは消す | 実行し直す |
 | publish-desktop の公開 (push 後) | main・タグは push 済み。下書きの Release が残る | 下書き `desktop-v<version>` を確認して手で公開し、Latest にする |
 | publish-web の push (main が進んだ等) | デプロイ済み・main・タグは変わらない | 実行し直す (上の「残るずれ」) |

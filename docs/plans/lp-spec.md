@@ -5,7 +5,7 @@
 ## 配布
 
 - ダウンロード先: GitHub Releases の最新版を指す固定 URL `https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg`
-  - リリース用ワークフローは、版番号付きの `mukuchi_<version>_aarch64.dmg` に加えて、版番号なしの `mukuchi_aarch64.dmg` も添付する
+  - リリース用ワークフローは版番号なしの `mukuchi_aarch64.dmg` (と `.sha256`) だけを添付する
 - GitHub: `https://github.com/minimalcorp/mukuchi`
 
 ## 数値・文言 (実装と実測を正とする)

@@ -2,9 +2,10 @@
 # 1つの workflow で扱い、版 (X.Y.Z) を上げる。手順は docs/release.md。
 #
 # 入力: target (desktop | web)・bump (patch | minor | major)。main からのみ実行できる (prepare の最初の step で止める。
-# Environment の deployment branch policy も main のみ)。
+# どの Environment の deployment branch policy も main のみ)。
 #
 # 版上げの流れ:
+#   approve … 承認を待つだけ (Environment release-approval)。以降の job はすべて prepare 経由でこれを待つ
 #   prepare … 開始時の main (github.sha) の上に版上げコミットをローカルで作る (scripts/release-commit.sh)。
 #             作者・日時を固定するため、後の job で同じ入力から作り直すと同じコミット ID になる
 #   desktop … build (secret なし) → sign (production-desktop) → publish-desktop (production-desktop)
@@ -13,9 +14,16 @@
 #   (desktop-v<ver> / web-v<ver>) を main へ push する。main が開始時から進んでいたら rebase せず止める
 #   (scripts/release-push.sh)。ビルド・署名・公証・検証・デプロイが失敗したら push しない
 #
-# 承認: Environment の Required reviewers は job ごとに承認を求めるため、desktop は sign と publish-desktop、
-# web は deploy-web と publish-web の2回承認する。publish を別 job にするのは、第三者のコード (pnpm・cargo の依存、
-# ビルドした本体、sst) が動いた job に Deploy Key を渡さないため (起動されたプロセスは job の終わりまで残りうる)。
+# 承認: 先頭の approve job (Environment release-approval) で1回だけ求める。承認は job 単位で、Required reviewers の
+# ある Environment を使う job が始まる時にだけ求められる。そのため承認者は release-approval にだけ置き、
+# production-desktop / production-web は secret・変数の置き場として承認者なし (deployment branch policy は main のみ) にする
+# (後段の Environment に承認者を置くと、その job でもう一度止まる)。
+# 承認に secret を置かない専用の Environment を使うのは、production-* を承認に使うと、その secret を使わない job
+# にまで鍵を読める状態を渡すことになるため (Environment の secret はその Environment を指定した job なら読める)。
+# 承認待ちの間も run は concurrency (group: release) を占めるため、後から実行した Release・Undeploy web は待つ
+# (待てるのは1件だけで、さらに実行すると待っていた方は取り消される)。
+# publish を別 job にするのは、第三者のコード (pnpm・cargo の依存、ビルドした本体、sst) が動いた job に Deploy Key を
+# 渡さないため (起動されたプロセスは job の終わりまで残りうる)。
 #
 # desktop の job を分ける理由 (apps/desktop/scripts/build-macos.sh の --build-only / --sign-only):
 #   build … pnpm install・cargo で署名なしの .app と、dmgbuild で .dmg のテンプレート (背景・アイコン位置。.app なし) を作る。
@@ -65,8 +73,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 承認だけを行う (checkout もしない)。release-approval には secret・変数を置かない
+  approve:
+    name: Approve (${{ inputs.target }}, ${{ inputs.bump }})
+    runs-on: ubuntu-24.04
+    environment: release-approval
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: Approved
+        env:
+          TARGET: ${{ inputs.target }}
+          BUMP: ${{ inputs.bump }}
+        run: echo "承認済み ($TARGET, $BUMP)"
+
   prepare:
     name: Prepare (${{ inputs.target }}, ${{ inputs.bump }})
+    needs: approve
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -260,9 +283,9 @@ jobs:
       - name: Verify
         run: apps/desktop/scripts/verify-macos.sh
 
-      # LP は固定 URL https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg を使うため、
-      # 版付きの名前に加えて同じ中身を mukuchi_aarch64.dmg としても添付する (latest/download は公開済みで
-      # プレリリースでない「Latest」の Release の添付を返す)。
+      # 添付は版番号なしの mukuchi_aarch64.dmg (と .sha256) だけにする。LP は固定 URL
+      # https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg を使い (latest/download は
+      # 公開済みでプレリリースでない「Latest」の Release の添付を返す)、版は Release のタイトル・タグで分かるため。
       # 出典: https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases
       - name: Prepare release assets
         env:
@@ -273,13 +296,9 @@ jobs:
           [ -f "$src" ] || { echo "::error::$src がない"; exit 1; }
           out="$RUNNER_TEMP/release"
           rm -rf "$out"; mkdir -p "$out"
-          /bin/cp -p "$src" "$out/mukuchi_${VERSION}_aarch64.dmg"
           /bin/cp -p "$src" "$out/mukuchi_aarch64.dmg"
-          # .sha256 はそれぞれ自分のファイル名で書く (ダウンロードした名前のまま shasum -c で確かめられるように)
-          for f in "mukuchi_${VERSION}_aarch64.dmg" mukuchi_aarch64.dmg; do
-            (cd "$out" && shasum -a 256 "$f" > "$f.sha256")
-          done
-          cmp "$out/mukuchi_${VERSION}_aarch64.dmg" "$out/mukuchi_aarch64.dmg"
+          # .sha256 は添付のファイル名で書く (ダウンロードした名前のまま shasum -c で確かめられるように)
+          (cd "$out" && shasum -a 256 mukuchi_aarch64.dmg > mukuchi_aarch64.dmg.sha256)
       # publish が失敗した時に手で Release を作り直せるよう数日残す
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -323,7 +342,7 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP/release"
           ls -l
-          sha256sum -c "mukuchi_${VERSION}_aarch64.dmg.sha256" mukuchi_aarch64.dmg.sha256
+          sha256sum -c mukuchi_aarch64.dmg.sha256
       - name: Bump version (same commit as build)
         env:
           BUMP: ${{ inputs.bump }}
@@ -353,7 +372,6 @@ jobs:
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
             --title "mukuchi $VERSION" --notes "macOS (Apple Silicon) / Developer ID 署名・公証済み" \
             --generate-notes "${start[@]}" \
-            "$out/mukuchi_${VERSION}_aarch64.dmg" "$out/mukuchi_${VERSION}_aarch64.dmg.sha256" \
             "$out/mukuchi_aarch64.dmg" "$out/mukuchi_aarch64.dmg.sha256"
       - name: Push version bump and tag
         id: push

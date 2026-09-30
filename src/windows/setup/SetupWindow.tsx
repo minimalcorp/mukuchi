@@ -26,6 +26,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { HelpTip } from "@/components/ui/tooltip";
 import { useAudioLevel } from "@/lib/audio-level";
+import { useLevelEnvelope } from "@/lib/level-envelope";
 import { devOverrides } from "@/lib/env";
 import { formatBytes, formatBytesPair, formatEta } from "@/lib/format";
 import {
@@ -467,9 +468,19 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
 
 /* ---------- 4. 動作テスト ---------- */
 
+/** 入力レベル。約15Hz で更新されるのでここだけが購読・再描画する。長さはパネルと同じく平滑化する */
+function SetupLevelBar({ on }: { on: boolean }) {
+  const { level } = useAudioLevel();
+  const barRef = useLevelEnvelope<HTMLDivElement>(on ? level : 0);
+  return (
+    <div className="h-1 flex-1 rounded-[2px] bg-meter-track-strong">
+      <div ref={barRef} className="h-1 rounded-[2px] bg-green-500" />
+    </div>
+  );
+}
+
 function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }) {
   const status = useAppStatus();
-  const { level } = useAudioLevel();
   const [recognized, setRecognized] = useState(false);
   // 音声コマンドは欄にキー操作として届くため、何を送ったかをバッジで示す
   const [commandsSent, setCommandsSent] = useState<{ id: number; text: string; key: string }[]>([]);
@@ -503,9 +514,7 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
         </p>
         <div className="flex h-8 flex-none items-center gap-2.5 rounded-md bg-surface-muted px-3">
           <AudioLines size={16} className="flex-none text-blue-500" aria-hidden />
-          <div className="h-1 flex-1 rounded-[2px] bg-meter-track-strong">
-            <div className="h-1 rounded-[2px] bg-green-500" style={{ width: `${(on ? level : 0) * 100}%` }} />
-          </div>
+          <SetupLevelBar on={on} />
           <span className="text-xs text-fg-muted">入力レベル</span>
         </div>
         {/* 実際の入力先。前面のこの欄に Rust から貼り付けられる */}

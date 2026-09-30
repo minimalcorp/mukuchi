@@ -1,11 +1,14 @@
 //! メニューバー (macOS 標準メニュー)。デザイン 02・06。
 //!
-//! - アイコン: 状態別のテンプレート画像。エラー時だけ赤い点付き (非テンプレート)
+//! - アイコン: ロゴのテンプレート画像。OFF は 50% の濃さ、発話中・文字起こし中は右下に点。
+//!   エラー時だけ右上に赤い点 (非テンプレート)
 //! - メニュー: 状態の行 / 音声入力をオン・オフ / 設定を開く… / mukuchi を終了。
 //!   エラー時は最上部に原因の行と復旧の項目を1つずつ出す。
 //!   セットアップ完了前は「セットアップを開く…」を出す (セットアップ画面を閉じた人が再開できるように)
 //!
-//! パネルからも同じメニューを出せる (`popup_panel_menu`。ノッチに隠れた時の代わり)。
+//! パネルからもほぼ同じメニューを出せる (`popup_panel_menu`。ノッチに隠れた時の代わり)。
+//! パネルのメニューでは オン・オフ を出さず (パネルのボタンで切り替えられるため)、
+//! 代わりに「コンパクト表示」(Settings.panelStyle) のチェック項目を出す。
 //!
 //! 状態の変化は録音・入力のスレッドから通知されるため、ここでは待たずにメインスレッドへ送るだけにし
 //! (`run_on_main_thread` は投げっぱなし)、メインスレッド側で最新の状態を読んで反映する。
@@ -14,13 +17,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
 
 use crate::core::Core;
 use crate::macos::status_icon::{self, IconPng, StatusIcon};
 use crate::permissions::{self, Pane};
+use crate::settings::PanelStyle;
 use crate::state::{AppStatus, ErrorAction, Phase};
 use crate::windows::{self, SettingsCategory};
 
@@ -31,6 +35,7 @@ const ID_TOGGLE: &str = "toggle";
 const ID_SETTINGS: &str = "settings";
 const ID_SETUP: &str = "setup";
 const ID_QUIT: &str = "quit";
+const ID_COMPACT: &str = "compact";
 
 macro_rules! icon {
     ($name:literal) => {
@@ -40,10 +45,11 @@ macro_rules! icon {
         }
     };
 }
-const ICON_MIC: IconPng = icon!("mic");
-const ICON_MIC_OFF: IconPng = icon!("mic-off");
-const ICON_AUDIO_LINES: IconPng = icon!("audio-lines");
-const ICON_LOADER: IconPng = icon!("loader-circle");
+// ロゴから作ったテンプレート画像 (icons/tray/generate.sh)
+const ICON_LOGO: IconPng = icon!("logo");
+const ICON_LOGO_OFF: IconPng = icon!("logo-off");
+/// 右下に点 (発話中・文字起こし中)
+const ICON_LOGO_DOT: IconPng = icon!("logo-dot");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IconKind {
@@ -68,16 +74,25 @@ impl IconKind {
 
     fn icon(self, dark: bool) -> StatusIcon {
         match self {
-            Self::Off => StatusIcon::Template(ICON_MIC_OFF),
-            Self::Listening => StatusIcon::Template(ICON_MIC),
-            Self::Speaking => StatusIcon::Template(ICON_AUDIO_LINES),
-            Self::Finalizing => StatusIcon::Template(ICON_LOADER),
+            Self::Off => StatusIcon::Template(ICON_LOGO_OFF),
+            Self::Listening => StatusIcon::Template(ICON_LOGO),
+            // 発話中と文字起こし中は同じ見た目 (18pt で描き分けても見分けにくいため)
+            Self::Speaking | Self::Finalizing => StatusIcon::Template(ICON_LOGO_DOT),
             Self::Error => StatusIcon::WithRedDot {
-                png: ICON_MIC,
+                png: ICON_LOGO,
                 dark,
             },
         }
     }
+}
+
+/// どこに出すメニューか。両方を同じ組み立て (`build_menu`) から作る
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuVariant {
+    /// メニューバー: 音声入力のオン・オフを出す
+    Tray,
+    /// パネルの右クリック: オン・オフの代わりに「コンパクト表示」(チェックは現在の panelStyle)
+    Panel { compact: bool },
 }
 
 /// メニューの内容。変わった時だけ作り直す
@@ -233,7 +248,7 @@ fn refresh(app: &AppHandle, state: &TrayState) -> Result<()> {
     let model = current_model(&core, &status);
     let mut last = state.menu.lock().unwrap_or_else(|p| p.into_inner());
     if last.as_ref() != Some(&model) {
-        let menu = build_menu(app, &model)?;
+        let menu = build_menu(app, &model, MenuVariant::Tray)?;
         tray.set_menu(Some(menu))
             .context("メニューを設定できません")?;
         *last = Some(model);
@@ -250,7 +265,7 @@ fn current_model(core: &Core, status: &AppStatus) -> MenuModel {
     )
 }
 
-/// パネル内の論理座標 (左上原点) にメニューバーと同じメニューを出す (`show_panel_menu`)。
+/// パネル内の論理座標 (左上原点) にメニューバーとほぼ同じメニューを出す (`show_panel_menu`。違いは `MenuVariant`)。
 /// ノッチ付きの画面ではメニューバーのアイコンがノッチに隠れることがあり、Dock にも出ないため、
 /// パネルからも設定・終了に辿れるようにする。
 /// 項目の ID がメニューバーと同じなので、選択はメニューバーの `on_menu` (全メニュー共通の受け口) で処理される。
@@ -261,6 +276,7 @@ pub fn popup_panel_menu(app: &AppHandle, x: f64, y: f64) -> Result<()> {
     if !x.is_finite() || !y.is_finite() {
         anyhow::bail!("位置が不正です");
     }
+    log::info!("パネルのメニューを表示");
     let app2 = app.clone();
     app.run_on_main_thread(move || {
         if let Err(e) = popup_on_main(&app2, x, y) {
@@ -273,7 +289,8 @@ pub fn popup_panel_menu(app: &AppHandle, x: f64, y: f64) -> Result<()> {
 fn popup_on_main(app: &AppHandle, x: f64, y: f64) -> Result<()> {
     let core = app.state::<Arc<Core>>().inner().clone();
     let model = current_model(&core, &core.state.status());
-    let menu = build_menu(app, &model)?;
+    let compact = core.settings.get().panel_style == PanelStyle::Compact;
+    let menu = build_menu(app, &model, MenuVariant::Panel { compact })?;
     let panel = app
         .get_webview_window(windows::PANEL)
         .context("パネルがありません")?;
@@ -282,52 +299,97 @@ fn popup_on_main(app: &AppHandle, x: f64, y: f64) -> Result<()> {
         .context("メニューを表示できません")
 }
 
-fn build_menu(app: &AppHandle, m: &MenuModel) -> Result<Menu<tauri::Wry>> {
-    let menu = Menu::new(app)?;
-    let status = MenuItem::with_id(app, ID_STATUS, &m.status, false, None::<&str>)?;
-    menu.append(&status)?;
+/// メニューの1行。組み立て (`menu_entries`) をテストできるよう、Tauri のメニューとは分ける
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Entry {
+    Item {
+        id: &'static str,
+        text: String,
+        enabled: bool,
+        accelerator: Option<&'static str>,
+    },
+    Check {
+        id: &'static str,
+        text: &'static str,
+        checked: bool,
+    },
+    Separator,
+}
+
+fn item(id: &'static str, text: impl Into<String>) -> Entry {
+    Entry::Item {
+        id,
+        text: text.into(),
+        enabled: true,
+        accelerator: None,
+    }
+}
+
+fn menu_entries(m: &MenuModel, variant: MenuVariant) -> Vec<Entry> {
+    let mut v = vec![Entry::Item {
+        id: ID_STATUS,
+        text: m.status.clone(),
+        enabled: false,
+        accelerator: None,
+    }];
     if let Some(a) = m.recover {
-        menu.append(&MenuItem::with_id(
-            app,
-            ID_RECOVER,
-            recover_text(a),
-            true,
-            None::<&str>,
-        )?)?;
+        v.push(item(ID_RECOVER, recover_text(a)));
     }
-    menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&MenuItem::with_id(
-        app,
-        ID_TOGGLE,
-        toggle_text(m.listening),
-        m.toggle_enabled,
-        None::<&str>,
-    )?)?;
-    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    v.push(Entry::Separator);
+    v.push(match variant {
+        MenuVariant::Tray => Entry::Item {
+            id: ID_TOGGLE,
+            text: toggle_text(m.listening).into(),
+            enabled: m.toggle_enabled,
+            accelerator: None,
+        },
+        MenuVariant::Panel { compact } => Entry::Check {
+            id: ID_COMPACT,
+            text: "コンパクト表示",
+            checked: compact,
+        },
+    });
+    v.push(Entry::Separator);
     if m.setup_item {
-        menu.append(&MenuItem::with_id(
-            app,
-            ID_SETUP,
-            "セットアップを開く…",
-            true,
-            None::<&str>,
-        )?)?;
+        v.push(item(ID_SETUP, "セットアップを開く…"));
     }
-    menu.append(&MenuItem::with_id(
-        app,
-        ID_SETTINGS,
-        "設定を開く…",
-        true,
-        Some("CmdOrCtrl+,"),
-    )?)?;
-    menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&MenuItem::with_id(
-        app,
-        ID_QUIT,
-        "mukuchi を終了",
-        true,
-        Some("CmdOrCtrl+Q"),
-    )?)?;
+    v.push(Entry::Item {
+        id: ID_SETTINGS,
+        text: "設定を開く…".into(),
+        enabled: true,
+        accelerator: Some("CmdOrCtrl+,"),
+    });
+    v.push(Entry::Separator);
+    v.push(Entry::Item {
+        id: ID_QUIT,
+        text: "mukuchi を終了".into(),
+        enabled: true,
+        accelerator: Some("CmdOrCtrl+Q"),
+    });
+    v
+}
+
+fn build_menu(app: &AppHandle, m: &MenuModel, variant: MenuVariant) -> Result<Menu<tauri::Wry>> {
+    let menu = Menu::new(app)?;
+    for e in menu_entries(m, variant) {
+        match e {
+            Entry::Item {
+                id,
+                text,
+                enabled,
+                accelerator,
+            } => menu.append(&MenuItem::with_id(app, id, text, enabled, accelerator)?)?,
+            Entry::Check { id, text, checked } => menu.append(&CheckMenuItem::with_id(
+                app,
+                id,
+                text,
+                true,
+                checked,
+                None::<&str>,
+            )?)?,
+            Entry::Separator => menu.append(&PredefinedMenuItem::separator(app)?)?,
+        }
+    }
     Ok(menu)
 }
 
@@ -353,6 +415,18 @@ fn on_menu(app: &AppHandle, id: &str) {
             }
         }
         ID_RECOVER => recover(app, &core),
+        ID_COMPACT => {
+            // メニューは開く度に作るため、チェックの状態ではなく今の設定から反転する
+            tauri::async_runtime::spawn(async move {
+                let next = match core.settings.get().panel_style {
+                    PanelStyle::Full => "compact",
+                    PanelStyle::Compact => "full",
+                };
+                if let Err(e) = core.update_settings(&serde_json::json!({ "panelStyle": next })) {
+                    log::error!("パネルの表示形式を変更できません: {e:#}");
+                }
+            });
+        }
         ID_QUIT => app.exit(0),
         _ => {}
     }
@@ -428,13 +502,39 @@ mod tests {
     }
 
     #[test]
+    fn panel_menu_has_compact_instead_of_toggle() {
+        let s = StateManager::new();
+        s.set_asr_ready(true);
+        let m = MenuModel::of(&s.status(), false, true);
+        let ids = |v: &[Entry]| -> Vec<&'static str> {
+            v.iter()
+                .filter_map(|e| match e {
+                    Entry::Item { id, .. } | Entry::Check { id, .. } => Some(*id),
+                    Entry::Separator => None,
+                })
+                .collect()
+        };
+        let tray = menu_entries(&m, MenuVariant::Tray);
+        assert_eq!(ids(&tray), [ID_STATUS, ID_TOGGLE, ID_SETTINGS, ID_QUIT]);
+        for compact in [false, true] {
+            let panel = menu_entries(&m, MenuVariant::Panel { compact });
+            assert_eq!(ids(&panel), [ID_STATUS, ID_COMPACT, ID_SETTINGS, ID_QUIT]);
+            assert!(panel.contains(&Entry::Check {
+                id: ID_COMPACT,
+                text: "コンパクト表示",
+                checked: compact,
+            }));
+        }
+    }
+
+    #[test]
     fn icons_per_phase() {
         assert_eq!(IconKind::of(Phase::Off), IconKind::Off);
         assert_eq!(IconKind::of(Phase::Speaking), IconKind::Speaking);
         assert_eq!(IconKind::of(Phase::Finalizing), IconKind::Finalizing);
         assert_eq!(IconKind::of(Phase::Done), IconKind::Listening);
         // PNG が @1x=18px / @2x=36px であること
-        for png in [ICON_MIC, ICON_MIC_OFF, ICON_AUDIO_LINES, ICON_LOADER] {
+        for png in [ICON_LOGO, ICON_LOGO_OFF, ICON_LOGO_DOT] {
             assert_eq!(&png.x1[16..24], &[0, 0, 0, 18, 0, 0, 0, 18]);
             assert_eq!(&png.x2[16..24], &[0, 0, 0, 36, 0, 0, 0, 36]);
         }
@@ -484,6 +584,27 @@ mod tests {
                         max_alpha >= min_alpha && visible >= 20 * scale * scale,
                         "{label}: max_alpha={max_alpha} visible={visible}"
                     );
+                    // 状態を表す点: 発話中・文字起こし中は右下 (15pt, 15pt)、エラーは右上 (14.5pt, 3.5pt) に赤
+                    let at = |x: f64, y: f64| {
+                        rep.colorAtX_y((x * scale as f64) as isize, (y * scale as f64) as isize)
+                            .expect("color")
+                    };
+                    match kind {
+                        IconKind::Speaking | IconKind::Finalizing => {
+                            assert!(at(15.0, 15.0).alphaComponent() > 0.9, "{label}: 右下の点");
+                        }
+                        IconKind::Listening => {
+                            assert!(at(15.0, 15.0).alphaComponent() < 0.5, "{label}: 点がない");
+                        }
+                        IconKind::Error => {
+                            let c = at(14.5, 3.5);
+                            assert!(
+                                c.redComponent() > 0.8 && c.greenComponent() < 0.5,
+                                "{label}: 右上の赤い点"
+                            );
+                        }
+                        IconKind::Off => {}
+                    }
                     if let Some(dir) = &dump {
                         let props = NSDictionary::<NSBitmapImageRepPropertyKey, _>::new();
                         // SAFETY: 空の辞書 (型は API どおり)

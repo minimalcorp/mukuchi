@@ -57,8 +57,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ================================================================================
 3. Lucide (lucide-icons/lucide) — ISC License
-   使用箇所: メニューバーのアイコン (src-tauri/icons/tray/: mic, mic-off, audio-lines,
-            loader-circle の形)
+   使用箇所: 画面内のアイコン (lucide-react。フロントエンドのバンドルに含まれる)
 ================================================================================
 
 ISC License

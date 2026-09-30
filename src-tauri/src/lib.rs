@@ -116,6 +116,9 @@ pub fn run() {
         .setup(|app| {
             // 常駐アプリのため Dock に出さない (設定・セットアップ表示中のみ Regular にする)
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            if cfg!(debug_assertions) {
+                macos::activation::install_debug_observer();
+            }
 
             // 同梱物。tauri dev では target/debug/ にコピーされたものを指す
             let uv = resolve_uv(|rel| {

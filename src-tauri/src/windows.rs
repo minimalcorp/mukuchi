@@ -24,7 +24,7 @@ use tauri::{
 use tauri_nspanel::{CollectionBehavior, ManagerExt, PanelBuilder, PanelLevel, StyleMask};
 
 use crate::core::Core;
-use crate::macos::screen;
+use crate::macos::{activation, screen};
 use crate::settings::PanelPosition;
 use geometry::{PanelAnchor, Point, Rect};
 
@@ -209,6 +209,9 @@ pub fn create_panel(app: &AppHandle, visible: bool) -> Result<()> {
         })
         .build()
         .context("パネルを作成できません")?;
+    // tauri-nspanel が後から付ける nonactivating はウィンドウサーバーに伝わらないため直接設定する
+    // (詳細は activation::prevent_activation)。ないとパネルのクリックで入力先のアプリがフォーカスを失う
+    ensure_prevents_activation(app);
     reposition_panel_on_main(app, true);
     if visible {
         panel.show();
@@ -231,9 +234,23 @@ pub fn show_panel(app: &AppHandle) -> Result<()> {
         // 隠れている間に Dock・ディスプレイ構成が変わっていることがあるため置き直してから出す
         reposition_panel_on_main(&app2, true);
         panel.show();
+        // 表示し直しで戻ることがないよう念のため再設定する (読み返して確認する)
+        ensure_prevents_activation(&app2);
         log::info!("パネルを表示");
     })
     .context("メインスレッドに送れません")
+}
+
+/// パネルのクリックで mukuchi を前面アプリにしない設定をする (メインスレッド)。
+fn ensure_prevents_activation(app: &AppHandle) {
+    let Ok(panel) = app.get_webview_panel(PANEL) else {
+        return;
+    };
+    if !activation::prevent_activation(panel.as_panel()) {
+        log::error!(
+            "パネルのクリックで mukuchi が前面アプリになるのを防げません (この macOS では未対応)"
+        );
+    }
 }
 
 /// 開発時の確認用に、フォーカスを奪わないための設定をログに出す。
@@ -243,9 +260,10 @@ fn log_panel_flags(app: &AppHandle) {
     };
     let ns = panel.as_panel();
     log::info!(
-        "panel: nonactivating={} canBecomeKey={} canBecomeMain={} becomesKeyOnlyIfNeeded={} floating={} level={}",
+        "panel: nonactivating={} preventsActivation={:?} canBecomeKey={} canBecomeMain={} becomesKeyOnlyIfNeeded={} floating={} level={}",
         ns.styleMask()
             .contains(objc2_app_kit::NSWindowStyleMask::NonactivatingPanel),
+        activation::prevents_activation(ns),
         panel.can_become_key_window(),
         panel.can_become_main_window(),
         panel.becomes_key_only_if_needed(),

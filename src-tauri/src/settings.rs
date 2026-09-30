@@ -107,6 +107,34 @@ impl PanelPosition {
     }
 }
 
+/// パネルの表示形式。compact はマイクの円形ボタンのみ (描き分けはフロントエンド)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PanelStyle {
+    #[default]
+    Full,
+    Compact,
+}
+
+impl PanelStyle {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "full" => Some(Self::Full),
+            "compact" => Some(Self::Compact),
+            _ => None,
+        }
+    }
+}
+
+/// 保存済みの値が未知 (新しい版で増えた値に戻した等) でも設定全体を捨てないよう、既定値として読む。
+/// 変更時の不正な値は `apply_patch` がエラーにする
+impl<'de> Deserialize<'de> for PanelStyle {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Self::parse(&s).unwrap_or_default())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -120,6 +148,7 @@ pub struct Settings {
     pub excluded_apps: Vec<ExcludedApp>,
     pub panel_position: Option<PanelPosition>,
     pub setup_completed: bool,
+    pub panel_style: PanelStyle,
 }
 
 impl Default for Settings {
@@ -136,6 +165,7 @@ impl Default for Settings {
             excluded_apps: Vec::new(),
             panel_position: None,
             setup_completed: false,
+            panel_style: PanelStyle::Full,
         }
     }
 }
@@ -188,6 +218,9 @@ impl Settings {
         for (k, v) in patch {
             if !obj.contains_key(k) {
                 anyhow::bail!("未知の設定キー: {k}");
+            }
+            if k == "panelStyle" && v.as_str().and_then(PanelStyle::parse).is_none() {
+                anyhow::bail!("panelStyle が不正です: {v}");
             }
             obj.insert(k.clone(), v.clone());
         }
@@ -328,6 +361,27 @@ mod tests {
         assert_eq!(s.silence_ms, 800);
         assert_eq!(s.vad_sensitivity, 60);
         assert_eq!(s.voice_commands.len(), 3);
+    }
+
+    #[test]
+    fn panel_style_default_patch_and_lenient_load() {
+        assert_eq!(Settings::default().panel_style, PanelStyle::Full);
+        assert_eq!(
+            serde_json::to_value(Settings::default()).unwrap()["panelStyle"],
+            "full"
+        );
+        // 旧設定 (キーなし) は full
+        let s: Settings = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(s.panel_style, PanelStyle::Full);
+        // 未知の値でも設定全体は捨てない
+        let s: Settings =
+            serde_json::from_value(json!({ "panelStyle": "tiny", "silenceMs": 800 })).unwrap();
+        assert_eq!((s.panel_style, s.silence_ms), (PanelStyle::Full, 800));
+        let s = Settings::default();
+        let next = s.apply_patch(&json!({ "panelStyle": "compact" })).unwrap();
+        assert_eq!(next.panel_style, PanelStyle::Compact);
+        assert!(s.apply_patch(&json!({ "panelStyle": "tiny" })).is_err());
+        assert!(s.apply_patch(&json!({ "panelStyle": 1 })).is_err());
     }
 
     #[test]

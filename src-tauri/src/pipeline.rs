@@ -24,10 +24,21 @@ const LEVEL_INTERVAL_FRAMES: usize = 2;
 const PARAMS_REFRESH_FRAMES: usize = 16;
 /// 途中表示: 前回の要求から音声がこれだけ伸びたら次を送る (implementation-plan.md 2.)
 pub const PARTIAL_STEP_SAMPLES: usize = SAMPLE_RATE as usize * 8 / 10;
-/// 途中表示を送るのは発話がこの長さ未満の間だけ。
+/// 長い発話の途中表示は区切り (chunk) ごとに文字起こしする。1区切りの長さの上限。
+///
 /// 途中表示を取り消しても ASR サーバーは推論を最後まで続ける (直列実行) ため、話し終わり直前に
-/// 長い音声の途中表示が走っていると確定がその分遅れる。長い発話ほど1回の推論が長いので上限を設ける
-pub const PARTIAL_MAX_SAMPLES: usize = SAMPLE_RATE as usize * 20;
+/// 長い音声の途中表示が走っていると確定がその分遅れる。発話全体を毎回送ると推論時間が発話の長さに
+/// 比例して伸びるので、区切りが一定の長さに達したら静かな所で確定し、以後は区切りの後の音声だけを送る
+/// (表示は確定した区切りの文字 + 今の区切りの文字)。1回の推論は区切りの長さで頭打ちになる。
+/// 比較 (約50秒の発話、implementation-plan.md 2.): 12秒は8秒より境目が少なく表示の誤りが少ない
+pub const PARTIAL_CHUNK_MAX_SAMPLES: usize = SAMPLE_RATE as usize * 12;
+/// 区切りの長さの下限 (推論が遅い環境・短い silenceMs でも、区切りが細かくなりすぎないように)
+pub const PARTIAL_CHUNK_MIN_SAMPLES: usize = SAMPLE_RATE as usize * 3;
+/// 区切る位置は直近のこの長さの中で最も静かな所 (話の間) にする
+const SPLIT_SEARCH_SAMPLES: usize = SAMPLE_RATE as usize * 3;
+/// 静かさを測る幅 (160ms) と刻み (20ms)
+const SPLIT_WINDOW_SAMPLES: usize = SAMPLE_RATE as usize * 16 / 100;
+const SPLIT_STEP_SAMPLES: usize = SAMPLE_RATE as usize * 2 / 100;
 /// デバイスが失われた時に開き直すまでの待ち (AirPods のプロファイル切り替え等が落ち着くまで)
 const REOPEN_DELAY: Duration = Duration::from_millis(500);
 /// 開き直してからこの時間内に再び失われたら諦める (開き直しは1回まで)
@@ -42,14 +53,46 @@ pub trait PipelineSink: Send + Sync {
     /// 途中表示の要求を今送ってよいか (前の要求が処理中・確定処理中なら送らない)。
     /// `samples` は送る音声の長さ (推論時間の見積もりに使う)
     fn can_request_partial(&self, samples: usize) -> bool;
-    /// 発話開始からの音声で途中表示を要求する。結果を待たずに戻ること
-    fn request_partial(&self, id: u64, audio: Vec<f32>);
+    /// 途中表示の区切りの長さ (サンプル数。`PARTIAL_CHUNK_MIN_SAMPLES..=PARTIAL_CHUNK_MAX_SAMPLES`)
+    fn partial_chunk_samples(&self) -> usize;
+    /// 途中表示を要求する。結果を待たずに戻ること。受け付けなかったら false
+    fn request_partial(&self, id: u64, req: PartialRequest) -> bool;
     /// 話し終わった発話。確定処理 (ASR→入力) を始める
     fn utterance_ended(&self, id: u64, audio: Vec<f32>);
     /// 誤検出・OFFによる破棄
     fn utterance_discarded(&self, id: u64);
     /// デバイス切断など、録音を続けられない
     fn capture_lost(&self, message: String);
+}
+
+/// 途中表示の要求。音声は確定済みの区切りの後から
+#[derive(Debug)]
+pub struct PartialRequest {
+    pub audio: Vec<f32>,
+    /// この音声で区切りを確定する (結果は表示せず、以後の途中表示の前に付ける)
+    pub commit: bool,
+}
+
+/// `[lo, hi)` の中で最も静かな (160ms の平均パワーが最小の) 所の位置。短すぎれば `hi`
+fn quietest_point(audio: &[f32], lo: usize, hi: usize) -> usize {
+    let hi = hi.min(audio.len());
+    if lo + SPLIT_WINDOW_SAMPLES > hi {
+        return hi;
+    }
+    let mut best = (f32::INFINITY, hi);
+    let mut i = lo;
+    while i + SPLIT_WINDOW_SAMPLES <= hi {
+        let e: f32 = audio[i..i + SPLIT_WINDOW_SAMPLES]
+            .iter()
+            .map(|x| x * x)
+            .sum();
+        // 同じ静かさなら後ろ (新しい方) を選ぶ: 次の区切りを短くする
+        if e <= best.0 {
+            best = (e, i + SPLIT_WINDOW_SAMPLES / 2);
+        }
+        i += SPLIT_STEP_SAMPLES;
+    }
+    best.1
 }
 
 /// 録音の開始の失敗。VAD の問題をマイクの問題と区別して知らせるため分ける
@@ -179,6 +222,8 @@ pub struct Processor<V: VoiceActivityDetector> {
     current: Option<u64>,
     /// 最後に途中表示を要求した時点の音声の長さ (サンプル数)
     partial_len: usize,
+    /// 確定した区切りの終わり (サンプル数)。途中表示はここからの音声を送る
+    partial_base: usize,
     frames: usize,
     level_frames: usize,
     level_peak_db: f32,
@@ -194,6 +239,7 @@ impl<V: VoiceActivityDetector> Processor<V> {
             sink,
             current: None,
             partial_len: 0,
+            partial_base: 0,
             frames: 0,
             level_frames: 0,
             level_peak_db: f32::MIN,
@@ -228,6 +274,7 @@ impl<V: VoiceActivityDetector> Processor<V> {
                 let id = self.sink.next_utterance_id();
                 self.current = Some(id);
                 self.partial_len = 0;
+                self.partial_base = 0;
                 self.sink.utterance_started(id);
             }
             Some(e) => self.deliver(e),
@@ -251,7 +298,9 @@ impl<V: VoiceActivityDetector> Processor<V> {
     /// 途中表示: 前回の要求から 0.8秒以上伸び、前の要求が処理中でなければ送る。
     /// 間隔はタイマーではなく音声の長さで決める (処理が遅い時に要求が溜まらない)。
     /// 無音待ちの間は送らない: 増えたのは無音だけで表示は変わらず (無音はハルシネーションの原因にもなる)、
-    /// 話し終わりの確定リクエストの直前に途中表示が ASR を占有して確定を遅らせるため
+    /// 話し終わりの確定リクエストの直前に途中表示が ASR を占有して確定を遅らせるため。
+    /// 区切りの後の音声が区切りの長さに達したら、直近の最も静かな所までを区切りとして確定する
+    /// (`PARTIAL_CHUNK_MAX_SAMPLES`)
     fn maybe_request_partial(&mut self) {
         if self.segmenter.in_silence() {
             return;
@@ -259,16 +308,34 @@ impl<V: VoiceActivityDetector> Processor<V> {
         let (Some(id), Some(audio)) = (self.current, self.segmenter.current_audio()) else {
             return;
         };
-        if audio.len() < self.partial_len + PARTIAL_STEP_SAMPLES
-            || audio.len() >= PARTIAL_MAX_SAMPLES
-        {
+        if audio.len() < self.partial_len + PARTIAL_STEP_SAMPLES {
             return;
         }
-        if !self.sink.can_request_partial(audio.len()) {
+        let base = self.partial_base.min(audio.len());
+        let chunk = self
+            .sink
+            .partial_chunk_samples()
+            .clamp(PARTIAL_CHUNK_MIN_SAMPLES, PARTIAL_CHUNK_MAX_SAMPLES);
+        let (end, commit) = if audio.len() - base >= chunk {
+            let lo = (base + chunk / 2).max(audio.len().saturating_sub(SPLIT_SEARCH_SAMPLES));
+            (quietest_point(audio, lo, audio.len()), true)
+        } else {
+            (audio.len(), false)
+        };
+        if !self.sink.can_request_partial(end - base) {
+            return;
+        }
+        let req = PartialRequest {
+            audio: audio[base..end].to_vec(),
+            commit,
+        };
+        if !self.sink.request_partial(id, req) {
             return;
         }
         self.partial_len = audio.len();
-        self.sink.request_partial(id, audio.to_vec());
+        if commit {
+            self.partial_base = end;
+        }
     }
 
     fn deliver(&mut self, event: SegmentEvent) {
@@ -426,11 +493,17 @@ mod tests {
         fn can_request_partial(&self, _: usize) -> bool {
             !self.busy.load(Ordering::SeqCst)
         }
-        fn request_partial(&self, id: u64, audio: Vec<f32>) {
+        fn partial_chunk_samples(&self) -> usize {
+            PARTIAL_CHUNK_MAX_SAMPLES
+        }
+        fn request_partial(&self, id: u64, req: PartialRequest) -> bool {
+            let kind = if req.commit { "commit" } else { "partial" };
+            let frames = req.audio.len() as f32 / FRAME_SAMPLES as f32;
             self.log
                 .lock()
                 .unwrap()
-                .push(format!("partial {id} {}", audio.len() / FRAME_SAMPLES));
+                .push(format!("{kind} {id} {}", frames.round()));
+            true
         }
         fn utterance_started(&self, id: u64) {
             self.log.lock().unwrap().push(format!("start {id}"));
@@ -564,29 +637,61 @@ mod tests {
     }
 
     #[test]
-    fn no_partials_after_max_length() {
+    fn quietest_point_picks_the_pause() {
+        let mut a = vec![0.3f32; SAMPLE_RATE as usize * 3];
+        // 1.0〜1.3秒が静か
+        let pause = SAMPLE_RATE as usize..SAMPLE_RATE as usize * 13 / 10;
+        a[pause.clone()].iter_mut().for_each(|x| *x = 0.0);
+        let p = quietest_point(&a, 0, a.len());
+        assert!(pause.contains(&p), "{p}");
+        // 探す範囲が窓より短ければ終わり
+        assert_eq!(quietest_point(&a, 100, 200), 200);
+    }
+
+    /// 長い発話: 区切りの長さに達したら静かな所で区切りを確定し、以後は区切りの後だけを送る。
+    /// 1回に送る音声は区切りの長さ (+ 待ち) で頭打ちになる
+    #[test]
+    fn long_utterance_partials_are_chunked_at_pauses() {
         let sink = Arc::new(Sink::default());
-        let max_frames = PARTIAL_MAX_SAMPLES / FRAME_SAMPLES; // 625
+        let chunk_frames = PARTIAL_CHUNK_MAX_SAMPLES / FRAME_SAMPLES; // 375
+        let total = chunk_frames * 3;
         let mut probs = vec![0.0; 1];
-        probs.extend(vec![0.9; max_frames + 100]);
+        probs.extend(vec![0.9; total]);
         let mut p = Processor::new(Scripted(probs.clone(), 0), sink.clone());
         let loud = vec![0.3f32; FRAME_SAMPLES];
-        for _ in 0..probs.len() {
-            p.frame(&loud);
+        let quiet = vec![0.0f32; FRAME_SAMPLES];
+        // 340〜350 フレーム目に話の間 (VAD は発話中のまま)
+        for i in 0..probs.len() {
+            p.frame(if (340..350).contains(&i) {
+                &quiet
+            } else {
+                &loud
+            });
         }
         let log = sink.log.lock().unwrap();
-        let lens: Vec<usize> = log
+        let reqs: Vec<(String, usize)> = log
             .iter()
-            .filter_map(|l| l.strip_prefix("partial 1 "))
-            .map(|n| n.parse().unwrap())
+            .filter_map(|l| {
+                let mut it = l.split(' ');
+                let kind = it.next()?;
+                (kind == "partial" || kind == "commit")
+                    .then(|| (kind.to_string(), it.nth(1).unwrap().parse().unwrap()))
+            })
             .collect();
-        assert!(!lens.is_empty());
-        assert!(lens
+        let commits: Vec<usize> = reqs
             .iter()
-            .all(|&n| n * FRAME_SAMPLES < PARTIAL_MAX_SAMPLES));
+            .filter(|(k, _)| k == "commit")
+            .map(|r| r.1)
+            .collect();
+        assert!(commits.len() >= 2, "{reqs:?}");
+        // 最初の区切りは話の間で終わる (音声は pre-pad を含むためフレーム番号は少しずれる)
+        assert!((335..=355).contains(&commits[0]), "{commits:?}");
         assert!(
-            *lens.last().unwrap() + 25 >= max_frames,
-            "上限の直前までは送る"
+            reqs.iter().all(|(_, n)| *n <= chunk_frames + 25),
+            "{reqs:?}"
         );
+        // 区切りの後も途中表示を送り続ける (0.8秒ごと)
+        assert!(reqs.len() >= total / 25 - 2, "{}", reqs.len());
+        assert_eq!(reqs.last().unwrap().0, "partial");
     }
 }

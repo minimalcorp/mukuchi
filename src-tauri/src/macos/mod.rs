@@ -1,5 +1,6 @@
 //! macOS API の呼び出し (objc2)。unsafe はこのモジュールに閉じ込める。
 
+pub mod activation;
 pub mod keyboard;
 pub mod screen;
 pub mod status_icon;

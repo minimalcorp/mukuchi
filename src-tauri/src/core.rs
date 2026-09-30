@@ -16,7 +16,9 @@ use crate::audio::{self, Source};
 use crate::insert::{InsertConfig, InsertQueue, Job, UtteranceResult};
 use crate::macos::{self, MicAuthorization};
 use crate::paths::{DataPaths, Resources};
-use crate::pipeline::{self, PipelineSink, Running, StartError};
+use crate::pipeline::{
+    self, PartialRequest, PipelineSink, Running, StartError, PARTIAL_CHUNK_MAX_SAMPLES,
+};
 use crate::provisioning::hf::HfModel;
 use crate::provisioning::runtime::UvRuntime;
 use crate::provisioning::{Provisioner, ServerVerify, Stage};
@@ -120,6 +122,11 @@ impl PartialCost {
     pub fn fits(&self, secs: f64, silence_ms: u32) -> bool {
         self.estimate_ms(secs) <= silence_ms as f64
     }
+
+    /// 話し終わりの判定までに終わる見込みの最長の音声 (秒)。途中表示の区切りの長さに使う
+    pub fn max_fitting_secs(&self, silence_ms: u32) -> f64 {
+        ((silence_ms as f64 - Self::BASE_MS) / self.ms_per_sec.max(1.0)).max(0.0)
+    }
 }
 
 impl Default for PartialCost {
@@ -128,6 +135,14 @@ impl Default for PartialCost {
             ms_per_sec: Self::INITIAL_MS_PER_SEC,
         }
     }
+}
+
+/// 長い発話の、確定した区切りの文字
+struct Chunks {
+    id: u64,
+    text: String,
+    /// 区切りの文字起こしに失敗した。以後この発話の途中表示は出さない (区切りが欠けた文になるため)
+    failed: bool,
 }
 
 /// 途中表示の状態
@@ -139,6 +154,8 @@ struct PartialState {
     closed_upto: u64,
     /// 直前の途中表示 (stableLength の計算用)
     prev: Option<(u64, String)>,
+    /// 確定した区切りの文字 (長い発話。`PartialRequest::commit`)
+    chunks: Option<Chunks>,
     cost: PartialCost,
 }
 
@@ -940,15 +957,25 @@ impl Core {
             && self.asr_client().is_some()
     }
 
-    fn request_partial(self: &Arc<Self>, id: u64, samples: Vec<f32>) {
+    fn partial_chunk_samples(&self) -> usize {
+        let silence_ms = self.settings.get().silence_ms;
+        let secs = lock(&self.partial).cost.max_fitting_secs(silence_ms);
+        (secs * crate::vad::SAMPLE_RATE as f64) as usize
+    }
+
+    fn request_partial(self: &Arc<Self>, id: u64, req: PartialRequest) -> bool {
         let Some(client) = self.asr_client() else {
-            return;
+            return false;
         };
         let mut p = lock(&self.partial);
         if id <= p.closed_upto || p.in_flight.is_some() {
-            return;
+            return false;
         }
         p.in_flight = Some(id);
+        let PartialRequest {
+            audio: samples,
+            commit,
+        } = req;
         let context = asr::vocabulary_context(&self.settings.get().vocabulary);
         let core = self.clone();
         // 取り消しても応答までは待つ (推論時間を学習するため。close_partial)
@@ -960,14 +987,29 @@ impl Core {
                 client.transcribe(wav, context).await
             }
             .await;
-            core.partial_done(id, result, secs, started);
+            core.partial_done(id, commit, result, secs, started);
         });
+        true
     }
 
-    fn partial_done(&self, id: u64, result: Result<Transcript>, secs: f64, started: Instant) {
+    fn partial_done(
+        &self,
+        id: u64,
+        commit: bool,
+        result: Result<Transcript>,
+        secs: f64,
+        started: Instant,
+    ) {
         let mut p = lock(&self.partial);
         if p.in_flight == Some(id) {
             p.in_flight = None;
+        }
+        if id > p.closed_upto && p.chunks.as_ref().is_none_or(|c| c.id != id) {
+            p.chunks = Some(Chunks {
+                id,
+                text: String::new(),
+                failed: false,
+            });
         }
         let text = match result {
             Ok(t) => {
@@ -982,6 +1024,11 @@ impl Core {
                 // 暫定値のため失敗は無視する (確定処理に任せる)
                 if id > p.closed_upto {
                     log::warn!("発話 {id} の途中表示に失敗: {e:#}");
+                    if commit {
+                        if let Some(c) = p.chunks.as_mut() {
+                            c.failed = true;
+                        }
+                    }
                 }
                 return;
             }
@@ -990,9 +1037,26 @@ impl Core {
         if id <= p.closed_upto {
             return;
         }
+        let Some(chunks) = p.chunks.as_mut() else {
+            return;
+        };
+        if chunks.failed {
+            return;
+        }
+        if commit {
+            // 表示は次の途中表示でまとめて更新する (ここで出すと区切りの後の分が一瞬消える)
+            chunks.text.push_str(&text);
+            log::info!(
+                "発話 {id} の途中表示の区切りを確定: 音声 {secs:.2}秒, {}文字, {}ms",
+                text.chars().count(),
+                started.elapsed().as_millis()
+            );
+            return;
+        }
         if text.trim().is_empty() {
             return;
         }
+        let text = format!("{}{text}", chunks.text);
         let prev = p
             .prev
             .as_ref()
@@ -1023,12 +1087,13 @@ impl Core {
     ///
     /// 注意: 応答待ちをやめても ASR サーバー側の推論は止まらない (推論は直列のため、確定はその推論の
     /// 終了を待つ)。影響を抑えるため、途中表示は話し終わりの判定までに終わる見込みの時だけ送り
-    /// (`PartialCost`)、長い発話 (`PARTIAL_MAX_SAMPLES` 以上) では送らない。
+    /// (`PartialCost`)、長い発話は区切りごとに送る (`PARTIAL_CHUNK_MAX_SAMPLES`)。
     /// 取り消した要求も応答は受け取り、推論時間の学習に使う (結果の表示は捨てる。`partial_done`)
     fn close_partial(&self, id: u64) -> bool {
         let mut p = lock(&self.partial);
         p.closed_upto = p.closed_upto.max(id);
         p.prev = None;
+        p.chunks = None;
         if p.in_flight.is_some_and(|i| i <= id) {
             p.in_flight = None;
             return true;
@@ -1265,10 +1330,16 @@ impl PipelineSink for Sink {
             .is_some_and(|c| c.can_request_partial(samples))
     }
 
-    fn request_partial(&self, id: u64, audio: Vec<f32>) {
-        if let Some(c) = self.core.upgrade() {
-            c.request_partial(id, audio);
-        }
+    fn partial_chunk_samples(&self) -> usize {
+        self.core
+            .upgrade()
+            .map_or(PARTIAL_CHUNK_MAX_SAMPLES, |c| c.partial_chunk_samples())
+    }
+
+    fn request_partial(&self, id: u64, req: PartialRequest) -> bool {
+        self.core
+            .upgrade()
+            .is_some_and(|c| c.request_partial(id, req))
     }
 
     fn utterance_ended(&self, id: u64, audio: Vec<f32>) {
@@ -1335,6 +1406,11 @@ mod tests {
         }
         assert!((c.estimate_ms(10.0) - 2150.0).abs() < 20.0);
         assert!(!c.fits(10.0, 1300));
+        // 区切りの長さ: 見積もりが silenceMs に収まる最長
+        let d = PartialCost::default();
+        assert!((d.max_fitting_secs(1300) - 1150.0 / 60.0).abs() < 1e-9);
+        assert!(d.fits(d.max_fitting_secs(1300), 1300));
+        assert_eq!(d.max_fitting_secs(100), 0.0);
     }
 
     #[test]

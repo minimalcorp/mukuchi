@@ -43,7 +43,8 @@ const ON_PHASES: AppStatus["phase"][] = ["listening", "speaking", "finalizing", 
 
 // ピル・カードの大きさ。展開の最終の大きさを先に求めるため、クラスではなくここで持つ
 const CARD_WIDTH = { pill: 240, expanded: 440 };
-const ROW_HEIGHT = { pill: 34, expanded: 36 };
+// ボタン行の高さ。デザインは展開時 36px だが、展開の前後でボタン・メーターの位置が動かないよう待機中のピル (枠線込み36px → 内側34px) と揃える
+const ROW_HEIGHT = { pill: 34, expanded: 34 };
 const CARD_BORDER = 1;
 
 // アンカーへの寄せ方。ウィンドウ内 (flex) とカード・最終の大きさの要素の重ね方 (grid) で同じ向きにする

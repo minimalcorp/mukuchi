@@ -172,6 +172,8 @@ export const commands = {
   openSetup: () => call<void>("open_setup"),
   /** setup の動作テストで panel を出す (セットアップ完了前は panel を表示しないため) */
   showPanel: () => call<void>("show_panel"),
+  /** panel の右クリックメニュー (メニューバーと同じ内容)。座標は panel ウィンドウ内の論理ピクセル */
+  showPanelMenu: (x: number, y: number) => call<void>("show_panel_menu", { x, y }),
 };
 
 // ---------- events ----------

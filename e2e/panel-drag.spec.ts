@@ -1,5 +1,6 @@
 /*
  * パネルのドラッグ移動 (押下後 4px 以上動いたら startDragging、動かさずに離したらクリック) と、
+ * 右クリックで show_panel_menu を呼ぶこと (ドラッグ・切り替えにならない)、
  * setup の動作テストで show_panel を呼ぶことの確認。
  */
 import { expect, test, type Locator, type Page } from "@playwright/test";
@@ -46,6 +47,16 @@ async function pressMove(page: Page, target: Locator, dx: number) {
   await page.mouse.up();
 }
 
+/** 修飾キーを押したまま pressMove する */
+async function pressMoveWith(page: Page, target: Locator, dx: number, key: string) {
+  await page.keyboard.down(key);
+  try {
+    await pressMove(page, target, dx);
+  } finally {
+    await page.keyboard.up(key);
+  }
+}
+
 const STATES = [
   { name: "OFF", query: "window=panel&mock=off", button: "音声入力をオン", on: true },
   { name: "ON", query: "window=panel&mock=idle", button: "音声入力をオフ", on: false },
@@ -79,6 +90,62 @@ for (const s of STATES) {
     await expect.poll(async () => (await calls(page, "set_listening")).map((c) => c.args)).toEqual([{ on: s.on }]);
   });
 }
+
+/** 要素の中央 (ページ座標) */
+async function center(target: Locator) {
+  const box = await target.boundingBox();
+  if (!box) throw new Error("要素がありません");
+  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+}
+
+for (const s of STATES) {
+  test(`panel ${s.name}: ボタン上の右クリックで show_panel_menu を呼び、切り替え・ドラッグしない`, async ({ page }) => {
+    await open(page, s.query, PANEL);
+    const button = page.getByRole("button", { name: s.button });
+    const { x, y } = await center(button);
+    // 押したまま動かしてもドラッグにしない
+    await page.mouse.move(x, y);
+    await page.mouse.down({ button: "right" });
+    await page.mouse.move(x + 12, y, { steps: 4 });
+    await page.mouse.up({ button: "right" });
+    await expect.poll(async () => (await calls(page, "show_panel_menu")).length).toBe(1);
+    const [menu] = await calls(page, "show_panel_menu");
+    // ビューポート = panel ウィンドウなので clientX/Y はページ座標と一致する
+    expect(menu.args).toEqual({ x: Math.round(x), y: Math.round(y) });
+    expect(await calls(page, "set_listening")).toHaveLength(0);
+    expect(await dragCalls(page)).toBe(0);
+  });
+
+  test(`panel ${s.name}: control + クリックは切り替え・ドラッグしない`, async ({ page }) => {
+    await open(page, s.query, PANEL);
+    const button = page.getByRole("button", { name: s.button });
+    await button.click({ modifiers: ["Control"] });
+    await pressMoveWith(page, button, 12, "Control");
+    expect(await calls(page, "set_listening")).toHaveLength(0);
+    expect(await dragCalls(page)).toBe(0);
+  });
+}
+
+test("panel ON: メーター上の右クリックでも show_panel_menu を呼ぶ", async ({ page }) => {
+  await open(page, "window=panel&mock=idle", PANEL);
+  await page.getByTestId("level-meter").click({ button: "right" });
+  await expect.poll(async () => (await calls(page, "show_panel_menu")).length).toBe(1);
+  expect(await calls(page, "set_listening")).toHaveLength(0);
+  expect(await dragCalls(page)).toBe(0);
+});
+
+test("panel: WebView 標準の右クリックメニューはどこでも出さない", async ({ page }) => {
+  await open(page, "window=panel&mock=off", PANEL);
+  await expect(page.getByTestId("panel-pill")).toBeVisible();
+  const prevented = await page.evaluate(() => {
+    const ev = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 1, clientY: 1 });
+    document.body.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  });
+  expect(prevented).toBe(true);
+  // ピル・カードの外ではメニューを出さない
+  expect(await calls(page, "show_panel_menu")).toHaveLength(0);
+});
 
 test("panel ON: ボタン以外の場所 (メーター) からもドラッグできる", async ({ page }) => {
   await open(page, "window=panel&mock=idle", PANEL);

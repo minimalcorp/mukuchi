@@ -21,6 +21,8 @@ tauri-build = { version = "2", features = [] }
 # macos-private-api: 透明ウィンドウ (panel) に必要。tauri-nspanel も要求する (App Store 配布はしない)
 tauri = { version = "2", features = ["tray-icon", "macos-private-api", "image-png"] }
 tauri-plugin-log = "2"
+# 2つ目のプロセスを起動させない (macOS は /tmp の Unix ソケット。識別子ごとなので dev と本番は別)
+tauri-plugin-single-instance = "2.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

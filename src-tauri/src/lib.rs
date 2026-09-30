@@ -84,6 +84,20 @@ pub fn run() {
         std::process::exit(code);
     }
     let app = tauri::Builder::default()
+        // 最初に登録する (プラグインの指定)。2つ目のプロセスは既存のプロセスに知らせて、ここで終了する。
+        // Finder 等からの起動は LaunchServices が既存のプロセスに Reopen を送るだけだが、
+        // 実行ファイルの直接起動や `open -n` では別プロセスが立つため (ASR サーバー・パネルが二重になる)
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // 引数は使わない・記録しない。ウィンドウ操作はメインスレッドで行う
+            log::info!("2つ目の起動を検知: 画面を開く");
+            let app2 = app.clone();
+            if app
+                .run_on_main_thread(move || windows::open_on_relaunch(&app2))
+                .is_err()
+            {
+                log::warn!("メインスレッドに送れません");
+            }
+        }))
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
@@ -205,6 +219,7 @@ pub fn run() {
             commands::set_panel_size,
             commands::get_panel_anchor,
             commands::show_panel,
+            commands::show_panel_menu,
         ])
         .build(context)
         .expect("error while building tauri application");
@@ -215,6 +230,12 @@ pub fn run() {
             if code.is_none() {
                 api.prevent_exit();
             }
+        }
+        // Dock に出ない常駐アプリのため、Finder・Spotlight・Launchpad から開き直した時に設定 (未完了ならセットアップ) を開く。
+        // パネルが常に見えているため has_visible_windows は判断に使わない
+        RunEvent::Reopen { .. } => {
+            log::info!("Reopen: 画面を開く");
+            windows::open_on_relaunch(app);
         }
         // ASR サーバーを止める (止めきれなくても、終了で stdin が閉じてサーバーは終わる)
         RunEvent::Exit => {

@@ -572,6 +572,23 @@ pub fn open_setup(app: &AppHandle) -> Result<()> {
     show_regular(app, &w)
 }
 
+/// Finder・Spotlight 等からの再度の起動 (Reopen) や2つ目のプロセスの起動時に、
+/// Dock に出ない常駐アプリでも画面を開けるようにする。セットアップ未完了ならセットアップを開く
+pub fn open_on_relaunch(app: &AppHandle) {
+    // 起動処理 (setup) の完了前は何もしない (起動処理がセットアップの要否を決める)
+    let Some(core) = app.try_state::<Arc<Core>>() else {
+        return;
+    };
+    let result = if core.settings.get().setup_completed {
+        open_settings(app, None)
+    } else {
+        open_setup(app)
+    };
+    if let Err(e) = result {
+        log::error!("再起動時に画面を開けません: {e:#}");
+    }
+}
+
 pub fn close_setup(app: &AppHandle) -> Result<()> {
     if let Some(w) = app.get_webview_window(SETUP) {
         w.destroy()

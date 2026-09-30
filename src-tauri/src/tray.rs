@@ -5,6 +5,8 @@
 //!   エラー時は最上部に原因の行と復旧の項目を1つずつ出す。
 //!   セットアップ完了前は「セットアップを開く…」を出す (セットアップ画面を閉じた人が再開できるように)
 //!
+//! パネルからも同じメニューを出せる (`popup_panel_menu`。ノッチに隠れた時の代わり)。
+//!
 //! 状態の変化は録音・入力のスレッドから通知されるため、ここでは待たずにメインスレッドへ送るだけにし
 //! (`run_on_main_thread` は投げっぱなし)、メインスレッド側で最新の状態を読んで反映する。
 
@@ -228,12 +230,7 @@ fn refresh(app: &AppHandle, state: &TrayState) -> Result<()> {
     *icon = applied;
     drop(icon);
 
-    // OFF後も確定処理中は Finalizing になるため、ONかどうかは Phase ではなく事実から判定する
-    let model = MenuModel::of(
-        &status,
-        core.state.is_listening(),
-        core.settings.get().setup_completed,
-    );
+    let model = current_model(&core, &status);
     let mut last = state.menu.lock().unwrap_or_else(|p| p.into_inner());
     if last.as_ref() != Some(&model) {
         let menu = build_menu(app, &model)?;
@@ -242,6 +239,47 @@ fn refresh(app: &AppHandle, state: &TrayState) -> Result<()> {
         *last = Some(model);
     }
     Ok(())
+}
+
+fn current_model(core: &Core, status: &AppStatus) -> MenuModel {
+    // OFF後も確定処理中は Finalizing になるため、ONかどうかは Phase ではなく事実から判定する
+    MenuModel::of(
+        status,
+        core.state.is_listening(),
+        core.settings.get().setup_completed,
+    )
+}
+
+/// パネル内の論理座標 (左上原点) にメニューバーと同じメニューを出す (`show_panel_menu`)。
+/// ノッチ付きの画面ではメニューバーのアイコンがノッチに隠れることがあり、Dock にも出ないため、
+/// パネルからも設定・終了に辿れるようにする。
+/// 項目の ID がメニューバーと同じなので、選択はメニューバーの `on_menu` (全メニュー共通の受け口) で処理される。
+///
+/// NSMenu のポップアップは閉じるまで戻らない (メニューのイベントループを回す) ため、
+/// 呼び出し元を待たせないよう投げっぱなしでメインスレッドに送る。
+pub fn popup_panel_menu(app: &AppHandle, x: f64, y: f64) -> Result<()> {
+    if !x.is_finite() || !y.is_finite() {
+        anyhow::bail!("位置が不正です");
+    }
+    let app2 = app.clone();
+    app.run_on_main_thread(move || {
+        if let Err(e) = popup_on_main(&app2, x, y) {
+            log::error!("パネルのメニューを表示できません: {e:#}");
+        }
+    })
+    .context("メインスレッドに送れません")
+}
+
+fn popup_on_main(app: &AppHandle, x: f64, y: f64) -> Result<()> {
+    let core = app.state::<Arc<Core>>().inner().clone();
+    let model = current_model(&core, &core.state.status());
+    let menu = build_menu(app, &model)?;
+    let panel = app
+        .get_webview_window(windows::PANEL)
+        .context("パネルがありません")?;
+    panel
+        .popup_menu_at(&menu, tauri::LogicalPosition::new(x, y))
+        .context("メニューを表示できません")
 }
 
 fn build_menu(app: &AppHandle, m: &MenuModel) -> Result<Menu<tauri::Wry>> {

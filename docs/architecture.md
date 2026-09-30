@@ -35,6 +35,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(デザイ�
 | 常時表示パネル | フォーカスを奪わないパネル(NSPanel, non-activating。`tauri-nspanel`)。既定は画面下中央(Dockの上16px)、ドラッグで移動し位置を記憶。前面ウィンドウのあるディスプレイに表示。ピルはディスプレイの visibleFrame (Dock・メニューバーを除く) に収める。記憶するのは利用者のドラッグだけ(ディスプレイの取り外し等でシステムが動かした位置は記憶しない) | |
 | ログイン時に起動 | `SMAppService.mainAppService` (macOS 13+) で登録。登録・解除するのは利用者の操作の時だけ: セットアップ完了時 (その時点の launchAtLogin に揃える) と、完了後に設定を切り替えた時。セットアップ完了前の変更は保存のみ。登録後の status が `enabled` でなければ保存せずエラー (承認待ちなら「ログイン項目」を開く案内)。起動時は登録・解除せず、システム設定での変更 (オフ・削除・オン) を設定に取り込む。開発ビルドはセットアップ完了時・起動時の処理をせず、設定画面で切り替えた時だけ登録・解除する | status の意味は SDK の SMAppService.h: 利用者がシステム設定でオフにすると `requiresApproval`、解除済みは `notRegistered`。起動時に status から推測して登録し直すと利用者の選択を上書きするため | tauri-plugin-autostart の macOS 実装は LaunchAgent (plist をアプリ外に置く) か AppleScript (自動化の許可が要る) のみのため使わない |
 | Dock | 通常は非表示(Accessory)。設定・セットアップウィンドウ表示中のみ表示(Regular) | |
+| 再度の起動 | 起動中に Finder・Spotlight・Launchpad から開くと (macOS の Reopen) 設定を開く (セットアップ未完了ならセットアップ)。2つ目のプロセス (実行ファイルの直接起動・`open -n`) は `tauri-plugin-single-instance` で既存プロセスに知らせて終了し、同じく設定を開く | メニューバーのアイコンがノッチに隠れ Dock にも出ないと、設定・終了に辿れないため。LaunchServices 経由の起動は2つ目を立てず Reopen になるが、直接起動は防げない |
 | 配布 | Developer ID署名 + 公証の .dmg。Mac App Storeは対象外 | サンドボックスではCGEventPost不可 |
 | 実行環境の導入 | アプリは軽量に保ち、初回セットアップでuv(同梱)がPython・依存・モデルを導入 | |
 | アンインストール | 設定 > ストレージ の「完全にアンインストール」+ `scripts/uninstall.sh`。「実行環境とモデルのみ削除」も提供 | |
@@ -226,6 +227,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `complete_setup` | → `()` | セットアップ完了。launchAtLogin をログイン項目に反映し (本番ビルドのみ。登録できなければ launchAtLogin を false にして完了する)、panelを表示してsetupウィンドウを閉じる |
 | `open_setup` | → `()` | セットアップウィンドウを開く(エラー `start_setup` の復旧・実行環境の再導入) |
 | `show_panel` | → `()` | panelを表示する (表示中なら何もしない)。setupの「試しに話してみてください」ステップに入った時に呼ぶ。起動時、setupCompleted が false ならpanelは作るだけで表示しない (setupを閉じても非表示のまま。メニューバーの「セットアップを開く…」で再開できる)。ONにした時 (メニューバー等から) もRustがpanelを表示する |
+| `show_panel_menu` | `{ x: number; y: number }` → `()` | panelの右クリック。メニューバーと同じ内容のmacOS標準メニューを、panelウィンドウ内の座標 (論理px、左上原点。MouseEvent の clientX/clientY をそのまま渡す) に表示する (メニューバーのアイコンがノッチで隠れても操作できるようにするため)。メニューが閉じるのを待たずに戻る。項目の選択はメニューバーと同じ処理になる |
 
 #### events (Rust → 全ウィンドウ)
 

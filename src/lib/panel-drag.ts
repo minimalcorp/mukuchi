@@ -2,8 +2,10 @@
  * パネル (ピル・カード) のドラッグ移動。
  * data-tauri-drag-region はボタン上では効かず、OFF のピルはほぼ全体がボタンのため掴める場所がない。
  * そこで押下後に一定距離動いたらウィンドウのドラッグを始め、動かさずに離した時だけクリック (ボタンの操作) とする。
+ * 右クリック (macOS の control + クリックを含む) はドラッグ・クリックにせず、メニュー (show_panel_menu) を出す。
  */
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { commands, runCommand } from "@/lib/ipc";
 import { useRef, type MouseEvent, type PointerEvent } from "react";
 
 // これ未満の移動はクリック中の手ぶれとみなす
@@ -19,7 +21,8 @@ export function usePanelDrag() {
     // ネイティブのドラッグが始まると pointerup が届かないことがあるため、前回の状態は押下のたびに捨てる
     cleanupRef.current?.();
     draggedRef.current = false;
-    if (e.button !== 0 || !e.isPrimary) return;
+    // control + 左ボタンは macOS では右クリック (contextmenu) の扱い。ドラッグにしない
+    if (e.button !== 0 || !e.isPrimary || e.ctrlKey) return;
     const startX = e.clientX;
     const startY = e.clientY;
     const onMove = (ev: globalThis.PointerEvent) => {
@@ -45,12 +48,19 @@ export function usePanelDrag() {
 
   const onClickCapture = (e: MouseEvent<HTMLElement>) => {
     // detail === 0 はキーボード (Enter / Space) による操作。ドラッグの後でも打ち消さない
-    if (draggedRef.current && e.detail !== 0) {
+    // control + クリックは contextmenu でメニューを出すので、ボタンの操作にはしない
+    if ((draggedRef.current || e.ctrlKey) && e.detail !== 0) {
       e.preventDefault();
       e.stopPropagation();
     }
     draggedRef.current = false;
   };
 
-  return { onPointerDown, onClickCapture };
+  const onContextMenu = (e: MouseEvent<HTMLElement>) => {
+    e.preventDefault();
+    // ウィンドウ内の座標 (CSS px = 論理 px)。メニューバーのアイコンがノッチで隠れても同じメニューを出せるようにする
+    runCommand(commands.showPanelMenu(e.clientX, e.clientY));
+  };
+
+  return { onPointerDown, onClickCapture, onContextMenu };
 }

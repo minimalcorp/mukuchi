@@ -274,6 +274,7 @@ export function installMock(params: URLSearchParams) {
         case "open_setup":
         case "complete_setup":
         case "show_panel":
+        case "show_panel_menu":
           return null;
         case "get_panel_anchor":
           return db.anchor;

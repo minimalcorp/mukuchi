@@ -185,6 +185,13 @@ pub fn set_panel_size(app: AppHandle, width: f64, height: f64) -> CmdResult<()> 
     windows::set_panel_size(&app, width, height).map_err(err)
 }
 
+/// パネル内の論理座標 (左上原点) にメニューバーと同じメニューを出す。
+/// メニューが閉じるのを待たずに戻る (選択はメニューバーと同じ処理に流れる)
+#[tauri::command]
+pub fn show_panel_menu(app: AppHandle, x: f64, y: f64) -> CmdResult<()> {
+    crate::tray::popup_panel_menu(&app, x, y).map_err(err)
+}
+
 /// panel の読み込み直後に、`panel-anchor` を待たずに現在のアンカーを取る
 #[tauri::command]
 pub fn get_panel_anchor(app: AppHandle) -> windows::geometry::PanelAnchor {

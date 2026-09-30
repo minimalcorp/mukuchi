@@ -53,6 +53,12 @@ const GRID_JUSTIFY: Record<PanelAnchor["horizontal"], string> = {
 export function PanelWindow() {
   const { status, items, lastShown, errorVisible } = usePanelModel();
   const anchor = usePanelAnchor();
+  // WebView 標準のメニュー (再読み込み・要素の詳細を表示等) は出さない。ピル・カード上では独自のメニューを出す
+  useEffect(() => {
+    const suppress = (e: Event) => e.preventDefault();
+    document.addEventListener("contextmenu", suppress);
+    return () => document.removeEventListener("contextmenu", suppress);
+  }, []);
   if (!status) return null;
 
   const isOn = ON_PHASES.includes(status.phase);

@@ -377,36 +377,111 @@ pub fn segment_samples(samples_16k: &[f32], params: VadParams) -> Result<Vec<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vad::{KEEP_TAIL_MS, MIN_SPEECH_MS, ONSET_LOOKBACK_MS, PRE_SPEECH_PAD_MS};
     use std::path::PathBuf;
     use std::sync::atomic::AtomicU64;
     use std::sync::Mutex;
 
+    /// 実音声の 2 発話 (長文 + 短いコマンド) を返す。
+    ///
     /// リポジトリの smoke WAV (git 管理外) があれば使い、なければ macOS の `say` で作る。
-    fn speech_wav(name: &str, text: &str) -> Option<Vec<f32>> {
-        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../spikes/asr-bench/data/smoke")
-            .join(format!("{name}.wav"));
-        let path = if repo.exists() {
-            repo
-        } else {
-            let tmp = std::env::temp_dir()
-                .join(format!("mukuchi-test-{name}-{}.wav", std::process::id()));
-            let ok = std::process::Command::new("say")
-                .args(["-o"])
-                .arg(&tmp)
-                .args(["--data-format=LEI16@16000", text])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !ok {
-                eprintln!("skip: {name}.wav がなく say も使えない");
-                return None;
-            }
-            tmp
+    /// CI の runner には日本語音声 (Kyoko) が無いことがあり、英語音声に日本語を読ませると
+    /// ほぼ無音の短いクリップになって発話が 1 つ消える。そのため音声とテキストの言語を揃える。
+    /// `MUKUCHI_TEST_NO_SMOKE=1` で smoke WAV を無視 (CI 条件の再現)、
+    /// `MUKUCHI_TEST_SAY_VOICE=<名前>` で音声を固定できる。
+    /// `say` が使えない時は None (テストはスキップ理由を出して戻る)。
+    fn speech_pair() -> Option<(Vec<f32>, Vec<f32>)> {
+        let smoke =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../spikes/asr-bench/data/smoke");
+        let use_smoke = std::env::var_os("MUKUCHI_TEST_NO_SMOKE").is_none();
+        let (a, b) = (smoke.join("daily01.wav"), smoke.join("cmd01.wav"));
+        if use_smoke && a.exists() && b.exists() {
+            eprintln!("speech source: smoke WAV");
+            return Some((read_16k(&a), read_16k(&b)));
+        }
+
+        let Some((voice, texts)) = pick_say_voice() else {
+            eprintln!("skip: smoke WAV がなく say の音声も見つからない");
+            return None;
         };
-        let (samples, rate) = audio::read_wav_mono(&path).unwrap();
+        eprintln!("speech source: say -v {voice}");
+        let a = say_16k(&voice, texts[0], "a");
+        let b = say_16k(&voice, texts[1], "b");
+        Some((a, b))
+    }
+
+    const JA_TEXTS: [&str; 2] = ["今日の午後3時から定例ミーティングがあります。", "確定"];
+    const EN_TEXTS: [&str; 2] = [
+        "The regular meeting starts at three o'clock this afternoon.",
+        "Okay, confirmed.",
+    ];
+
+    /// `say -v ?` の一覧から、テキストの言語と一致する音声を選ぶ。
+    fn pick_say_voice() -> Option<(String, [&'static str; 2])> {
+        let out = std::process::Command::new("say")
+            .args(["-v", "?"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        // 各行は「名前 (空白) ロケール # 例文」。名前に空白や括弧を含むことがある
+        let voices: Vec<(String, String)> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let head = l.split('#').next()?.trim_end();
+                let (name, locale) = head.rsplit_once(char::is_whitespace)?;
+                Some((name.trim().to_string(), locale.to_string()))
+            })
+            .collect();
+        let texts_for = |locale: &str| {
+            if locale.starts_with("ja") {
+                Some(JA_TEXTS)
+            } else if locale.starts_with("en") {
+                Some(EN_TEXTS)
+            } else {
+                None
+            }
+        };
+        if let Ok(forced) = std::env::var("MUKUCHI_TEST_SAY_VOICE") {
+            let (name, locale) = voices
+                .iter()
+                .find(|(n, _)| *n == forced)
+                .unwrap_or_else(|| panic!("MUKUCHI_TEST_SAY_VOICE={forced} が say -v ? にない"));
+            let texts = texts_for(locale)
+                .unwrap_or_else(|| panic!("{forced} ({locale}) は ja/en の音声ではない"));
+            return Some((name.clone(), texts));
+        }
+        // 既知の音声を優先して結果を安定させ、無ければ ja/en の最初の音声
+        ["Kyoko", "Samantha", "Alex", "Fred"]
+            .iter()
+            .find_map(|want| voices.iter().find(|(n, _)| n == want))
+            .or_else(|| voices.iter().find(|(_, l)| texts_for(l).is_some()))
+            .and_then(|(n, l)| Some((n.clone(), texts_for(l)?)))
+    }
+
+    fn say_16k(voice: &str, text: &str, tag: &str) -> Vec<f32> {
+        let tmp = std::env::temp_dir().join(format!(
+            "mukuchi-test-{tag}-{}-{}.wav",
+            voice.replace(|c: char| !c.is_ascii_alphanumeric(), "_"),
+            std::process::id()
+        ));
+        let status = std::process::Command::new("say")
+            .args(["-v", voice, "-o"])
+            .arg(&tmp)
+            .args(["--data-format=LEI16@16000", text])
+            .status()
+            .expect("say を起動できない");
+        assert!(status.success(), "say -v {voice} が失敗した: {status}");
+        let samples = read_16k(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        samples
+    }
+
+    fn read_16k(path: &std::path::Path) -> Vec<f32> {
+        let (samples, rate) = audio::read_wav_mono(path).unwrap();
         assert_eq!(rate, 16000);
-        Some(samples)
+        samples
     }
 
     fn silence(ms: usize) -> Vec<f32> {
@@ -415,28 +490,46 @@ mod tests {
 
     #[test]
     fn silero_segments_real_speech() {
-        let Some(a) = speech_wav("daily01", "今日の午後3時から定例ミーティングがあります。")
-        else {
+        let Some((a, b)) = speech_pair() else {
             return;
         };
-        let Some(b) = speech_wav("cmd01", "確定") else {
-            return;
-        };
+        // 元音声が短すぎると VAD の最小発話長で落ち、分割の検証にならない
+        for (name, src) in [("a", &a), ("b", &b)] {
+            let ms = src.len() / 16;
+            assert!(
+                ms >= (MIN_SPEECH_MS + 300) as usize,
+                "発話 {name} が {ms}ms しかない (音声とテキストの言語不一致の疑い)"
+            );
+        }
+
+        let silence_ms = 1300;
+        // 話し終わり判定 (無音待ち + 末尾保持) と次発話の遡り・前置きが重ならない間隔
+        let gap_ms =
+            (silence_ms + KEEP_TAIL_MS + PRE_SPEECH_PAD_MS + ONSET_LOOKBACK_MS + 1000) as usize;
         let mut signal = silence(1000);
         signal.extend(&a);
-        signal.extend(silence(2500));
+        signal.extend(silence(gap_ms));
         signal.extend(&b);
-        signal.extend(silence(2500));
+        signal.extend(silence(gap_ms));
 
-        let params = VadParams::from_settings(60, 1300);
+        let params = VadParams::from_settings(60, silence_ms);
         let segs = segment_samples(&signal, params).unwrap();
-        assert_eq!(segs.len(), 2, "2つの発話に分かれる");
+        let lens: Vec<usize> = segs.iter().map(|s| s.len() / 16).collect();
+        assert_eq!(
+            segs.len(),
+            2,
+            "2つの発話に分かれる (元 {}ms/{}ms, 切り出し {lens:?}ms)",
+            a.len() / 16,
+            b.len() / 16
+        );
         for (seg, src) in segs.iter().zip([&a, &b]) {
             let seg_ms = seg.len() / 16;
             let src_ms = src.len() / 16;
-            // pre-pad(≤320ms) + 発話 + 末尾(≤320ms) に収まり、無音待ち(1.3秒)は含まない
+            // say/録音の前後の無音は削られてよい (≤400ms)。pre-pad + 発話 + 末尾に収まり、
+            // 無音待ち (1.3秒) は含まない
+            let max_extra = (PRE_SPEECH_PAD_MS + KEEP_TAIL_MS + 100) as usize;
             assert!(
-                seg_ms + 400 >= src_ms && seg_ms <= src_ms + 700,
+                seg_ms + 400 >= src_ms && seg_ms <= src_ms + max_extra,
                 "発話 {src_ms}ms に対して切り出し {seg_ms}ms"
             );
         }

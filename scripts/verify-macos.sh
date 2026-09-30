@@ -151,7 +151,7 @@ else
   if /usr/bin/hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mnt" "$dmg" >/dev/null; then
     inner="$mnt/mukuchi.app"
     check "dmg: 中の .app の codesign --verify --deep --strict" /usr/bin/codesign --verify --deep --strict "$inner"
-    a="$(/usr/bin/codesign -dvv "$APP" 2>&1 | grep '^CDHash=')"; b="$(/usr/bin/codesign -dvv "$inner" 2>&1 | grep '^CDHash=')"
+    a="$(/usr/bin/codesign -dvvv "$APP" 2>&1 | grep '^CDHash=')"; b="$(/usr/bin/codesign -dvvv "$inner" 2>&1 | grep '^CDHash=')"
     [ -n "$a" ] && [ "$a" = "$b" ] && pass "dmg: 中の .app = $APP ($a)" || fail "dmg: 中の .app が $APP と違う ($b / $a)"
     check "dmg: 中の .app の stapler validate" hostxcrun stapler validate "$inner"
     [ -L "$mnt/Applications" ] && pass "dmg: Applications へのリンク" || fail "dmg: Applications へのリンクがない"

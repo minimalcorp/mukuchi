@@ -81,10 +81,11 @@ down: ## 開発環境を停止
 
 restart: down up ## 再起動
 
-# 起動中のアプリが設定を書き戻さないよう先に止める。モデルは残す (ALL=1 で実行環境も消す、PERMISSIONS=1 で TCC も)
-reset: ## dev の設定・導入記録・WebKit データを消して初回起動の状態に (ALL=1 / PERMISSIONS=1)
+# 起動中のアプリが設定を書き戻さないよう先に止める。モデル・実行環境・導入記録は残す
+# (PROVISION=1 で導入記録、ALL=1 で実行環境と導入記録、PERMISSIONS=1 で TCC も消す)
+reset: ## dev の設定・WebKit データを消して初回起動の状態に (PROVISION=1 / ALL=1 / PERMISSIONS=1)
 	@$(MAKE) --no-print-directory down
-	@ALL="$(ALL)" PERMISSIONS="$(PERMISSIONS)" scripts/dev-reset.sh
+	@ALL="$(ALL)" PROVISION="$(PROVISION)" PERMISSIONS="$(PERMISSIONS)" scripts/dev-reset.sh
 
 # MUKUCHI_DEV_SHOW_SETUP は今回起動する process-compose (→ app) の環境にだけ渡す。次の make up/restart には残らない
 up-fresh: ## reset してセットアップ画面ありで起動 (MUKUCHI_DEV_SHOW_SETUP=1)

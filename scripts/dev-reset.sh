@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 開発版 (com.minimalcorp.mukuchi.dev) の状態を消し、次回の起動を初回起動と同じにする。make reset から呼ぶ。
-# モデル (models/, 約4GB) は常に残す。実行環境 (python・venv・uv・cache・asr-server) は ALL=1 の時だけ消す。
+# モデル (models/, 約4GB) は常に残す。導入済みの記録 (provisioned.json) は PROVISION=1、
+# 実行環境 (python・venv・uv・cache・asr-server) は ALL=1 の時だけ消す (ALL=1 は記録も消す)。
 # PERMISSIONS=1 で dev のバンドルIDの TCC もリセットする。
 # 消す対象は docs/architecture.md「識別子・パス」のアンインストール対象のうち dev のもの (ログは残す)。
 set -euo pipefail
@@ -44,8 +45,12 @@ if [ -d "$data" ]; then
   if [ -f "$data/.mukuchi-data" ] && [ ! -e "$data/.git" ]; then
     remove "$data/settings.json"
     remove "$data/settings.json.tmp"
-    remove "$data/provisioned.json"
-    remove "$data/provisioned.json.tmp"
+    # 導入済みの記録を残すと、セットアップの「ダウンロード」画面は完了済みで表示され待たされない。
+    # ダウンロード・導入の流れ自体を確かめる時だけ PROVISION=1 (または ALL=1) で消す
+    if [ "${PROVISION:-}" = 1 ] || [ "${ALL:-}" = 1 ]; then
+      remove "$data/provisioned.json"
+      remove "$data/provisioned.json.tmp"
+    fi
     if [ "${ALL:-}" = 1 ]; then
       for d in python venv uv cache asr-server; do remove "$data/$d"; done
     fi
@@ -65,6 +70,9 @@ done
 
 [ "$removed" -gt 0 ] || echo "  (削除するものなし)"
 [ -d "$data/models" ] && echo "  kept: $data/models"
+if [ "${PROVISION:-}" != 1 ] && [ "${ALL:-}" != 1 ]; then
+  echo "  kept: 導入済みの記録 (provisioned.json)。セットアップのダウンロードからやり直すなら PROVISION=1"
+fi
 if [ "${ALL:-}" != 1 ]; then
   echo "  kept: 実行環境 (python・venv・uv・cache・asr-server)。消すなら ALL=1"
 fi

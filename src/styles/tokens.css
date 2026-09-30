@@ -1,0 +1,164 @@
+/*
+ * Minimal Portal DS のトークン (HEX のまま)。
+ * パレット・角丸・影・モーション・文字サイズは DS の値をそのまま使い、
+ * ダークモードは DS にトークンがないため、デザインの参考表示 (グレー 700〜900 を面に当てる) に合わせて
+ * セマンティック側だけを上書きする。コンポーネントは原則セマンティックトークンを参照する。
+ */
+:root {
+  /* --- Base palette --- */
+  --blue-50: #eef2ff; --blue-100: #dfe6ff; --blue-200: #c2cffe; --blue-300: #97acfb; --blue-400: #6b85f4;
+  --blue-500: #3b5bdb; --blue-600: #2f49b8; --blue-700: #273c95; --blue-800: #223375; --blue-900: #1d2b5e;
+
+  --gray-0: #ffffff; --gray-25: #fbfcfd; --gray-50: #f5f7fa; --gray-100: #eceff4; --gray-200: #dde2ea;
+  --gray-300: #c4ccd8; --gray-400: #98a2b3; --gray-500: #6b7686; --gray-600: #4d5666; --gray-700: #39404d;
+  --gray-800: #262b35; --gray-900: #14171d;
+
+  --green-50: #e6f6ef; --green-100: #c8ead9; --green-500: #0f8a5f; --green-600: #0c7150; --green-700: #095940;
+  --amber-50: #fdf4e3; --amber-100: #f8e4bd; --amber-500: #b7791f; --amber-600: #96631a; --amber-700: #7a5015;
+  --red-50: #fdecea; --red-100: #f9d2cf; --red-500: #c8322f; --red-600: #a82826; --red-700: #87201e;
+  --cyan-50: #e7f2fb; --cyan-100: #c7e0f4; --cyan-500: #1c7ed6; --cyan-600: #1668b0; --cyan-700: #12548e;
+  --violet-50: #f1ecfd; --violet-100: #ddd2fa; --violet-500: #6b46c8; --violet-600: #5838a6; --violet-700: #472d88;
+
+  /* --- Semantic: surfaces --- */
+  --surface-app: var(--gray-50);
+  --surface-card: var(--gray-0);
+  --surface-sunken: var(--gray-100);
+  --surface-hover: var(--gray-50);
+  --surface-active: var(--gray-100);
+  --surface-selected: var(--blue-50);
+  --surface-disabled: var(--gray-100);
+  --surface-overlay: rgba(20, 23, 29, 0.55);
+  /* デザインで gray-50 を直接使っている補足枠 (入力レベルの行・案内) */
+  --surface-muted: var(--gray-50);
+  /* 語の chip (gray-100 の面) */
+  --surface-chip: var(--gray-100);
+
+  /* --- Semantic: text --- */
+  --text-strong: var(--gray-900);
+  --text-body: var(--gray-800);
+  --text-muted: var(--gray-500);
+  --text-subtle: var(--gray-400);
+  --text-inverse: var(--gray-0);
+  --text-link: var(--blue-600);
+  --text-danger: var(--red-600);
+  --text-success: var(--green-600);
+  --text-warning: var(--amber-600);
+  --text-selected: var(--blue-700);
+  --text-listening: var(--blue-600);
+  --text-command: var(--violet-600);
+  /* プレビューの未確定部分 */
+  --text-unstable: var(--gray-400);
+
+  /* --- Semantic: borders --- */
+  --border-subtle: var(--gray-100);
+  --border-default: var(--gray-200);
+  --border-strong: var(--gray-300);
+  --border-focus: var(--blue-500);
+  --border-danger: var(--red-500);
+
+  /* --- Semantic: actions --- */
+  --action-primary: var(--blue-500);
+  --action-primary-hover: var(--blue-600);
+  --action-primary-active: var(--blue-700);
+  --action-danger: var(--red-500);
+  --action-danger-hover: var(--red-600);
+  --focus-ring: 0 0 0 3px rgba(59, 91, 219, 0.28);
+
+  /* --- メーター (パネル・設定・セットアップ) --- */
+  --meter-track: var(--gray-100);
+  --meter-track-strong: var(--gray-200);
+  --meter-idle: var(--gray-400);
+  --meter-active: var(--blue-500);
+  --meter-threshold: var(--gray-600);
+  --switch-off: var(--gray-300);
+  --progress-pending: var(--gray-200);
+
+  /* --- トーン (淡色背景 + 濃色文字) --- */
+  --tone-neutral-bg: var(--gray-100); --tone-neutral-fg: var(--gray-600);
+  --tone-info-bg: var(--cyan-50); --tone-info-fg: var(--cyan-700);
+  --tone-primary-bg: var(--blue-50); --tone-primary-fg: var(--blue-700);
+  --tone-success-bg: var(--green-50); --tone-success-fg: var(--green-700);
+  --tone-warning-bg: var(--amber-50); --tone-warning-fg: var(--amber-700);
+  --tone-danger-bg: var(--red-50); --tone-danger-fg: var(--red-700);
+  --tone-violet-bg: var(--violet-50); --tone-violet-fg: var(--violet-700);
+
+  /* --- Radius --- */
+  --radius-xs: 2px; --radius-sm: 4px; --radius-md: 6px; --radius-lg: 8px; --radius-xl: 12px; --radius-2xl: 16px;
+  --radius-pill: 999px;
+
+  /* --- Elevation --- */
+  --shadow-xs: 0 1px 1px rgba(20, 23, 29, 0.04);
+  --shadow-sm: 0 1px 2px rgba(20, 23, 29, 0.06), 0 1px 3px rgba(20, 23, 29, 0.05);
+  --shadow-md: 0 2px 4px rgba(20, 23, 29, 0.06), 0 4px 12px rgba(20, 23, 29, 0.07);
+  --shadow-lg: 0 8px 24px rgba(20, 23, 29, 0.1), 0 2px 6px rgba(20, 23, 29, 0.06);
+  --shadow-dialog: 0 24px 64px rgba(20, 23, 29, 0.22);
+
+  /* --- Motion --- */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --duration-instant: 80ms;
+  --duration-fast: 120ms;
+  --duration-normal: 180ms;
+  --duration-slow: 260ms;
+  --transition-control: background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard);
+
+  /* --- Fonts (同梱。Google Fonts は使わない) --- */
+  --font-sans: "IBM Plex Sans", "IBM Plex Sans JP", system-ui, -apple-system, "Hiragino Kaku Gothic ProN", sans-serif;
+  --font-jp: "IBM Plex Sans JP", "IBM Plex Sans", "Hiragino Kaku Gothic ProN", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  color-scheme: light;
+}
+
+/* ダークモード: デザインの参考表示 (面 gray-800 / 枠 gray-700 / 文字 gray-50) に合わせる */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-app: var(--gray-900);
+    --surface-card: var(--gray-800);
+    --surface-sunken: var(--gray-900);
+    --surface-hover: var(--gray-700);
+    --surface-active: var(--gray-700);
+    --surface-selected: color-mix(in srgb, var(--blue-500) 24%, var(--gray-800));
+    --surface-disabled: var(--gray-700);
+    --surface-muted: var(--gray-900);
+    --surface-chip: var(--gray-700);
+
+    --text-strong: var(--gray-50);
+    --text-body: var(--gray-100);
+    --text-muted: var(--gray-400);
+    --text-subtle: var(--gray-500);
+    --text-link: var(--blue-300);
+    --text-danger: var(--red-100);
+    --text-success: var(--green-100);
+    --text-warning: var(--amber-100);
+    --text-selected: var(--blue-200);
+    --text-listening: var(--blue-300);
+    --text-command: var(--violet-100);
+    --text-unstable: var(--gray-500);
+
+    --border-subtle: var(--gray-700);
+    --border-default: var(--gray-700);
+    --border-strong: var(--gray-600);
+
+    --meter-track: var(--gray-700);
+    --meter-track-strong: var(--gray-700);
+    --meter-idle: var(--gray-500);
+    --meter-active: var(--blue-400);
+    --meter-threshold: var(--gray-400);
+    --switch-off: var(--gray-600);
+    --progress-pending: var(--gray-700);
+
+    --tone-neutral-bg: var(--gray-700); --tone-neutral-fg: var(--gray-100);
+    --tone-info-bg: color-mix(in srgb, var(--cyan-500) 22%, var(--gray-800)); --tone-info-fg: var(--cyan-100);
+    --tone-primary-bg: color-mix(in srgb, var(--blue-500) 24%, var(--gray-800)); --tone-primary-fg: var(--blue-200);
+    --tone-success-bg: color-mix(in srgb, var(--green-500) 22%, var(--gray-800)); --tone-success-fg: var(--green-100);
+    --tone-warning-bg: color-mix(in srgb, var(--amber-500) 22%, var(--gray-800)); --tone-warning-fg: var(--amber-100);
+    --tone-danger-bg: color-mix(in srgb, var(--red-500) 22%, var(--gray-800)); --tone-danger-fg: var(--red-100);
+    --tone-violet-bg: color-mix(in srgb, var(--violet-500) 24%, var(--gray-800)); --tone-violet-fg: var(--violet-100);
+
+    color-scheme: dark;
+  }
+}

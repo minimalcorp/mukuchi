@@ -38,3 +38,8 @@ __pycache__
 
 # Claude Design handoff (社内デザインシステムを含むため公開しない)
 docs/design/handoff/
+
+# Playwright (スクリーンショットは目視確認用で管理しない)
+e2e/screenshots/
+test-results/
+playwright-report/

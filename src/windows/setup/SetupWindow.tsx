@@ -475,6 +475,11 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
   const [commandsSent, setCommandsSent] = useState<{ id: number; text: string; key: string }[]>([]);
   const on = status != null && ["listening", "speaking", "finalizing", "done"].includes(status.phase);
 
+  // セットアップ完了前は panel が出ていないため、このステップに入った時に出す (パネルでオンにしてもらう)
+  useEffect(() => {
+    runCommand(commands.showPanel());
+  }, []);
+
   useEffect(
     () =>
       subscribeEvents({

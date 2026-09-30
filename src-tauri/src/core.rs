@@ -275,6 +275,17 @@ impl Core {
         Ok(())
     }
 
+    /// 起動時のパネル・セットアップの判定に使う条件 (launch.rs)
+    pub fn launch_input(&self) -> crate::launch::LaunchInput {
+        crate::launch::LaunchInput {
+            setup_completed: self.settings.get().setup_completed,
+            // dev_asr_url はデバッグビルドでしか Some にならない (asr::resolve_endpoint)
+            dev_external_asr: self.dev_asr_url.is_some(),
+            dev_force_setup: dev_flag(crate::launch::ENV_DEV_SHOW_SETUP),
+            dev_auto_listen: dev_flag(ENV_DEV_AUTO_LISTEN),
+        }
+    }
+
     /// 本番の ASR サーバー (自分で起動するもの) を使うか。開発で MUKUCHI_ASR_URL を指定した時は false
     fn managed_asr(&self) -> bool {
         self.dev_asr_url.is_none()
@@ -726,6 +737,10 @@ impl Core {
 
         self.start_capture_locked().await?;
         self.state.set_listening(true);
+        // セットアップを閉じてパネルが隠れたままでも、メニューバー等からONにしたら様子が見えるようにする
+        if let Err(e) = crate::windows::show_panel(&self.app) {
+            log::warn!("パネルを表示できません: {e:#}");
+        }
         Ok(())
     }
 
@@ -845,6 +860,9 @@ impl Core {
             },
         )?;
         let _ = self.app.emit(events::SETTINGS_CHANGED, &next);
+        if before.setup_completed != next.setup_completed {
+            crate::tray::refresh_menu(&self.app);
+        }
         if before.panel_position != next.panel_position {
             crate::windows::on_settings_panel_position(&self.app, next.panel_position.clone());
         }
@@ -868,6 +886,7 @@ impl Core {
                     &serde_json::json!({ "setupCompleted": true, "launchAtLogin": false }),
                 )?;
                 let _ = self.app.emit(events::SETTINGS_CHANGED, &next);
+                crate::tray::refresh_menu(&self.app);
                 Ok(())
             }
         }

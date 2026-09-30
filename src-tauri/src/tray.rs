@@ -2,7 +2,8 @@
 //!
 //! - アイコン: 状態別のテンプレート画像。エラー時だけ赤い点付き (非テンプレート)
 //! - メニュー: 状態の行 / 音声入力をオン・オフ / 設定を開く… / mukuchi を終了。
-//!   エラー時は最上部に原因の行と復旧の項目を1つずつ出す
+//!   エラー時は最上部に原因の行と復旧の項目を1つずつ出す。
+//!   セットアップ完了前は「セットアップを開く…」を出す (セットアップ画面を閉じた人が再開できるように)
 //!
 //! 状態の変化は録音・入力のスレッドから通知されるため、ここでは待たずにメインスレッドへ送るだけにし
 //! (`run_on_main_thread` は投げっぱなし)、メインスレッド側で最新の状態を読んで反映する。
@@ -26,6 +27,7 @@ const ID_STATUS: &str = "status";
 const ID_RECOVER: &str = "recover";
 const ID_TOGGLE: &str = "toggle";
 const ID_SETTINGS: &str = "settings";
+const ID_SETUP: &str = "setup";
 const ID_QUIT: &str = "quit";
 
 macro_rules! icon {
@@ -83,13 +85,18 @@ struct MenuModel {
     recover: Option<ErrorAction>,
     listening: bool,
     toggle_enabled: bool,
+    /// 「セットアップを開く…」を出すか
+    setup_item: bool,
 }
 
 impl MenuModel {
-    fn of(s: &AppStatus, listening: bool) -> Self {
+    fn of(s: &AppStatus, listening: bool, setup_completed: bool) -> Self {
+        let recover = s.error.as_ref().and_then(|e| e.action);
         Self {
+            // 復旧の項目が同じ操作なら重ねて出さない
+            setup_item: !setup_completed && recover != Some(ErrorAction::StartSetup),
             status: status_text(s),
-            recover: s.error.as_ref().and_then(|e| e.action),
+            recover,
             listening,
             // 読み込み中はONにできない。エラー中にONを選ぶとエラーを消して再試行する
             toggle_enabled: s.phase != Phase::Loading,
@@ -165,6 +172,11 @@ pub fn setup(app: &AppHandle, core: &Arc<Core>) -> Result<()> {
 /// メニューバーの外観 (明暗) の変化を反映する。エラー表示中だけ見回り (1秒ごと) から呼ぶ。
 /// 変更通知 (KVO) を使わずポーリングにするのは、エラー表示中にしか影響せず、確認も軽いため
 pub fn refresh_appearance(app: &AppHandle) {
+    refresh_menu(app);
+}
+
+/// 状態以外 (セットアップ完了等) でメニューが変わる時に呼ぶ。どのスレッドからでも呼べる
+pub fn refresh_menu(app: &AppHandle) {
     if let Some(state) = app.try_state::<Arc<TrayState>>() {
         schedule_refresh(app, state.inner());
     }
@@ -217,7 +229,11 @@ fn refresh(app: &AppHandle, state: &TrayState) -> Result<()> {
     drop(icon);
 
     // OFF後も確定処理中は Finalizing になるため、ONかどうかは Phase ではなく事実から判定する
-    let model = MenuModel::of(&status, core.state.is_listening());
+    let model = MenuModel::of(
+        &status,
+        core.state.is_listening(),
+        core.settings.get().setup_completed,
+    );
     let mut last = state.menu.lock().unwrap_or_else(|p| p.into_inner());
     if last.as_ref() != Some(&model) {
         let menu = build_menu(app, &model)?;
@@ -250,6 +266,15 @@ fn build_menu(app: &AppHandle, m: &MenuModel) -> Result<Menu<tauri::Wry>> {
         None::<&str>,
     )?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
+    if m.setup_item {
+        menu.append(&MenuItem::with_id(
+            app,
+            ID_SETUP,
+            "セットアップを開く…",
+            true,
+            None::<&str>,
+        )?)?;
+    }
     menu.append(&MenuItem::with_id(
         app,
         ID_SETTINGS,
@@ -282,6 +307,11 @@ fn on_menu(app: &AppHandle, id: &str) {
         ID_SETTINGS => {
             if let Err(e) = windows::open_settings(app, None) {
                 log::error!("設定を開けません: {e:#}");
+            }
+        }
+        ID_SETUP => {
+            if let Err(e) = windows::open_setup(app) {
+                log::error!("セットアップを開けません: {e:#}");
             }
         }
         ID_RECOVER => recover(app, &core),
@@ -323,24 +353,40 @@ mod tests {
     #[test]
     fn menu_model_per_state() {
         let s = StateManager::new();
-        let m = MenuModel::of(&s.status(), false);
+        let m = MenuModel::of(&s.status(), false, true);
         assert_eq!(m.status, "モデルを読み込んでいます…");
         assert!(!m.toggle_enabled);
 
         s.set_asr_ready(true);
-        let m = MenuModel::of(&s.status(), false);
+        let m = MenuModel::of(&s.status(), false, true);
         assert_eq!(m.status, "オフ・モデル読み込み済み");
         assert!(m.toggle_enabled);
         assert_eq!(m.recover, None);
 
         s.set_listening(true);
-        assert_eq!(MenuModel::of(&s.status(), true).status, "聞いています");
+        assert_eq!(
+            MenuModel::of(&s.status(), true, true).status,
+            "聞いています"
+        );
 
         s.set_error(AppError::asr_stopped("x"));
-        let m = MenuModel::of(&s.status(), false);
+        let m = MenuModel::of(&s.status(), false, true);
         assert_eq!(m.recover, Some(ErrorAction::RestartAsr));
         assert_eq!(m.status, "文字起こしサーバーが停止しました");
         assert_eq!(IconKind::of(s.status().phase), IconKind::Error);
+    }
+
+    #[test]
+    fn setup_item_until_completed() {
+        let s = StateManager::new();
+        s.set_asr_ready(true);
+        assert!(MenuModel::of(&s.status(), false, false).setup_item);
+        assert!(!MenuModel::of(&s.status(), false, true).setup_item);
+        // 復旧の「セットアップを開く…」と重ねない
+        s.set_error(AppError::runtime_missing());
+        let m = MenuModel::of(&s.status(), false, false);
+        assert_eq!(m.recover, Some(ErrorAction::StartSetup));
+        assert!(!m.setup_item);
     }
 
     #[test]

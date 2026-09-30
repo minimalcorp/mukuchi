@@ -163,6 +163,8 @@ export const commands = {
   setPanelSize: (width: number, height: number) => call<void>("set_panel_size", { width, height }),
   completeSetup: () => call<void>("complete_setup"),
   openSetup: () => call<void>("open_setup"),
+  /** setup の動作テストで panel を出す (セットアップ完了前は panel を表示しないため) */
+  showPanel: () => call<void>("show_panel"),
 };
 
 // ---------- events ----------

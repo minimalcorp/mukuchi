@@ -170,7 +170,14 @@ pub fn open_setup(app: AppHandle) -> CmdResult<()> {
 #[tauri::command]
 pub fn complete_setup(app: AppHandle, core: State<'_, Arc<Core>>) -> CmdResult<()> {
     core.inner().complete_setup().map_err(err)?;
+    // 「試しに話す」を経ずに完了した場合もパネルを出す
+    windows::show_panel(&app).map_err(err)?;
     windows::close_setup(&app).map_err(err)
+}
+
+#[tauri::command]
+pub fn show_panel(app: AppHandle) -> CmdResult<()> {
+    windows::show_panel(&app).map_err(err)
 }
 
 #[tauri::command]

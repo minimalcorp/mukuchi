@@ -75,6 +75,7 @@ export function installMock(params: URLSearchParams) {
   const api: MockApi = {
     db,
     calls: [],
+    windowCalls: [],
     fail: {},
     invoke: (cmd, args) => invoke(cmd, args),
     setStatus,
@@ -143,6 +144,7 @@ export function installMock(params: URLSearchParams) {
     async (cmd, args) => {
       const a = (args ?? {}) as Record<string, unknown>;
       if (!cmd.startsWith("plugin:")) api.calls.push({ cmd, args: a });
+      else if (cmd.startsWith("plugin:window|")) api.windowCalls.push({ cmd, args: a });
       const failure = api.fail[cmd];
       if (failure != null) return Promise.reject(failure);
       if (slow.has(cmd)) {
@@ -255,6 +257,7 @@ export function installMock(params: URLSearchParams) {
         case "open_logs_folder":
         case "open_setup":
         case "complete_setup":
+        case "show_panel":
           return null;
         case "get_app_info":
           return { version: "0.1.0", build: "42" };
@@ -274,6 +277,8 @@ export type MockApi = {
   db: MockDb;
   /** 呼ばれた command と引数 (plugin:* を除く)。Playwright から確認する */
   calls: { cmd: string; args: Record<string, unknown> }[];
+  /** ウィンドウ API の呼び出し (plugin:window|start_dragging 等)。Playwright から確認する */
+  windowCalls: { cmd: string; args: Record<string, unknown> }[];
   /** command 名 → reject するメッセージ (Rust の表示用メッセージの代わり) */
   fail: Record<string, string>;
   /** Tauri の invoke (他ウィンドウからの command 呼び出しを再現する) */

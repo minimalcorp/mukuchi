@@ -136,8 +136,8 @@ fn windows(app: &AppHandle) -> Arc<Windows> {
 
 // ---- panel ------------------------------------------------------------------
 
-/// パネルを作って表示する。setup (メインスレッド) から呼ぶ。
-pub fn create_panel(app: &AppHandle) -> Result<()> {
+/// パネルを作る。`visible` なら表示する (セットアップ完了前は作るだけ)。setup (メインスレッド) から呼ぶ。
+pub fn create_panel(app: &AppHandle, visible: bool) -> Result<()> {
     let (w, h) = PANEL_INITIAL_SIZE;
     let panel = PanelBuilder::<_, MukuchiPanel>::new(app, PANEL)
         .url(WebviewUrl::App("index.html".into()))
@@ -174,9 +174,30 @@ pub fn create_panel(app: &AppHandle) -> Result<()> {
         .build()
         .context("パネルを作成できません")?;
     reposition_panel_on_main(app, true);
-    panel.show();
+    if visible {
+        panel.show();
+    }
     log_panel_flags(app);
     Ok(())
+}
+
+/// パネルを表示する (表示中なら何もしない)。どのスレッドからでも呼べる。
+pub fn show_panel(app: &AppHandle) -> Result<()> {
+    let app2 = app.clone();
+    app.run_on_main_thread(move || {
+        let Ok(panel) = app2.get_webview_panel(PANEL) else {
+            log::warn!("パネルがありません");
+            return;
+        };
+        if panel.is_visible() {
+            return;
+        }
+        // 隠れている間に Dock・ディスプレイ構成が変わっていることがあるため置き直してから出す
+        reposition_panel_on_main(&app2, true);
+        panel.show();
+        log::info!("パネルを表示");
+    })
+    .context("メインスレッドに送れません")
 }
 
 /// 開発時の確認用に、フォーカスを奪わないための設定をログに出す。

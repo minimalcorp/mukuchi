@@ -87,15 +87,6 @@ test("panel: 展開は開始時点で最終の大きさを送り、収縮はカ�
   }
 });
 
-test("panel: ドラッグ領域はピル本体で、ボタンと余白には付けない", async ({ page }) => {
-  await open(page, "window=panel&mock=idle", PANEL);
-  const card = page.getByTestId("panel-card");
-  await expect(card).toHaveAttribute("data-tauri-drag-region", "deep");
-  await expect(page.getByTestId("panel-frame")).not.toHaveAttribute("data-tauri-drag-region");
-  await expect(page.getByTestId("panel-frame")).toHaveCSS("pointer-events", "none");
-  await expect(card.getByRole("button", { name: "音声入力をオフ" })).not.toHaveAttribute("data-tauri-drag-region");
-});
-
 // ---------- エラーからの復旧 ----------
 
 test("panel: マイクが見つからない → マイクを選択 で設定の音声入力を開く", async ({ page }) => {

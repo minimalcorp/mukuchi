@@ -22,6 +22,7 @@ import { commands, runCommand, type AppError, type AppStatus } from "@/lib/ipc";
 import { useAudioLevel } from "@/lib/audio-level";
 import { env } from "@/lib/env";
 import { errorActionView } from "@/lib/error-actions";
+import { usePanelDrag } from "@/lib/panel-drag";
 import { cn } from "@/lib/utils";
 import { usePanelModel, type PanelItem } from "./usePanelModel";
 
@@ -97,11 +98,13 @@ function PanelFrame({ children }: { children: ReactNode }) {
 /* ---------- OFF ---------- */
 
 function OffPill() {
+  const drag = usePanelDrag();
   return (
-    // ドラッグはピルの本体で行う。deep: 子孫でもドラッグできる (ボタンは Tauri 側で除外される)
+    // ドラッグはピル全体 (ボタンの上も含む) で行う。動かさずに離した時だけボタンの操作になる
     <div
-      data-tauri-drag-region="deep"
-      className="flex h-9 items-center rounded-full border border-line-default bg-surface-card px-1 shadow-md"
+      {...drag}
+      data-testid="panel-pill"
+      className="flex h-9 items-center select-none rounded-full border border-line-default bg-surface-card px-1 shadow-md"
     >
       <button
         type="button"
@@ -124,11 +127,13 @@ function StatusPill({ icon: Icon, iconClass, spin, action, children }: {
   action?: ReactNode;
   children: ReactNode;
 }) {
+  const drag = usePanelDrag();
   return (
     <div
-      data-tauri-drag-region="deep"
+      {...drag}
+      data-testid="panel-pill"
       className={cn(
-        "flex h-8 items-center gap-2 rounded-full border border-line-default bg-surface-card pl-2.5 shadow-md",
+        "flex h-8 items-center select-none gap-2 rounded-full border border-line-default bg-surface-card pl-2.5 shadow-md",
         action ? "pr-1" : "pr-3.5",
       )}
     >
@@ -202,6 +207,7 @@ function ErrorActionButton({ error }: { error: AppError }) {
 function ListeningPanel({ isOn, expanded, items }: { isOn: boolean; expanded: boolean; items: PanelItem[] }) {
   const previewRef = useRef<HTMLDivElement>(null);
   const targetRef = useRef<HTMLDivElement>(null);
+  const drag = usePanelDrag();
 
   // 展開・収縮後の最終の大きさを透明な要素 (target) に与え、カードと同じ位置に重ねる。
   // 親 (PanelFrame) はアニメーション中のカードと target の大きい方になるので、
@@ -229,11 +235,11 @@ function ListeningPanel({ isOn, expanded, items }: { isOn: boolean; expanded: bo
     <div className="grid items-end justify-items-center">
       <div ref={targetRef} className="invisible [grid-area:1/1]" aria-hidden />
       <div
-        data-tauri-drag-region="deep"
+        {...drag}
         data-expanded={expanded}
         data-testid="panel-card"
         className={cn(
-          "flex flex-col border border-line-default bg-surface-card [grid-area:1/1]",
+          "flex flex-col select-none border border-line-default bg-surface-card [grid-area:1/1]",
           // ピル (240px) → 展開 (440px) は 180ms・標準イージング。文字の追加はアニメーションさせない
           "transition-[width,border-radius,box-shadow] duration-[180ms] ease-standard",
           expanded ? "rounded-[14px] shadow-lg" : "rounded-[18px] shadow-md",

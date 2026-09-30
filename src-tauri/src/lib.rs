@@ -5,6 +5,7 @@ mod autostart;
 mod commands;
 mod core;
 mod insert;
+mod launch;
 mod macos;
 mod paths;
 mod permissions;
@@ -154,9 +155,14 @@ pub fn run() {
             )));
             core.start()?;
             tray::setup(app.handle(), &core)?;
-            windows::create_panel(app.handle())?;
-            // 自動テスト (MUKUCHI_DEV_AUTO_LISTEN) ではセットアップ画面を出さない (前面アプリを奪うため)
-            if !settings.setup_completed && !core::dev_flag(core::ENV_DEV_AUTO_LISTEN) {
+            let plan = launch::plan(core.launch_input());
+            log::info!(
+                "起動: パネル表示={} セットアップ表示={}",
+                plan.show_panel,
+                plan.open_setup
+            );
+            windows::create_panel(app.handle(), plan.show_panel)?;
+            if plan.open_setup {
                 windows::open_setup(app.handle())?;
             }
             apply_launch_at_login(&core);
@@ -197,6 +203,7 @@ pub fn run() {
             commands::open_setup,
             commands::complete_setup,
             commands::set_panel_size,
+            commands::show_panel,
         ])
         .build(context)
         .expect("error while building tauri application");

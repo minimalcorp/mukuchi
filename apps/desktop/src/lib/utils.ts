@@ -1,7 +1,7 @@
 import { clsx, type ClassValue } from "clsx";
 import { extendTailwindMerge } from "tailwind-merge";
 
-// DS の独自文字サイズ (text-2xs, text-md) を色と誤認して消さないよう、font-size グループに登録する
+// 独自の文字サイズ (text-2xs, text-md) を色と誤認して消さないよう、font-size グループに登録する
 const twMerge = extendTailwindMerge({
   extend: {
     classGroups: {

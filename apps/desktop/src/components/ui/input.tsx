@@ -1,7 +1,7 @@
 import type * as React from "react";
 import { cn } from "@/lib/utils";
 
-// DS の Input (高さ 34px、フォーカスで青枠 + 3px リング)
+// テキスト入力 (高さ 34px、フォーカスで青枠 + 3px リング)
 export function Input({ className, ...props }: React.InputHTMLAttributes<HTMLInputElement>) {
   return (
     <div

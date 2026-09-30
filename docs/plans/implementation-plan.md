@@ -20,7 +20,7 @@
 
 実装方針:
 - 1つのViteアプリで、ウィンドウのlabelごとに画面を出し分ける (`getCurrentWindow().label`)
-- Tailwind + shadcn/ui をMinimal Portalのトークン(色・角丸・影・モーション)で上書きする。押下は0.5px沈み込み、モーション120ms (DSに従う)
+- Tailwind + shadcn/ui をデザインの色・角丸・影・モーションで上書きする。押下は0.5px沈み込み、モーション120ms
 - 状態はすべて Rust の events を購読して反映する。`apps/desktop/src/lib/ipc.ts` に型付きラッパーを集約
 - Rust側が未実装でも画面を作れるよう、`@tauri-apps/api/mocks` の `mockIPC` を使ったモックと、Playwright で各画面を確認できる状態を用意する
 

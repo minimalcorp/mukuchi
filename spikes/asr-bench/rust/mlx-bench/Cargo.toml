@@ -1,0 +1,11 @@
+[package]
+name = "mlx-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# MLX (mlx-c FFI) 実装 (second-state/qwen3_asr_rs)。crates.io版はmlx-cサブモジュールを含まないためgitで取得する。
+qwen3-asr-rs = { git = "https://github.com/second-state/qwen3_asr_rs", rev = "3fa673441682350b12da5c21429fea71ce212023", default-features = false, features = ["mlx"] }
+anyhow = "1"
+serde_json = "1"

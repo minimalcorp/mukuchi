@@ -1,0 +1,18 @@
+{
+  "name": "mukuchi-workspace",
+  "private": true,
+  "packageManager": "pnpm@12.3.4",
+  "scripts": {
+    "lint": "pnpm -r run lint",
+    "typecheck": "pnpm --filter @mukuchi/web run typecheck && pnpm run typecheck:sst",
+    "typecheck:sst": "sst install && tsc -p tsconfig.json",
+    "test": "pnpm -r run test",
+    "web:build": "pnpm --filter @mukuchi/web run build",
+    "web:deploy": "sst deploy --stage production"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "sst": "4.17.1",
+    "typescript": "~6.0.3"
+  }
+}

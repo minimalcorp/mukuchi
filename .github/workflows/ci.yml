@@ -1,0 +1,137 @@
+# PR の検査。job の name は main の ruleset の required status checks と一致させる (変えたら ruleset も直す)。
+# required にする job には paths フィルタを付けない (スキップされると pending のまま残るため)。
+# 手元の make と同じ道具で動かすため、desktop の job は flake の devShell (nix develop) の中で実行する。
+# nix develop はサブディレクトリからでも上位の flake.nix (リポジトリ直下) を見つける。
+# web の job は macOS 固有の道具を使わないため ubuntu で動かす (flake は aarch64-darwin のみ)。
+# Node は flake と同じ 24、pnpm はルート package.json の packageManager の版を使う。
+# main への push でも動かし、成功したら deploy-web.yml (workflow_run) が LP をデプロイする。
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# main への push は取り消さない (取り消された run の変更は deploy-web.yml でデプロイされなくなるため)
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test)
+    # MLX・Core Audio 等の都合で対象は Apple Silicon の macOS のみ (flake も aarch64-darwin のみ)
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            apps/desktop/src-tauri/target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'apps/desktop/src-tauri/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      # tauri-build は bundle.resources (asr-server/ 等) と frontendDist を要求する。
+      # テストでは画面を使わないため frontendDist は空のディレクトリでよい
+      - name: Prepare bundle resources
+        run: nix develop -c bash -c 'scripts/prepare-bundle-resources.sh && mkdir -p dist'
+      - name: cargo fmt
+        run: nix develop -c cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - name: cargo clippy
+        run: nix develop -c cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      - name: cargo test
+        run: nix develop -c cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+  frontend:
+    name: Frontend (lint, build, e2e)
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/Library/pnpm/store
+            ~/Library/Caches/ms-playwright
+          key: pnpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-${{ runner.arch }}-
+      # workspace 全体 (リポジトリ直下の pnpm-lock.yaml) を入れる
+      - name: pnpm install
+        run: nix develop -c pnpm install --frozen-lockfile
+      - name: lint
+        run: nix develop -c pnpm run lint
+      - name: build
+        run: nix develop -c pnpm run build
+      # Tauri の WebView (WKWebView) に近い WebKit で、モック (src/mock) の画面を確認する
+      - name: Playwright (webkit)
+        run: nix develop -c bash -c 'pnpm exec playwright install webkit && pnpm exec playwright test'
+
+  asr-server:
+    name: ASR server (ruff, pytest)
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps/desktop/asr-server
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/asr-server/uv.lock') }}
+          restore-keys: uv-${{ runner.os }}-${{ runner.arch }}-
+      - name: uv sync
+        run: nix develop -c uv sync --frozen
+      - name: ruff
+        run: nix develop -c bash -c 'uv run --frozen ruff check . && uv run --frozen ruff format --check .'
+      # test_convert は MLX (Metal) を使う
+      - name: pytest
+        run: nix develop -c uv run --frozen pytest -q
+
+  web:
+    name: Web (lint, typecheck, build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+      - name: lint
+        run: pnpm --filter @mukuchi/web run lint
+      # web の型検査と sst.config.ts の型検査 (型は sst install が .sst/platform に生成する。AWS の認証情報は不要)
+      - name: typecheck
+        run: pnpm run typecheck
+      - name: build
+        run: pnpm run web:build
+      - name: Playwright (chromium)
+        working-directory: apps/web
+        run: pnpm exec playwright install --with-deps chromium && pnpm exec playwright test

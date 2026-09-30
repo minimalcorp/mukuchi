@@ -1,0 +1,15 @@
+{
+  // ルート直下の TS は sst.config.ts だけ (各アプリは apps/*/tsconfig.json)。
+  // 型 (.sst/platform) は `pnpm exec sst install` が生成する
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["sst.config.ts"]
+}

@@ -1,0 +1,59 @@
+# Node / Vite / React Router (apps/web)
+node_modules
+dist
+.react-router
+apps/web/build
+dist-ssr
+*.local
+*.log
+
+# Rust / Tauri
+apps/desktop/src-tauri/target
+apps/desktop/src-tauri/gen/schemas
+# 同梱物の取得・展開先 (apps/desktop/scripts/prepare-bundle-resources.sh)
+apps/desktop/src-tauri/bundle-resources
+apps/desktop/src-tauri/bundle-resources.tmp
+.build-cache
+
+# SST (web のデプロイ)
+.sst
+
+# Nix / direnv
+result
+result-*
+.direnv
+
+# process-compose (UDS ソケット・ログ)
+.process-compose
+
+# Python (asr-server)
+.venv
+__pycache__
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+
+# Secrets / ローカル設定
+.env
+.env.*
+.claude/settings.local.json
+.claude/plans/
+
+# 録音データ
+*.wav
+
+# Claude Design handoff (社内デザインシステムを含むため公開しない)
+docs/design/handoff/
+docs/design/lp-handoff/
+
+# Playwright (スクリーンショットは目視確認用で管理しない)
+apps/desktop/e2e/screenshots/
+apps/web/e2e/screenshots/
+test-results/
+playwright-report/
+
+# TypeScript incremental build info
+*.tsbuildinfo

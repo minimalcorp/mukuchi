@@ -1,0 +1,212 @@
+# 署名・公証済み .dmg を作り、下書きの GitHub Release に添付する (手動実行)。
+# 手順・secret の作り方は docs/release.md。
+#
+# job を2つに分ける (apps/desktop/scripts/build-macos.sh の --build-only / --sign-only):
+#   build … pnpm install・cargo で署名なしの .app と、dmgbuild で .dmg のテンプレート (背景・アイコン位置。.app なし) を作る。
+#           pnpm・cargo・uv の依存 (postinstall・build.rs 等の第三者のコード) が動くため
+#           secret を一切渡さない (environment も付けない)。両方を tar にして artifact で渡す
+#   sign  … Environment "production-release" (Required reviewers で承認制) で動き、Apple の secret はここにだけ渡す。
+#           依存を入れず、ビルドもしない。受け取った .app を Apple のツールだけで署名・公証し、テンプレートに入れて .dmg にする
+#           (テンプレートは入れる前に apps/desktop/scripts/check-dmg-layout.py で余計なファイルがないことを確かめる)。
+#           ビルドした本体を実行する検証 (verify-macos.sh の --print-uv-path) は資格情報を片付けた後に行う
+# 同じ job の別 step にしないのは、ビルド中に起動されたプロセスが job の終わりまで残り、後の step の secret や
+# 解錠したキーチェーンに触れうるため (runner は job の終わりにプロセスを片付ける)
+#
+# production-release の secret:
+#   APPLE_CERTIFICATE           Developer ID Application 証明書と秘密鍵の .p12 を base64 にしたもの
+#   APPLE_CERTIFICATE_PASSWORD  .p12 のパスワード
+#   APPLE_API_KEY               App Store Connect API キーのキーID
+#   APPLE_API_ISSUER            同 Issuer ID
+#   APPLE_API_KEY_P8            同 .p8 ファイルの中身 (PEM テキストそのまま)
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build unsigned .app
+    # environment の deployment branch policy に加えて main 以外からの実行を拒む
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # 長いビルドの前に止めるための早期の検査。この job のトークン (contents: read) では下書きの Release が見えないため、
+      # 下書きを含めた確認は sign job でもう一度行う
+      - name: Resolve version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(plutil -extract version raw -o - apps/desktop/src-tauri/tauri.conf.json)"
+          # プレリリース (-beta 等) は公開しても Latest にならず、LP の固定 URL が指さないため受け付けない
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tauri.conf.json の version が X.Y.Z の形でない: '$version'"; exit 1
+          fi
+          tag="v$version"
+          if [ -n "$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" --jq ".[] | select(.ref == \"refs/tags/$tag\") | .ref")" ]; then
+            echo "::error::タグ $tag が既にある。apps/desktop/src-tauri/tauri.conf.json の version を上げる"; exit 1
+          fi
+          if [ -n "$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\") | .tag_name")" ]; then
+            echo "::error::$tag の Release が既にある。version を上げる"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version: $version (tag $tag)"
+      # 初回セットアップの検証用音声 (verify.wav) を scripts/make-verify-wav.sh が say -v Kyoko で作る。
+      # GitHub の macOS ランナーに日本語音声 Kyoko が入っているかは公式に記載がないため、ビルド前に確かめて止める
+      # (無い場合の代わりの方法は docs/release.md)
+      - name: Check Japanese voice (Kyoko)
+        run: |
+          set -euo pipefail
+          if ! /usr/bin/say -v '?' | grep -q '^Kyoko '; then
+            echo "::error::このランナーに音声 Kyoko がない (verify.wav を作れない)。docs/release.md の「verify.wav の音声」を参照"
+            /usr/bin/say -v '?' | awk '{print $1, $2}' | sort -u | head -100
+            exit 1
+          fi
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - name: pnpm install
+        run: nix develop -c pnpm install --frozen-lockfile
+      - name: Build (.app, unsigned + .dmg template)
+        run: nix develop -c apps/desktop/scripts/build-macos.sh --build-only
+      # artifact は zip になり symlink・実行権限が崩れるため tar にしてから渡す
+      - name: Pack .app and .dmg template
+        run: tar -C apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle -czf "$RUNNER_TEMP/mukuchi-app.tar.gz" macos/mukuchi.app dmg-template/mukuchi.dmg
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mukuchi-app-unsigned
+          path: ${{ runner.temp }}/mukuchi-app.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  sign:
+    name: Sign and notarize (.dmg)
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    environment: production-release
+    permissions:
+      contents: write # 下書きの Release の作成
+    timeout-minutes: 150
+    steps:
+      # apps/desktop/scripts/ を build job の作業ツリーではなく同じコミットから取り直す (ビルド中に書き換えられたものを使わない)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # 下書きを含めて同じタグの Release がないかを確かめる (下書きは contents: write のトークンでないと見えない)。
+      # 資格情報を読み込む前に行う
+      - name: Check version and existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          conf="$(plutil -extract version raw -o - apps/desktop/src-tauri/tauri.conf.json)"
+          [ -n "$VERSION" ] && [ "$conf" = "$VERSION" ] || { echo "::error::version が build job ('$VERSION') と違う ('$conf')"; exit 1; }
+          tag="v$VERSION"
+          if [ -n "$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" --jq ".[] | select(.ref == \"refs/tags/$tag\") | .ref")" ]; then
+            echo "::error::タグ $tag が既にある。apps/desktop/src-tauri/tauri.conf.json の version を上げる"; exit 1
+          fi
+          if [ -n "$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$tag\") | .tag_name")" ]; then
+            echo "::error::$tag の Release (下書きを含む) が既にある。version を上げるか、不要な下書きを消す"; exit 1
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mukuchi-app-unsigned
+          path: ${{ runner.temp }}
+      - name: Unpack .app and .dmg template
+        run: |
+          set -euo pipefail
+          dir=apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle
+          mkdir -p "$dir"
+          tar -C "$dir" -xzf "$RUNNER_TEMP/mukuchi-app.tar.gz" macos/mukuchi.app dmg-template/mukuchi.dmg
+
+      # 一時キーチェーンに証明書を読み込み、検索リストに加える (build-macos.sh は codesign / security find-identity でこれを使う)。
+      # 出典: https://docs.github.com/en/actions/use-cases-and-examples/deploying/installing-an-apple-certificate-on-macos-runners-for-xcode-development
+      - name: Import signing certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          # 書き出す .p12・.p8 を自分だけが読めるようにする
+          umask 077
+          keychain="$RUNNER_TEMP/mukuchi-signing.keychain-db"
+          keychain_password="$(openssl rand -base64 32)"
+          p12="$RUNNER_TEMP/cert.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          # -P / -p のパスワードはコマンドライン引数なので、実行中は同じマシンの他ユーザーからも ps で見える。
+          # GitHub-hosted runner は job ごとに使い捨ての VM なので許容する。self-hosted runner に移す場合は
+          # 共有マシンで動かさない (security import は -P を省くと GUI で尋ねるため CI では代わりがない)
+          security import "$p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          rm -f "$p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain"
+          # 公証用 API キー (.p8)。後の cleanup で消す
+          printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+
+      # devShell を使わない (Apple のツールと macOS 標準のコマンドだけで動く)
+      - name: Sign, notarize and staple
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8" apps/desktop/scripts/build-macos.sh --sign-only
+
+      # 検証 (ビルドした本体を実行する) の前に資格情報を片付ける
+      - name: Clean up signing materials
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/mukuchi-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/cert.p12"
+
+      - name: Verify
+        run: apps/desktop/scripts/verify-macos.sh
+
+      # 下書きで作る (公開は人が確認してから行う)。タグは公開時に target のコミットに作られる。
+      # LP は固定 URL https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg を使うため、
+      # 版付きの名前に加えて同じ中身を mukuchi_aarch64.dmg としても添付する (latest/download は公開済みで
+      # プレリリースでない「Latest」の Release の添付を返す。下書きのうちは古い版を返し続ける)。
+      # 出典: https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          bundle=apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle
+          app_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$bundle/macos/mukuchi.app/Contents/Info.plist")"
+          [ "$app_version" = "$VERSION" ] || { echo "::error::.app の版 ($app_version) が tauri.conf.json ($VERSION) と違う"; exit 1; }
+          tag="v$VERSION"
+          src="$bundle/dmg/mukuchi_${VERSION}_aarch64.dmg"
+          [ -f "$src" ] || { echo "::error::$src がない"; exit 1; }
+          out="$RUNNER_TEMP/release"
+          rm -rf "$out"; mkdir -p "$out"
+          /bin/cp -p "$src" "$out/mukuchi_${VERSION}_aarch64.dmg"
+          /bin/cp -p "$src" "$out/mukuchi_aarch64.dmg"
+          # .sha256 はそれぞれ自分のファイル名で書く (ダウンロードした名前のまま shasum -c で確かめられるように)
+          for f in "mukuchi_${VERSION}_aarch64.dmg" mukuchi_aarch64.dmg; do
+            (cd "$out" && shasum -a 256 "$f" > "$f.sha256")
+          done
+          cmp "$out/mukuchi_${VERSION}_aarch64.dmg" "$out/mukuchi_aarch64.dmg"
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+            --title "mukuchi $VERSION" --notes "macOS (Apple Silicon) / Developer ID 署名・公証済み" \
+            "$out/mukuchi_${VERSION}_aarch64.dmg" "$out/mukuchi_${VERSION}_aarch64.dmg.sha256" \
+            "$out/mukuchi_aarch64.dmg" "$out/mukuchi_aarch64.dmg.sha256"

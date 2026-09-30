@@ -1,0 +1,8 @@
+# JS/TS の依存は pnpm workspace で管理する (Rust は Cargo、Python は uv)。docs/plans/monorepo-plan.md
+packages:
+  - apps/*
+
+# pnpm 12 の既定では公開から1日未満の版を入れない (minimumReleaseAge)。npm から移行した時点で
+# lock 済みだった版のうち、まだ1日経っていないものだけを版を固定して除外する (2026-10-01 以降は不要。消してよい)
+minimumReleaseAgeExclude:
+  - lucide-react@1.49.0

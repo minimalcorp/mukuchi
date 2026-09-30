@@ -1,0 +1,164 @@
+/*
+ * P2 (実データ接続) で増えたやり取りの確認: set_panel_size、settings-navigate、
+ * 購読と初期値取得の順序、ダークモードの切り替え。
+ */
+import { expect, test, type Page } from "@playwright/test";
+
+const PANEL = { width: 560, height: 260 };
+const SETTINGS = { width: 840, height: 640 };
+
+type Call = { cmd: string; args: Record<string, unknown> };
+type Size = { width: number; height: number };
+
+async function open(page: Page, query: string, viewport: Size) {
+  await page.setViewportSize(viewport);
+  await page.goto(`/?${query}`);
+  // 描画されてから待つ (描画前は同梱フォントの読み込みが始まっておらず、fonts.ready がすぐ解決する)
+  await page.waitForFunction(() => (document.getElementById("root")?.childElementCount ?? 0) > 0);
+  await page.evaluate(() => document.fonts.ready);
+  // モックの API (main.tsx の boot 内で入る) が使えるまで待つ
+  await page.waitForFunction(() => "__mukuchiMock" in window);
+}
+
+function calls(page: Page): Promise<Call[]> {
+  return page.evaluate(() => (window as unknown as { __mukuchiMock: { calls: Call[] } }).__mukuchiMock.calls);
+}
+
+async function panelSizes(page: Page): Promise<Size[]> {
+  return (await calls(page)).filter((c) => c.cmd === "set_panel_size").map((c) => c.args as Size);
+}
+
+async function frameSize(page: Page): Promise<Size> {
+  const box = await page.getByTestId("panel-frame").boundingBox();
+  if (!box) throw new Error("panel-frame がありません");
+  return { width: Math.ceil(box.width), height: Math.ceil(box.height) };
+}
+
+/** モックの API をページ内で呼ぶ */
+async function mock(page: Page, fn: string) {
+  await page.evaluate(`(() => { const api = window.__mukuchiMock; ${fn} })()`);
+}
+
+// ---------- set_panel_size ----------
+
+test("panel: 描画内容 (影の余白込み) の大きさを set_panel_size で送る", async ({ page }) => {
+  await open(page, "window=panel&mock=off", PANEL);
+  await expect(page.getByRole("button", { name: "音声入力をオン" })).toBeVisible();
+  const size = await frameSize(page);
+  await expect.poll(async () => (await panelSizes(page)).at(-1)).toEqual(size);
+  // 余白 (左右 24px・上 16px・下 32px) を含む
+  const pill = await page.getByRole("button", { name: "音声入力をオン" }).locator("..").boundingBox();
+  expect(size.width).toBeGreaterThanOrEqual(Math.ceil(pill!.width) + 48);
+  expect(size.height).toBeGreaterThanOrEqual(Math.ceil(pill!.height) + 48);
+});
+
+test("panel: 展開は開始時点で、収縮は終わってから最終の大きさを送る", async ({ page }) => {
+  await open(page, "window=panel&mock=idle", PANEL);
+  await expect(page.getByText("待機中")).toBeVisible();
+  const pill = await frameSize(page);
+  await expect.poll(async () => (await panelSizes(page)).at(-1)).toEqual(pill);
+  const before = (await panelSizes(page)).length;
+
+  // 発話が始まって展開する
+  await mock(page, `api.started(1); api.partial({ id: 1, text: "明日の打ち合わせは十時からに変更して", stableLength: 13 });`);
+  await expect(page.getByText("認識中")).toBeVisible();
+  // 180ms のアニメーションが終わるのを待つ
+  await expect(page.getByTestId("panel-card")).toHaveCSS("width", "440px");
+  await page.waitForTimeout(300);
+  const expanded = await frameSize(page);
+  const expandCalls = (await panelSizes(page)).slice(before);
+  // 途中の大きさを経由せず、最初の 1 回で最終の大きさを送る (ウィンドウがアニメーションを切らない)
+  expect(expandCalls[0]).toEqual(expanded);
+  expect(expandCalls.every((s) => s.width === expanded.width && s.height === expanded.height)).toBe(true);
+  expect(expanded.width).toBeGreaterThan(pill.width);
+  expect(expanded.height).toBeGreaterThan(pill.height);
+
+  // 誤検出で表示が消えてピルへ戻る
+  const beforeCollapse = (await panelSizes(page)).length;
+  await mock(page, `api.result({ kind: "discarded", id: 1 });`);
+  await expect(page.getByTestId("panel-card")).toHaveCSS("width", "240px");
+  await page.waitForTimeout(300);
+  const collapsed = await frameSize(page);
+  expect(collapsed).toEqual(pill);
+  // 縮み終わってから最終の大きさを 1 回だけ送る (途中の大きさでウィンドウを縮めない。詳細は panel-collapse.spec.ts)
+  expect((await panelSizes(page)).slice(beforeCollapse)).toEqual([pill]);
+});
+
+// ---------- エラーからの復旧 ----------
+
+test("panel: マイクが見つからない → マイクを選択 で設定の音声入力を開く", async ({ page }) => {
+  await open(page, "window=panel&mock=error-mic", PANEL);
+  await page.getByRole("button", { name: "マイクを選択" }).click();
+  await expect.poll(async () => (await calls(page)).find((c) => c.cmd === "open_settings")?.args).toEqual({ category: "voice" });
+});
+
+test("panel: アクセシビリティ未許可 → システム設定を開く", async ({ page }) => {
+  await open(page, "window=panel&mock=error-accessibility", PANEL);
+  await page.getByRole("button", { name: "システム設定を開く" }).click();
+  await expect
+    .poll(async () => (await calls(page)).find((c) => c.cmd === "open_system_settings")?.args)
+    .toEqual({ pane: "accessibility" });
+});
+
+// ---------- settings-navigate ----------
+
+test("settings: settings-navigate でカテゴリを切り替える", async ({ page }) => {
+  await open(page, "window=settings&mock=default&category=general", SETTINGS);
+  await expect(page.getByText("ログイン時に起動")).toBeVisible();
+  await mock(page, `api.fire("settings-navigate", { category: "storage" });`);
+  await expect(page.getByText("実行環境とモデルのみ削除")).toBeVisible();
+  await expect(page.getByRole("button", { name: "ストレージ" })).toHaveAttribute("aria-current", "page");
+  // 未知のカテゴリは無視する
+  await mock(page, `api.fire("settings-navigate", { category: "unknown" });`);
+  await expect(page.getByText("実行環境とモデルのみ削除")).toBeVisible();
+});
+
+test("settings: open_settings(category) が開いている設定を切り替える", async ({ page }) => {
+  await open(page, "window=settings&mock=default&category=general", SETTINGS);
+  await expect(page.getByText("ログイン時に起動")).toBeVisible();
+  await mock(page, `api.invoke("open_settings", { category: "voice" });`);
+  await expect(page.getByText("発話検出の感度")).toBeVisible();
+});
+
+// ---------- 購読と初期値の順序 ----------
+
+test("panel: 初期値の応答より新しい status-changed を優先する", async ({ page }) => {
+  // get_status は呼ばれた時点の値 (オフ) を 500ms 遅れて返す
+  // 応答を返すタイミングを clock で決める (実時間だと遅い CI では購読より先に応答が届き、確認したい順序にならない)
+  await page.clock.install({ time: 0 });
+  await page.clock.pauseAt(1000);
+  // open() は描画を待つが、panel は get_status の応答 (時計を止めているので返らない) か status-changed が届くまで描画しない
+  await page.setViewportSize(PANEL);
+  await page.goto("/?window=panel&mock=off&slow=get_status");
+  await page.waitForFunction(() => "__mukuchiMock" in window);
+  await expect.poll(async () => (await calls(page)).some((c) => c.cmd === "get_status")).toBe(true);
+  await mock(page, `api.setStatus({ phase: "listening" });`);
+  await expect(page.getByText("待機中")).toBeVisible();
+  await page.clock.runFor(500);
+  await page.waitForTimeout(100);
+  // 遅れて届いた古い「オフ」で上書きされない
+  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByRole("button", { name: "音声入力をオフ" })).toBeVisible();
+});
+
+test("settings: ウィンドウが再表示されたら現在値を取り直す", async ({ page }) => {
+  await open(page, "window=settings&mock=default&category=general", SETTINGS);
+  await expect(page.getByRole("switch", { name: "ログイン時に起動" })).toBeChecked();
+  // 非表示中に変わって event を取りこぼした想定 (db だけ変える)
+  await mock(page, `api.db.settings = { ...api.db.settings, launchAtLogin: false };`);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.getByRole("switch", { name: "ログイン時に起動" })).not.toBeChecked();
+});
+
+// ---------- ダークモード ----------
+
+test("ダーク/ライトの切り替えがその場で反映される", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "light" });
+  await open(page, "window=settings&mock=default&category=general", SETTINGS);
+  const bg = () => page.getByTestId("window-frame").evaluate((el) => getComputedStyle(el).backgroundColor);
+  const light = await bg();
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect.poll(bg).not.toBe(light);
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect.poll(bg).toBe(light);
+});

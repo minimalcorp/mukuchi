@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "mukuchi Dev",
+  "identifier": "com.minimalcorp.mukuchi.dev",
+  "bundle": {
+    "resources": {
+      "bundle-resources/bin/uv": "bin/uv"
+    }
+  }
+}

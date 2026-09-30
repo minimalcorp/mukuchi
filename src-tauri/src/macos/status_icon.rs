@@ -16,9 +16,9 @@ use objc2::rc::Retained;
 use objc2::{AllocAnyThread, MainThreadMarker};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
-    NSAppearanceNameVibrantDark, NSAppearanceNameVibrantLight, NSBezierPath, NSBitmapImageRep,
-    NSColor, NSCompositingOperation, NSDeviceRGBColorSpace, NSGraphicsContext, NSImage,
-    NSRectFillUsingOperation, NSStatusItem,
+    NSAppearanceNameVibrantDark, NSAppearanceNameVibrantLight, NSAutoresizingMaskOptions,
+    NSBezierPath, NSBitmapImageRep, NSColor, NSCompositingOperation, NSDeviceRGBColorSpace,
+    NSGraphicsContext, NSImage, NSRectFillUsingOperation, NSStatusBarButton, NSStatusItem,
 };
 use objc2_foundation::{NSArray, NSData, NSPoint, NSRect, NSSize};
 
@@ -90,6 +90,36 @@ pub fn set(item: &NSStatusItem, mtm: MainThreadMarker, icon: StatusIcon) {
         return;
     };
     button.setImage(Some(&image));
+    fit_click_target(&button);
+}
+
+/// tray-icon がボタンに重ねるクリック受け (`TaoTrayTarget`) のクラス名 (tray-icon 0.25 `platform_impl/macos`)
+const TRAY_TARGET_CLASS: &str = "TaoTrayTarget";
+
+/// tray-icon はボタンの上に透明な NSView を重ね、その mouseDown で左クリック時にメニューを出す
+/// (`show_menu_on_left_click`)。この NSView の大きさは tray-icon 経由でアイコン・タイトルを変えた時だけ
+/// ボタンに合わせ直される (`update_dimensions`)。ここでは画像を直接差し替えるため、合わせ直さないと
+/// アイコン無しで作った時の幅 (16pt) のまま残り、それより右のクリックは下のボタンに届いて
+/// 左クリックでメニューが出ない。以後の大きさの変化にも追従させるため自動リサイズも付ける。
+fn fit_click_target(button: &NSStatusBarButton) {
+    let bounds = button.bounds();
+    let mut found = false;
+    for view in button.subviews() {
+        if view.class().name().to_bytes() == TRAY_TARGET_CLASS.as_bytes() {
+            view.setFrame(bounds);
+            view.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewWidthSizable
+                    | NSAutoresizingMaskOptions::ViewHeightSizable,
+            );
+            found = true;
+        }
+    }
+    if !found {
+        // tray-icon の実装が変わった時に気付けるように
+        log::warn!(
+            "メニューバーのクリック受けが見つかりません (左クリックでメニューが出ない可能性)"
+        );
+    }
 }
 
 fn make_image(icon: StatusIcon) -> Option<Retained<NSImage>> {
@@ -217,4 +247,26 @@ pub(crate) fn render_for_test(
     ctx.flushGraphics();
     NSGraphicsContext::restoreGraphicsState_class();
     Some(rep)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TRAY_TARGET_CLASS;
+
+    /// `fit_click_target` は tray-icon の内部 (クリック受けのクラス名・大きさの合わせ方) に依存する。
+    /// tray-icon を上げた時は、クラス名が同じで左クリックがメニューを開くことを確認してからこの版を更新する
+    /// (確認: アイコンの右端付近を左クリックしてメニューが開くこと)
+    #[test]
+    fn tray_icon_version_is_verified() {
+        let lock = include_str!("../../Cargo.lock");
+        let version = lock
+            .split("[[package]]")
+            .find(|p| p.contains("\nname = \"tray-icon\"\n"))
+            .and_then(|p| p.lines().find_map(|l| l.strip_prefix("version = ")))
+            .expect("Cargo.lock に tray-icon がない");
+        assert_eq!(
+            version, "\"0.25.1\"",
+            "{TRAY_TARGET_CLASS} を確認して更新する"
+        );
+    }
 }

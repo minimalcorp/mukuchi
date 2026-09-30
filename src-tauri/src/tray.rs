@@ -237,6 +237,8 @@ fn refresh(app: &AppHandle, state: &TrayState) -> Result<()> {
             // 赤い点付きの画像は外観ごとに描き分けるため、外観の変化でも描き直す
             let dark = kind == IconKind::Error && status_icon::is_dark(&item, mtm);
             if current != Some((kind, dark)) {
+                // メニューバーの更新頻度の確認用 (状態の変化ごとに1回だけのはず)
+                log::debug!("メニューバーのアイコンを更新: {kind:?}");
                 status_icon::set(&item, mtm, kind.icon(dark));
             }
             Some((kind, dark))
@@ -248,6 +250,7 @@ fn refresh(app: &AppHandle, state: &TrayState) -> Result<()> {
     let model = current_model(&core, &status);
     let mut last = state.menu.lock().unwrap_or_else(|p| p.into_inner());
     if last.as_ref() != Some(&model) {
+        log::debug!("メニューバーのメニューを作り直す");
         let menu = build_menu(app, &model, MenuVariant::Tray)?;
         tray.set_menu(Some(menu))
             .context("メニューを設定できません")?;

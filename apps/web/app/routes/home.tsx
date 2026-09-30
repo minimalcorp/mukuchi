@@ -24,7 +24,9 @@ import {
 } from "@/lib/content";
 import type { Platform } from "@/lib/platform";
 import {
-  COPYRIGHT,
+  COMPANY_NAME,
+  COMPANY_URL,
+  COPYRIGHT_PREFIX,
   DOWNLOAD_META,
   DOWNLOAD_META_SHORT,
   GITHUB_URL,
@@ -487,7 +489,12 @@ function Footer() {
             GitHub
           </a>
         </div>
-        <span>{COPYRIGHT}</span>
+        <span>
+          {COPYRIGHT_PREFIX}{" "}
+          <a href={COMPANY_URL} className="text-muted hover:underline">
+            {COMPANY_NAME}
+          </a>
+        </span>
       </div>
     </footer>
   );

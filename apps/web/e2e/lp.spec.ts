@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
-import { DOWNLOAD_URL } from "../app/lib/site";
+import { DEMO_SCRIPT } from "../app/lib/content";
+import { COMPANY_NAME, COMPANY_URL, DOWNLOAD_URL } from "../app/lib/site";
 
 const PC = { width: 1280, height: 800 };
 const SP = { width: 390, height: 844 };
@@ -75,6 +76,56 @@ async function fakeNavigator(page: Page, env: FakeNavigator) {
 
 const heroPc = (page: Page) => page.getByTestId("hero-cta-pc");
 
+const DEMO_CYCLE_MS = DEMO_SCRIPT.reduce((sum, st) => sum + st.ms, 0);
+
+/**
+ * デモを 2 周分動かしながら、デモの高さと直後のセクションの位置が変わらないこと、
+ * 固定した各部から中身がはみ出さないことを確かめる (時計を止めて決まった間隔で進める)
+ */
+async function expectStableDemo(page: Page) {
+  await page.clock.install();
+  await page.goto("/");
+  await page.evaluate(() => document.fonts.ready);
+  const demo = page.getByTestId("demo");
+  await expect(demo).toBeVisible();
+
+  const samples: { height: number; nextY: number; status: string; overflow: string[] }[] = [];
+  for (let t = 0; t <= DEMO_CYCLE_MS * 2; t += 100) {
+    samples.push(
+      await demo.evaluate((el) => {
+        const next = document.getElementById("features")!;
+        const overflow = ["demo-sent", "demo-input", "demo-caption"].filter((id) => {
+          const part = el.querySelector<HTMLElement>(`[data-testid="${id}"]`)!;
+          return part.scrollHeight > part.clientHeight || part.scrollWidth > part.clientWidth;
+        });
+        return {
+          height: el.getBoundingClientRect().height,
+          nextY: next.getBoundingClientRect().top + window.scrollY,
+          status: el.textContent ?? "",
+          overflow,
+        };
+      }),
+    );
+    await page.clock.runFor(100);
+  }
+
+  // 全場面を通ったこと (キー操作の場面まで進んでいる)
+  expect(samples.some((x) => x.status.includes("キー操作"))).toBe(true);
+  expect(samples.some((x) => x.status.includes("認識中"))).toBe(true);
+  expect(new Set(samples.map((x) => x.height))).toEqual(new Set([samples[0].height]));
+  expect(new Set(samples.map((x) => x.nextY))).toEqual(new Set([samples[0].nextY]));
+  expect(samples.flatMap((x) => x.overflow)).toEqual([]);
+}
+
+async function expectCompanyLink(page: Page) {
+  const footer = page.locator("footer");
+  await expect(footer).toContainText(`© 2026 ${COMPANY_NAME}`);
+  await expect(footer.getByRole("link", { name: COMPANY_NAME })).toHaveAttribute(
+    "href",
+    COMPANY_URL,
+  );
+}
+
 test.describe("PC", () => {
   test.use({ viewport: PC });
 
@@ -112,6 +163,7 @@ test.describe("PC", () => {
     await expect(page.getByText("モデルの取得以外に通信しません。")).toBeVisible();
     await expect(heroPc(page)).toContainText("36 MB");
     await expect(page.getByTestId("cta-note").first()).toHaveText(/検出しました/);
+    await expectCompanyLink(page);
     expect(errors).toEqual([]);
   });
 
@@ -160,6 +212,17 @@ test.describe("PC", () => {
     ).toBeDisabled();
   });
 
+  test("デモが動いても高さと後続の位置が変わらない (1280px)", async ({ page }) => {
+    await fakeNavigator(page, ENVS.macArm);
+    await expectStableDemo(page);
+  });
+
+  test("デモが動いても高さと後続の位置が変わらない (1024px)", async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 800 });
+    await fakeNavigator(page, ENVS.macArm);
+    await expectStableDemo(page);
+  });
+
   test("スクリーンショット (1280px)", async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await fakeNavigator(page, ENVS.macArm);
@@ -186,6 +249,23 @@ test.describe("SP", () => {
     expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(
       /^http:\/\/localhost:\d+\/$/,
     );
+  });
+
+  test("フッターの会社名は会社のサイトへのリンク", async ({ page }) => {
+    await fakeNavigator(page, ENVS.iphone);
+    await page.goto("/");
+    await expectCompanyLink(page);
+  });
+
+  test("デモが動いても高さと後続の位置が変わらない (390px)", async ({ page }) => {
+    await fakeNavigator(page, ENVS.iphone);
+    await expectStableDemo(page);
+  });
+
+  test("デモが動いても高さと後続の位置が変わらない (320px)", async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 700 });
+    await fakeNavigator(page, ENVS.iphone);
+    await expectStableDemo(page);
   });
 
   test("幅の狭い Mac のウィンドウではダウンロードボタンを出す", async ({ page }) => {

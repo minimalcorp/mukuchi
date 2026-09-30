@@ -21,7 +21,8 @@ export function usePrefersReducedMotion() {
 
 /**
  * ヒーローのデモ。発話→入力→音声コマンドの流れを繰り返す。
- * 利用者が動きを減らす設定にしている時は、入力まで済んだ場面で止める
+ * 利用者が動きを減らす設定にしている時は、入力まで済んだ場面で止める。
+ * 場面が切り替わってもページが上下に揺れないよう、各部の高さはどの場面の中身も収まる値に固定する
  */
 export function Demo() {
   const reduced = usePrefersReducedMotion();
@@ -57,7 +58,8 @@ export function Demo() {
     <div
       role="img"
       aria-label="mukuchi の動作の例。AI チャットの入力欄に、話した内容が入力され、「送信」と話すと送信されます。"
-      className="flex flex-col items-center gap-3 rounded-xl border border-line-subtle bg-gray-50 p-4 lg:gap-4 lg:p-7"
+      data-testid="demo"
+      className="@container flex flex-col items-center gap-3 rounded-xl border border-line-subtle bg-gray-50 p-4 lg:gap-4 lg:p-7"
     >
       {/* 入力先のアプリ (AI チャット) */}
       <div className="w-full overflow-hidden rounded-lg border border-line bg-white shadow-md lg:rounded-[10px]">
@@ -69,7 +71,10 @@ export function Demo() {
             AI チャット
           </span>
         </div>
-        <div className="flex h-[132px] flex-col justify-end gap-2 p-3 lg:h-[150px] lg:px-[18px] lg:py-4">
+        <div
+          data-testid="demo-sent"
+          className="flex h-[132px] flex-col justify-end gap-2 overflow-hidden p-3 lg:h-[150px] lg:px-[18px] lg:py-4"
+        >
           {s.sent.map((m) => (
             <div
               key={m}
@@ -80,40 +85,46 @@ export function Demo() {
           ))}
         </div>
         <div
-          className={`mx-3 mb-3 flex min-h-[60px] items-start gap-0.5 rounded-md border px-2.5 py-2 text-xs leading-[1.6] text-strong lg:mx-[18px] lg:mb-[18px] lg:min-h-16 lg:rounded-lg lg:px-3 lg:py-2.5 lg:text-[13px] ${inputFocused ? "border-focus" : "border-line"}`}
+          data-testid="demo-input"
+          className={`mx-3 mb-3 flex h-[60px] items-start gap-0.5 overflow-hidden rounded-md border px-2.5 py-2 text-xs leading-[1.6] text-strong max-[389px]:h-[76px] lg:mx-[18px] lg:mb-[18px] lg:h-16 lg:rounded-lg lg:px-3 lg:py-2.5 lg:text-[13px] ${inputFocused ? "border-focus" : "border-line"}`}
         >
           <span>{s.input}</span>
           <span className="h-[18px] w-[1.5px] flex-none bg-blue-500 lg:h-[19px]" />
         </div>
       </div>
 
-      {/* mukuchi の常時表示パネル */}
-      <div
-        className={`flex max-w-full flex-col overflow-hidden rounded-[18px] border border-line bg-white shadow-md transition-[width] duration-[180ms] ease-standard ${speaking ? "w-full lg:w-[440px]" : "w-[240px] lg:w-[260px]"}`}
-      >
-        {speaking && (
-          <div className="truncate px-3.5 pt-2 text-xs text-body lg:px-4 lg:pt-2.5 lg:text-[13px]">
-            {s.preview}
+      {/* mukuchi の常時表示パネル。話している間はプレビューの行が上に伸びるので、その分の高さを先に取っておく */}
+      <div className="flex h-[62px] w-full flex-none flex-col items-center justify-end lg:h-[66px]">
+        <div
+          className={`flex max-w-full flex-col overflow-hidden rounded-[18px] border border-line bg-white shadow-md transition-[width] duration-[180ms] ease-standard ${speaking ? "w-full lg:w-[440px]" : "w-[240px] lg:w-[260px]"}`}
+        >
+          {speaking && (
+            <div className="truncate px-3.5 pt-2 text-xs text-body lg:px-4 lg:pt-2.5 lg:text-[13px] lg:leading-[18px]">
+              {s.preview}
+            </div>
+          )}
+          <div className="flex h-9 items-center gap-2.5 pr-3 pl-1">
+            <div className="flex size-7 flex-none items-center justify-center rounded-full bg-blue-500 text-white">
+              <Icon name="mic" size={14} />
+            </div>
+            <div className="relative flex h-1.5 flex-1 overflow-hidden rounded-[3px]">
+              <span className="w-[55%] bg-gray-100" />
+              <span className="flex-1 bg-blue-50" />
+              <div
+                className={`absolute inset-y-0 left-0 rounded-[3px] ${speaking ? "bg-blue-500" : "bg-gray-400"}`}
+                style={{ width: `${shownLevel}%` }}
+              />
+            </div>
+            <span className="text-xs font-medium whitespace-nowrap text-muted">{s.status}</span>
           </div>
-        )}
-        <div className="flex h-9 items-center gap-2.5 pr-3 pl-1">
-          <div className="flex size-7 flex-none items-center justify-center rounded-full bg-blue-500 text-white">
-            <Icon name="mic" size={14} />
-          </div>
-          <div className="relative flex h-1.5 flex-1 overflow-hidden rounded-[3px]">
-            <span className="w-[55%] bg-gray-100" />
-            <span className="flex-1 bg-blue-50" />
-            <div
-              className={`absolute inset-y-0 left-0 rounded-[3px] ${speaking ? "bg-blue-500" : "bg-gray-400"}`}
-              style={{ width: `${shownLevel}%` }}
-            />
-          </div>
-          <span className="text-xs font-medium whitespace-nowrap text-muted">{s.status}</span>
         </div>
       </div>
 
-      {/* 説明 */}
-      <div className="flex min-h-10 flex-col items-center justify-center gap-1.5 text-center text-xs text-muted lg:h-6 lg:min-h-0 lg:flex-row lg:gap-2 lg:text-[13px]">
+      {/* 説明。キー操作の表示と説明が 1 行に収まる幅の時だけ横に並べる */}
+      <div
+        data-testid="demo-caption"
+        className="flex h-11 flex-none flex-col items-center justify-center gap-1.5 text-center text-xs whitespace-nowrap text-muted lg:text-[13px] lg:@min-[420px]:h-6 lg:@min-[420px]:flex-row lg:@min-[420px]:gap-2"
+      >
         {s.chip && (
           <span className="flex items-center gap-1.5 rounded-sm bg-gray-900 px-2 py-0.5 text-xs text-white">
             <Icon name="keyboard" size={14} />

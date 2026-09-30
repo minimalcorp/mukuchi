@@ -30,7 +30,10 @@ export const REQUIREMENTS = {
   model: "Qwen3-ASR 1.7B（日本語）",
 } as const;
 
-export const COPYRIGHT = "© 2026 株式会社Minimal";
+/** フッターの著作権表示。会社名は COMPANY_URL へのリンクにする */
+export const COPYRIGHT_PREFIX = "© 2026";
+export const COMPANY_NAME = "株式会社Minimal";
+export const COMPANY_URL = "https://minimalcorp.com";
 
 /** ダウンロードボタンの下に出す補足 (PC) */
 export const DOWNLOAD_META = `${VERSION} ・ ${PRICE} ・ Apple Silicon（M1 以降）専用 ・ ${DMG_SIZE}`;

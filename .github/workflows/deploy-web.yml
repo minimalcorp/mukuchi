@@ -1,0 +1,93 @@
+# LP (apps/web) を AWS (SST) へデプロイする。main の CI 成功後と手動実行で動く。
+# 承認制の Environment production で OIDC により AWS のロールを引き受ける (長期の鍵を置かない)。
+# 変数 (Environment production): AWS_DEPLOY_ROLE_ARN・AWS_REGION・MUKUCHI_WEB_CERT_ARN。手順は .claude/plans/aws-web-deploy-setup.md
+name: Deploy web
+
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 古い run の後に新しい run が走るよう順に実行する (途中で取り消さない)
+concurrency:
+  group: deploy-web
+  cancel-in-progress: false
+
+jobs:
+  # workflow_run には paths フィルタが効かないため、CI が検査したコミットの変更ファイルで判定する。
+  # main へは PR の squash / merge か 1 コミットずつの push で入るため、第1親との差分がその変更にあたる。
+  # (CI が失敗した変更は後続の push で web を変えるまでデプロイされない。その時は手動実行する)
+  # 承認待ちを出さないよう、判定は Environment を使わない job で行う
+  changes:
+    # PR の CI (フォークの main ブランチ由来を含む) では動かさない。main への push の CI 成功時だけ
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      web: ${{ steps.check.outputs.web }}
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - id: check
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = workflow_dispatch ]; then
+            echo "web=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only HEAD^1 HEAD)
+          printf '%s\n' "$changed"
+          if printf '%s\n' "$changed" | grep -qE '^(apps/web/|sst\.config\.ts$|pnpm-lock\.yaml$|\.github/workflows/deploy-web\.yml$)'; then
+            echo "web=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "web=false" >> "$GITHUB_OUTPUT"
+            echo "web に関わる変更なし: デプロイしない" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  deploy:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: https://mukuchi.minimalcorp.com
+    permissions:
+      id-token: write # AWS の OIDC 用
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.changes.outputs.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      # build (pnpm --filter @mukuchi/web build) は sst deploy の中で StaticSite が実行する
+      - name: sst deploy
+        env:
+          MUKUCHI_WEB_CERT_ARN: ${{ vars.MUKUCHI_WEB_CERT_ARN }}
+        run: pnpm exec sst deploy --stage production

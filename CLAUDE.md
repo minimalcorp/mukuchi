@@ -28,6 +28,8 @@ macOS常駐の音声入力アプリ。ショートカットでON/OFFし、ONの�
 | コマンド | 内容 |
 |---|---|
 | `make up` / `make down` / `make restart` | 開発環境の起動(セットアップ込み) / 停止 / 再起動 |
+| `make reset [ALL=1] [PERMISSIONS=1]` | 停止して dev の設定・`provisioned.json`・WebKit/Caches 等を消し初回起動の状態に (models/ とログは残す。`ALL=1` で実行環境も消す。`PERMISSIONS=1` で `tccutil reset All <devのID>` と権限の案内) |
+| `make up-fresh` | `reset` して `MUKUCHI_DEV_SHOW_SETUP=1` で起動 (セットアップ画面の確認用。この起動のみ) |
 | `make ps` / `make logs [s=<name>]` | プロセス状態 / ログ追従 |
 | `make setup` | npm install・uv sync・モデル取得 (`up` から自動実行)。`MUKUCHI_HF_SEED=<HF_HOME>` で既存HFキャッシュから複製 |
 | `make build` | 本番用 .dmg (Developer ID署名 + Hardened Runtime + 公証 + staple)。証明書・公証の資格情報が必要 ([docs/release.md](docs/release.md)) |

@@ -41,7 +41,7 @@ pids=$$(for p in $(DEV_PORTS); do lsof -nP -ti tcp:$$p -sTCP:LISTEN; done 2>/dev
 }
 endef
 
-.PHONY: help up down restart ps logs setup build build-local verify clean
+.PHONY: help up down restart reset up-fresh ps logs setup build build-local verify clean
 
 help: ## ターゲット一覧
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -80,6 +80,16 @@ down: ## 開発環境を停止
 	if $(dev_port_leftover); then exit 1; fi
 
 restart: down up ## 再起動
+
+# 起動中のアプリが設定を書き戻さないよう先に止める。モデルは残す (ALL=1 で実行環境も消す、PERMISSIONS=1 で TCC も)
+reset: ## dev の設定・導入記録・WebKit データを消して初回起動の状態に (ALL=1 / PERMISSIONS=1)
+	@$(MAKE) --no-print-directory down
+	@ALL="$(ALL)" PERMISSIONS="$(PERMISSIONS)" scripts/dev-reset.sh
+
+# MUKUCHI_DEV_SHOW_SETUP は今回起動する process-compose (→ app) の環境にだけ渡す。次の make up/restart には残らない
+up-fresh: ## reset してセットアップ画面ありで起動 (MUKUCHI_DEV_SHOW_SETUP=1)
+	@$(MAKE) --no-print-directory reset
+	@MUKUCHI_DEV_SHOW_SETUP=1 $(MAKE) --no-print-directory up
 
 ps: ## プロセス状態と ASR /health
 	@$(PC) process list -o wide 2>/dev/null || echo "process-compose: not running"

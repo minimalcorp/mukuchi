@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { CTA, detectPlatform, isPlatform, type Platform } from "@/lib/platform";
+import { track, type CtaLocation } from "@/lib/analytics";
 import { DOWNLOAD_URL, SHARE_TEXT, SITE_NAME } from "@/lib/site";
 import { Button, ButtonLink, Icon, Badge } from "./ui";
+
+const DOWNLOAD_FILE_NAME = DOWNLOAD_URL.slice(DOWNLOAD_URL.lastIndexOf("/") + 1);
 
 async function resolvePlatform(): Promise<Platform> {
   // 開発時だけ ?os=mac-intel などで各状態を確認できる (デザインの Tweaks の代わり。本番のビルドには含まれない)
@@ -46,6 +49,7 @@ export function useShareActions() {
     try {
       await navigator.clipboard.writeText(pageUrl());
       setCopied(true);
+      track("share", { method: "copy" });
     } catch {
       // 非セキュアな接続・権限の拒否ではコピーできない。ボタンの表示は変えない
     }
@@ -58,6 +62,7 @@ export function useShareActions() {
     }
     try {
       await navigator.share({ title: SITE_NAME, text: SHARE_TEXT, url: pageUrl() });
+      track("share", { method: "native" });
     } catch {
       // 共有シートを閉じた場合も reject されるので何もしない
     }
@@ -71,11 +76,14 @@ export type ShareActions = ReturnType<typeof useShareActions>;
 /** ダウンロードボタン (判定結果で文言・可否が変わる) */
 export function DownloadButton({
   platform,
+  location,
   size,
   short = false,
   className,
 }: {
   platform: Platform;
+  /** 計測で、どこのボタンが押されたかを見分ける */
+  location: CtaLocation;
   size: "sm" | "lg";
   short?: boolean;
   className?: string;
@@ -91,6 +99,15 @@ export function DownloadButton({
         href={DOWNLOAD_URL}
         className={className}
         data-cta="download"
+        // dmg は GA の拡張計測機能の file_download の対象外の拡張子なので自分で送る
+        onClick={() =>
+          track("file_download", {
+            file_name: DOWNLOAD_FILE_NAME,
+            file_extension: "dmg",
+            link_url: DOWNLOAD_URL,
+            cta_location: location,
+          })
+        }
       >
         {label}
       </ButtonLink>

@@ -42,3 +42,7 @@
 - OS・CPU の判定 (Apple Silicon / Intel / 判定不可 / Windows / Linux / スマホ) とボタンの出し分けはデザインどおり。Chrome・Edge は `navigator.userAgentData.getHighEntropyValues(["architecture"])` で判定する
 - スマホ版の「URL をコピー」「共有」(Web Share API) はデザインどおり
 - デザインの Tweaks (状態の切り替え) は本番では出さない。開発時の確認用にクエリパラメータなどで切り替えられるようにする
+- 計測は GA4 (測定 ID は `app/lib/site.ts`)。gtag は本番ビルドだけが読み込み、`mukuchi.minimalcorp.com` で開いた時だけ送る (dev・`vite preview`・本番以外のステージは送らない)。同意バナーは出さず、フッターに外部送信の表記と Google の説明へのリンクを置く
+  - イベント: `file_download` (ダウンロードボタン。dmg は拡張計測機能の対象外のため自前で送る)・`github_click`・`share` (`method`: `copy` / `native`)。押した場所は `cta_location` (`header` / `hero` / `final` / `footer`)。管理画面でカスタムディメンションに登録しないとレポートに出ない
+  - 拡張計測機能の「ブラウザの履歴イベントに基づくページの変更」はオンのまま (アンカーの移動・戻る・URL の変わらない replaceState では page_view が増えないことを確認済み。React Router の画面遷移を足した時に必要)
+  - 実際のダウンロード数は GitHub Releases の `download_count` を正とする (`gh api repos/minimalcorp/mukuchi/releases`)。GA の数字は流入元・押した割合を見るためのもの

@@ -9,6 +9,7 @@ import {
   type ShareActions,
 } from "@/components/cta";
 import { Demo } from "@/components/demo";
+import { track, type CtaLocation } from "@/lib/analytics";
 import { ButtonLink, Icon } from "@/components/ui";
 import {
   ALWAYS_ROWS,
@@ -30,6 +31,7 @@ import {
   DOWNLOAD_META,
   DOWNLOAD_META_SHORT,
   GITHUB_URL,
+  GOOGLE_PARTNER_SITES_URL,
   SETUP_DURATION,
   SITE_DESCRIPTION,
   SITE_NAME,
@@ -71,6 +73,9 @@ const INNER = "mx-auto w-full max-w-[640px] lg:max-w-[1280px]";
 
 const ICON_SRC = "/mukuchi-icon.png";
 
+const trackGithub = (location: CtaLocation) => () =>
+  track("github_click", { cta_location: location });
+
 export default function Home() {
   const platform = usePlatform();
   const share = useShareActions();
@@ -103,7 +108,11 @@ function Header({ platform }: { platform: Platform }) {
           <span className="text-[17px] font-semibold text-strong lg:text-[18px]">mukuchi</span>
         </a>
         <span className="flex-1" />
-        <a href={GITHUB_URL} className="text-[14px] text-body hover:underline lg:hidden">
+        <a
+          href={GITHUB_URL}
+          onClick={trackGithub("header")}
+          className="text-[14px] text-body hover:underline lg:hidden"
+        >
           GitHub
         </a>
         <nav aria-label="ページ内" className="hidden gap-6 text-[14px] lg:flex">
@@ -116,12 +125,16 @@ function Header({ platform }: { platform: Platform }) {
           <a href="#setup" className="text-body hover:underline">
             セットアップ
           </a>
-          <a href={GITHUB_URL} className="text-body hover:underline">
+          <a
+            href={GITHUB_URL}
+            onClick={trackGithub("header")}
+            className="text-body hover:underline"
+          >
             GitHub
           </a>
         </nav>
         <div className="hidden lg:block">
-          <DownloadButton platform={platform} size="sm" short />
+          <DownloadButton platform={platform} location="header" size="sm" short />
         </div>
       </div>
     </header>
@@ -181,7 +194,12 @@ function Hero({
               </div>
             ) : (
               <div className="flex flex-col gap-2.5">
-                <DownloadButton platform={pcPlatform} size="lg" className="w-full" />
+                <DownloadButton
+                  platform={pcPlatform}
+                  location="hero"
+                  size="lg"
+                  className="w-full"
+                />
                 <div className="text-[13px] text-muted">{DOWNLOAD_META}</div>
                 <CtaNote platform={pcPlatform} />
               </div>
@@ -191,11 +209,12 @@ function Hero({
           {/* PC 版の配置 */}
           <div className="hidden flex-col gap-2.5 lg:flex" data-testid="hero-cta-pc">
             <div className="flex gap-2">
-              <DownloadButton platform={pcPlatform} size="lg" />
+              <DownloadButton platform={pcPlatform} location="hero" size="lg" />
               <ButtonLink
                 variant="ghost"
                 iconRight="external-link"
                 href={GITHUB_URL}
+                onClick={trackGithub("hero")}
                 target="_blank"
                 rel="noopener noreferrer"
               >
@@ -457,11 +476,16 @@ function FinalCta({
               {spShare ? (
                 <ShareButtons actions={share} />
               ) : (
-                <DownloadButton platform={pcPlatform} size="lg" className="w-full" />
+                <DownloadButton
+                  platform={pcPlatform}
+                  location="final"
+                  size="lg"
+                  className="w-full"
+                />
               )}
             </div>
             <div className="hidden lg:block" data-testid="final-cta-pc">
-              <DownloadButton platform={pcPlatform} size="lg" />
+              <DownloadButton platform={pcPlatform} location="final" size="lg" />
             </div>
             <span className="text-xs text-muted lg:hidden">
               {spShare ? DOWNLOAD_META_SHORT : DOWNLOAD_META}
@@ -493,7 +517,11 @@ function Footer() {
             {SITE_NAME} {VERSION}
           </span>
           <span className="flex-1" />
-          <a href={GITHUB_URL} className="text-muted hover:underline">
+          <a
+            href={GITHUB_URL}
+            onClick={trackGithub("footer")}
+            className="text-muted hover:underline"
+          >
             GitHub
           </a>
         </div>
@@ -504,6 +532,21 @@ function Footer() {
           </a>
         </span>
       </div>
+      {/* 電気通信事業法の外部送信規律の公表として、送信先と Google による使用の説明を示す */}
+      <p
+        className={`${INNER} m-0 -mt-3 px-5 pb-5 text-xs leading-[1.6] text-muted lg:-mt-4 lg:px-12 lg:pb-6`}
+        data-testid="analytics-notice"
+      >
+        本サイトは Google Analytics を利用して閲覧状況を計測しています。
+        <a
+          href={GOOGLE_PARTNER_SITES_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-muted underline"
+        >
+          Google によるデータの使用について
+        </a>
+      </p>
     </footer>
   );
 }

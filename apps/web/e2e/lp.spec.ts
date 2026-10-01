@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { DEMO_SCRIPT } from "../app/lib/content";
-import { COMPANY_NAME, COMPANY_URL, DOWNLOAD_URL } from "../app/lib/site";
+import { COMPANY_NAME, COMPANY_URL, DOWNLOAD_URL, GOOGLE_PARTNER_SITES_URL } from "../app/lib/site";
 
 const PC = { width: 1280, height: 800 };
 const SP = { width: 390, height: 844 };
@@ -222,6 +222,20 @@ test.describe("PC", () => {
     await expect(
       heroPc(page).getByRole("button", { name: "Apple Silicon 専用です" }),
     ).toBeDisabled();
+  });
+
+  test("開発時は GA を読み込まず、フッターに計測の表記を出す", async ({ page }) => {
+    const gaRequests: string[] = [];
+    page.on("request", (r) => {
+      if (/googletagmanager\.com|google-analytics\.com/.test(r.url())) gaRequests.push(r.url());
+    });
+    await fakeNavigator(page, ENVS.macArm);
+    await page.goto("/");
+    const notice = page.getByTestId("analytics-notice");
+    await expect(notice).toContainText("Google Analytics");
+    await expect(notice.getByRole("link")).toHaveAttribute("href", GOOGLE_PARTNER_SITES_URL);
+    expect(await page.evaluate(() => typeof window.gtag)).toBe("undefined");
+    expect(gaRequests).toEqual([]);
   });
 
   test("デモが動いても高さと後続の位置が変わらない (1280px)", async ({ page }) => {

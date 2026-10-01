@@ -13,6 +13,12 @@ export const DOWNLOAD_URL =
   "https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg";
 export const GITHUB_URL = "https://github.com/minimalcorp/mukuchi";
 
+/** GA4 の測定 ID (公開される値)。送信は本番ビルドかつ SITE_URL のホストで開いた時だけ (app/lib/analytics.ts) */
+export const GA_MEASUREMENT_ID = "G-C0XCXY11HB";
+/** フッターの外部送信の表記から案内する、Google によるデータの使用の説明 */
+export const GOOGLE_PARTNER_SITES_URL =
+  "https://policies.google.com/technologies/partner-sites?hl=ja";
+
 export const VERSION = "v0.1.0";
 export const PRICE = "無料";
 /** 署名・公証済み dmg の実測 (v0.1.0: 35.95 MB) */

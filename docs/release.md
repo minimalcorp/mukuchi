@@ -115,7 +115,7 @@ Apple の secret の登録:
 
 ### desktop
 
-jobs: `approve` (承認) → `prepare` → `build` → `sign` → `publish-desktop`
+jobs: `approve` (承認) → `prepare` → `build` → `sign` → `publish-desktop` → `deploy-web-for-desktop`
 
 1. `Approve` (`release-approval`): 承認を待つだけ。承認後の job は承認を求めない
 2. `Prepare`: main 以外からの実行を止める → 版上げコミットをローカルで作る → 同じタグ・公開済みの Release があれば止める
@@ -129,7 +129,13 @@ jobs: `approve` (承認) → `prepare` → `build` → `sign` → `publish-deskt
 
 公開後の確認: LP は `https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg` を使い、これは公開済み・非プレリリースの Latest の Release の添付を返す ([Linking to releases](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)、[Get the latest release](https://docs.github.com/en/rest/releases/releases#get-the-latest-release))。`curl -sIL <URL> | grep -i '^location'` で新しいタグを指すことを確かめる。
 
-LP の表示 (`apps/web/app/lib/site.ts` の `VERSION`・`DMG_SIZE`) は自動では変わらない。desktop の公開後に PR で直し (サイズは添付の実測。`gh release view desktop-v<version> --json assets --jq '.assets[]|[.name,.size]|@tsv'`)、main に入れてから web をリリースする。
+6. `Deploy web (desktop version)` (`production-web`): LP の版の表示を公開した desktop に合わせる。LP (`apps/web/app/lib/site.ts` の `VERSION`。フッター・ダウンロードの補足・動作環境の表) はビルド時に `apps/desktop/src-tauri/tauri.conf.json` の版を読むため、配信し直すだけで合う
+   - ソースは **最後の web のタグ** (`web-v*` の最大) に、`desktop-v<version>` の `tauri.conf.json` だけを重ねたもの。main は使わない (未リリースの web の変更を出さないため)。web の版・タグは変えない
+   - 配信前にビルドして `v<version>` が含まれることを確かめる。版を `tauri.conf.json` から読まない古い web のタグ (`web-v0.1.2` 以前) だと止まる。その場合は web を一度リリースする
+   - target=web のリリースも main の `tauri.conf.json` を読むため、最新の desktop の版を表示する
+   - Undeploy web で撤去した後でも配信する (撤去中は desktop のリリースで LP が復活する)
+
+`DMG_SIZE` は自動では変わらない。添付の実測 (`gh release view desktop-v<version> --json assets --jq '.assets[]|[.name,.size]|@tsv'`) が大きく変わったら PR で直し、web をリリースする。
 
 ### web
 
@@ -155,7 +161,8 @@ jobs: `approve` (承認) → `prepare` → `deploy-web` → `publish-web`
 |---|---|---|
 | approve (拒否・期限切れ)・prepare・build・sign・deploy-web | main・タグ・Release は変わらない (web の deploy 中の失敗はデプロイが途中の可能性あり) | 原因を直して実行し直す |
 | publish-desktop の push まで (main が進んだ等) | main・タグは変わらない。下書きは消す | 実行し直す |
-| publish-desktop の公開 (push 後) | main・タグは push 済み。下書きの Release が残る | 下書き `desktop-v<version>` を確認して手で公開し、Latest にする |
+| publish-desktop の公開 (push 後) | main・タグは push 済み。下書きの Release が残る (deploy-web-for-desktop は動かない) | 下書き `desktop-v<version>` を確認して手で公開し、Latest にする。LP は web をリリースして合わせる |
+| deploy-web-for-desktop | desktop は公開済み。LP は前の版の表示のまま (配信中の失敗は途中の可能性あり) | 原因を直してこの job を Re-run する (古い web のタグで止まった時は web をリリースする) |
 | publish-web の push (main が進んだ等) | デプロイ済み・main・タグは変わらない | 実行し直す (上の「残るずれ」) |
 
 ### 手元で作る (確認用。タグ・Release は作らない)

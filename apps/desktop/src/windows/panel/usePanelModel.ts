@@ -6,6 +6,7 @@ import { useEffect, useReducer, useRef } from "react";
 import { commands, latestStatusOnly, subscribeWithInitial, type AppStatus, type Utterance, type UtteranceResult } from "@/lib/ipc";
 import { resetAudioLevel } from "@/lib/audio-level";
 import { devOverrides } from "@/lib/env";
+import { diffPreview, type DiffSegment } from "./preview-diff";
 
 /**
  * 入力できた発話の最終結果を表示する時間。入力先はフォーカスで分かるため、内容の確認に足りる短さにする
@@ -24,7 +25,10 @@ export type ShownResult = Exclude<UtteranceResult, { kind: "empty" } | { kind: "
 export type PanelItem = {
   id: number;
   text: string;
-  stableLength: number;
+  /** 前回の表示からの差分で区切った text。挿入・書き換えの区間を一瞬色付けする */
+  segments: DiffSegment[];
+  /** text が変わるたびに増やす。色付けのアニメーションを付け直すため、描画のキーに使う */
+  revision: number;
   stage: "speaking" | "finalizing" | "done";
   result: ShownResult | null;
 };
@@ -44,6 +48,16 @@ type Action =
   | { type: "result"; r: UtteranceResult }
   | { type: "expire"; id: number }
   | { type: "hideError" };
+
+/** it の表示を next に置き換える。同じ文字なら差分を付け直さない (色付けの途中で消さない) */
+function withText(it: PanelItem, next: string): Pick<PanelItem, "text" | "segments" | "revision"> {
+  if (it.text === next) return it;
+  return { text: next, segments: diffPreview(it.text, next), revision: it.revision + 1 };
+}
+
+function newItem(id: number, text: string, stage: PanelItem["stage"], result: ShownResult | null): PanelItem {
+  return { id, text, segments: diffPreview("", text), revision: 0, stage, result };
+}
 
 function withItems(state: State, items: PanelItem[]): State {
   return { ...state, items, lastShown: items.length > 0 ? items : state.lastShown };
@@ -70,7 +84,7 @@ function reducer(state: State, action: Action): State {
       // 次の発話が始まった時点で、前の発話は確定処理中
       const prev = state.items.map((it) => (it.stage === "speaking" ? { ...it, stage: "finalizing" as const } : it));
       if (prev.some((it) => it.id === action.id)) return withItems(state, prev);
-      return withItems(state, [...prev, { id: action.id, text: "", stableLength: 0, stage: "speaking", result: null }]);
+      return withItems(state, [...prev, newItem(action.id, "", "speaking", null)]);
     }
     case "partial": {
       const { u } = action;
@@ -79,14 +93,13 @@ function reducer(state: State, action: Action): State {
         // started を取りこぼした場合 (ウィンドウ再読み込み直後など) も表示する
         return withItems(state, [
           ...state.items,
-          { id: u.id, text: u.text, stableLength: u.stableLength, stage: "speaking", result: null },
+          newItem(u.id, u.text, "speaking", null),
         ]);
       }
       return withItems(
         state,
-        state.items.map((it) =>
-          it.id === u.id && it.stage === "speaking" ? { ...it, text: u.text, stableLength: u.stableLength } : it,
-        ),
+        // 差分は前回の途中表示と比べる (stableLength は末尾以外の変化を表せないので使わない)
+        state.items.map((it) => (it.id === u.id && it.stage === "speaking" ? { ...it, ...withText(it, u.text) } : it)),
       );
     }
     case "result": {
@@ -98,9 +111,12 @@ function reducer(state: State, action: Action): State {
           state.items.filter((it) => it.id !== r.id),
         );
       }
-      const done: PanelItem = { id: r.id, text: r.text, stableLength: r.text.length, stage: "done", result: r };
-      const exists = state.items.some((it) => it.id === r.id);
-      const items = exists ? state.items.map((it) => (it.id === r.id ? done : it)) : [...state.items, done];
+      // 途中表示から最終結果に置き換わる時も差分を出し、確定で何が変わったかを見せる
+      const prev = state.items.find((it) => it.id === r.id);
+      const done: PanelItem = prev
+        ? { ...prev, ...withText(prev, r.text), stage: "done", result: r }
+        : newItem(r.id, r.text, "done", r);
+      const items = prev ? state.items.map((it) => (it.id === r.id ? done : it)) : [...state.items, done];
       return withItems(
         state,
         items.sort((a, b) => a.id - b.id),

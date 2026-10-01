@@ -189,7 +189,7 @@ type AppError = {
 type Utterance = {
   id: number;
   text: string;
-  stableLength: number;  // 先頭から確定扱いの長さ (UTF-16 コード単位 = JS の length/slice と同じ)。以降はプレビューで薄く表示
+  stableLength: number;  // 前回の途中表示との共通接頭辞の長さ (UTF-16 コード単位 = JS の length/slice と同じ)。プレビューの表示には使わない (フロントエンドが前回の text と単語単位で差分を取る)
 };
 
 type UtteranceResult =

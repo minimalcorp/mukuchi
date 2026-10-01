@@ -28,12 +28,14 @@
 
   --green-50: #e6f6ef;
   --green-100: #c8ead9;
+  --green-300: #5fd3a0;
   --green-500: #0f8a5f;
   --green-600: #0c7150;
   --green-700: #095940;
 
   --amber-50: #fdf4e3;
   --amber-100: #f8e4bd;
+  --amber-300: #f2c14e;
   --amber-500: #b7791f;
   --amber-600: #96631a;
   --amber-700: #7a5015;
@@ -82,8 +84,9 @@
   --text-selected: var(--blue-700);
   --text-listening: var(--blue-600);
   --text-command: var(--violet-600);
-  /* プレビューの未確定部分 */
-  --text-unstable: var(--gray-400);
+  /* プレビューの差分 (前回の途中表示からの挿入・書き換え)。一瞬この色で出して --text-strong へ戻す */
+  --text-diff-insert: var(--green-600);
+  --text-diff-replace: var(--amber-600);
 
   /* --- 枠 --- */
   --border-subtle: var(--gray-100);
@@ -133,6 +136,9 @@
   --duration-instant: 80ms;
   --duration-fast: 120ms;
   --duration-normal: 180ms;
+  /* プレビューの差分の色付け: 色のまま保つ時間 → 通常の文字色へ戻す時間 (計 900ms) */
+  --duration-diff-hold: 200ms;
+  --duration-diff-fade: 700ms;
   --transition-control: background-color var(--duration-fast) var(--ease-standard),
     border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard),
     box-shadow var(--duration-fast) var(--ease-standard);
@@ -160,12 +166,14 @@
     --text-muted: var(--gray-400);
     --text-subtle: var(--gray-500);
     --text-danger: var(--red-100);
-    --text-success: var(--green-100);
+    --text-success: var(--green-300);
     --text-warning: var(--amber-100);
     --text-selected: var(--blue-200);
     --text-listening: var(--blue-300);
     --text-command: var(--violet-100);
-    --text-unstable: var(--gray-500);
+    /* 100 番台は --text-strong と見分けにくいので彩度の高い 300 番台にする (面 gray-800 に対し 7.6:1 / 8.5:1) */
+    --text-diff-insert: var(--green-300);
+    --text-diff-replace: var(--amber-300);
 
     --border-subtle: var(--gray-700);
     --border-default: var(--gray-700);

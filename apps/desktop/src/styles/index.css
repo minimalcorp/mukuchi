@@ -41,7 +41,8 @@
   --color-fg-selected: var(--text-selected);
   --color-fg-listening: var(--text-listening);
   --color-fg-command: var(--text-command);
-  --color-fg-unstable: var(--text-unstable);
+  --color-fg-diff-insert: var(--text-diff-insert);
+  --color-fg-diff-replace: var(--text-diff-replace);
 
   --color-line-subtle: var(--border-subtle);
   --color-line-default: var(--border-default);
@@ -179,6 +180,23 @@
 
 @utility transition-control {
   transition: var(--transition-control);
+}
+
+/*
+ * プレビューの差分の色付け。要素自身の文字色 (text-fg-diff-*) で出し、待ち時間の後に通常の文字色へ段階的に戻す。
+ * 動きを減らす設定 (prefers-reduced-motion) では段階的な変化をやめ、同じ時間だけ色を保ってから一度に戻す (差分は見せる)
+ */
+@utility animate-preview-diff {
+  animation: preview-diff var(--duration-diff-fade) var(--ease-standard) var(--duration-diff-hold) forwards;
+  @media (prefers-reduced-motion: reduce) {
+    animation-timing-function: step-end;
+  }
+}
+
+@keyframes preview-diff {
+  to {
+    color: var(--text-strong);
+  }
 }
 
 @keyframes fade-in {

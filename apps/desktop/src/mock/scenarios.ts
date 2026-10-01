@@ -91,6 +91,55 @@ function liveLoop(api: MockApi) {
   setTimeout(run, 1200);
 }
 
+/**
+ * プレビューの差分表示を順に見せる途中表示 (前回からの変化)。最後の要素は確定結果。
+ * 色付けが白へ戻りきるのを見られるよう、1 段ずつ間を空けて流す
+ */
+export const PREVIEW_DIFF_STEPS = [
+  "明日の打ち合わせは", // 最初の表示 (色付けしない)
+  "明日の打ち合わせは十時から", // 末尾への追加 (色付けしない)
+  "明日の打ち合わせは十一時から", // 途中の書き換え (黄)
+  "明日の午後の打ち合わせは十一時から", // 途中への挿入 (緑)
+  "明日の午後の打ち合わせは十一時からへんこう", // 末尾への追加 (色付けしない)
+  "明日の午後の打ち合わせは十一時からに変更して", // 末尾の書き換え + 追加 (末尾全体を黄)
+  "明日の午後の打ち合わせは、十一時からに変更してください。", // 確定で読点の挿入 (緑) と末尾の追加
+];
+
+/** PREVIEW_DIFF_STEPS を途中表示 → 確定の順に繰り返し流す (live) */
+function previewDiffLoop(api: MockApi) {
+  const STEP_MS = 1400;
+  let id = 200;
+  const run = () => {
+    if (api.db.status.phase === "off") return;
+    id += 1;
+    const myId = id;
+    api.setLevel(0.72, true);
+    api.setStatus({ phase: "speaking" });
+    api.started(myId);
+    const partials = PREVIEW_DIFF_STEPS.slice(0, -1);
+    partials.forEach((text, k) => {
+      // stableLength は表示に使わないが、Rust と同じく前回との共通接頭辞の長さを入れる
+      const prev = partials[k - 1] ?? "";
+      let common = 0;
+      while (common < prev.length && prev[common] === text[common]) common++;
+      setTimeout(() => api.partial({ id: myId, text, stableLength: common }), k * STEP_MS);
+    });
+    const endAt = partials.length * STEP_MS;
+    setTimeout(() => {
+      api.setLevel(0.06);
+      api.setStatus({ phase: "finalizing" });
+    }, endAt - STEP_MS / 2);
+    setTimeout(() => {
+      const text = PREVIEW_DIFF_STEPS[PREVIEW_DIFF_STEPS.length - 1];
+      api.result({ kind: "inserted", id: myId, text, appName: "メモ" });
+      api.setLevel(0.12);
+      api.setStatus({ phase: "listening" });
+    }, endAt);
+    setTimeout(run, endAt + 3000);
+  };
+  setTimeout(run, 800);
+}
+
 const PANEL: Scenario[] = [
   {
     name: "default",
@@ -102,6 +151,17 @@ const PANEL: Scenario[] = [
       db.level = { level: 0.14, threshold: THRESHOLD, speech: false };
       db.onListen = liveLoop;
     },
+  },
+  {
+    name: "preview-diff",
+    description: "プレビューの差分表示 (書き換え・挿入・末尾の書き換え・確定での変化を繰り返す)",
+    live: true,
+    setup: (db) => {
+      listening(db, 0.12);
+      db.levelStream = true;
+      db.onListen = previewDiffLoop;
+    },
+    script: previewDiffLoop,
   },
   { name: "off", description: "オフ" },
   {

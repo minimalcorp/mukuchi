@@ -43,7 +43,7 @@ import type { DiffKind } from "./preview-diff";
 const ON_PHASES: AppStatus["phase"][] = ["listening", "speaking", "finalizing", "done"];
 
 // ピル・カードの大きさ。展開の最終の大きさを先に求めるため、クラスではなくここで持つ
-const CARD_WIDTH = { pill: 240, expanded: 440 };
+const CARD_WIDTH = { pill: 240, expanded: 360 };
 // ボタン行の高さ。デザインは展開時 36px だが、展開の前後でボタン・メーターの位置が動かないよう待機中のピル (枠線込み36px → 内側34px) と揃える
 const ROW_HEIGHT = { pill: 34, expanded: 34 };
 const CARD_BORDER = 1;
@@ -410,7 +410,7 @@ function ListeningPanel({ anchor, isOn, expanded, items }: {
         data-testid="panel-card"
         className={cn(
           "flex flex-col select-none border border-line-default bg-surface-card [grid-area:1/1]",
-          // ピル (240px) ⇄ 展開 (440px) は展開・収縮とも 180ms・標準イージング (幅と高さで同じ)。文字の追加はアニメーションさせない
+          // ピル (240px) ⇄ 展開 (360px) は展開・収縮とも 180ms・標準イージング (幅と高さで同じ)。文字の追加はアニメーションさせない
           // 角丸は展開しても待機中のピルと同じ 18px に揃える (デザインは展開時 14px だが、形が変わって見えるため利用者の要望で統一)
           "rounded-[18px] transition-[width,box-shadow] duration-[180ms] ease-standard motion-reduce:transition-none",
           expanded ? "shadow-lg" : "shadow-md",

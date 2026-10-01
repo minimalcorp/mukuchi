@@ -63,7 +63,7 @@ test("panel: 展開は開始時点で、収縮は終わってから最終の大�
   await mock(page, `api.started(1); api.partial({ id: 1, text: "明日の打ち合わせは十時からに変更して", stableLength: 13 });`);
   await expect(page.getByText("認識中")).toBeVisible();
   // 180ms のアニメーションが終わるのを待つ
-  await expect(page.getByTestId("panel-card")).toHaveCSS("width", "440px");
+  await expect(page.getByTestId("panel-card")).toHaveCSS("width", "360px");
   await page.waitForTimeout(300);
   const expanded = await frameSize(page);
   const expandCalls = (await panelSizes(page)).slice(before);

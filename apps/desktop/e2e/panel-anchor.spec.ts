@@ -58,7 +58,7 @@ async function pillAndExpandedSizes(page: Page): Promise<[Size | undefined, Size
   await expect.poll(async () => (await panelSizes(page)).length).toBeGreaterThan(0);
   const pill = (await panelSizes(page)).at(-1);
   await mock(page, SPEAK);
-  await expect(page.getByTestId("panel-card")).toHaveCSS("width", "440px");
+  await expect(page.getByTestId("panel-card")).toHaveCSS("width", "360px");
   await page.waitForTimeout(300);
   return [pill, (await panelSizes(page)).at(-1)];
 }
@@ -107,14 +107,14 @@ for (const { vertical, horizontal } of ANCHORS) {
     }, SPEAK);
     const widths = samples.map((s) => s.right - s.left);
     // 途中の幅が取れている (アニメーションしている) こと
-    expect(widths.some((w) => w > 240.5 && w < 439.5)).toBe(true);
+    expect(widths.some((w) => w > 240.5 && w < 359.5)).toBe(true);
     for (const s of samples) {
       const e = anchoredEdges(s, vertical, horizontal);
       expect(e.x).toBeCloseTo(start.x, 0);
       expect(e.y).toBeCloseTo(start.y, 0);
     }
 
-    await expect(page.getByTestId("panel-card")).toHaveCSS("width", "440px");
+    await expect(page.getByTestId("panel-card")).toHaveCSS("width", "360px");
     const expanded = await check();
     // top は上端から下へ、bottom は下端から上へ広がる
     if (vertical === "top") expect(expanded.bottom).toBeGreaterThan(pill.bottom);
@@ -169,7 +169,7 @@ for (const name of ["top-left", "bottom-right"]) {
   test(`panel anchor ${name}: 展開表示のスクリーンショット`, async ({ page }) => {
     await open(page, `window=panel&mock=speaking&anchor=${name}`);
     await expect(page.getByText("認識中")).toBeVisible();
-    await expect(page.getByTestId("panel-card")).toHaveCSS("width", "440px");
+    await expect(page.getByTestId("panel-card")).toHaveCSS("width", "360px");
     await page.waitForTimeout(300);
     await page.screenshot({ path: `e2e/screenshots/panel-anchor-${name}.png` });
   });

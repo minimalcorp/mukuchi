@@ -9,6 +9,7 @@
 #   prepare … 開始時の main (github.sha) の上に版上げコミットをローカルで作る (scripts/release-commit.sh)。
 #             作者・日時を固定するため、後の job で同じ入力から作り直すと同じコミット ID になる
 #   desktop … build (secret なし) → sign (production-desktop) → publish-desktop (production-desktop)
+#             → deploy-web-for-desktop (production-web。LP の版の表示を合わせる。版上げ・タグなし)
 #   web     … deploy-web (production-web) → publish-web (production-web)
 #   publish の job だけが Deploy Key (RELEASE_DEPLOY_KEY。両 Environment の secret) を読み、版上げコミットと注釈付きタグ
 #   (desktop-v<ver> / web-v<ver>) を main へ push する。main が開始時から進んでいたら rebase せず止める
@@ -397,6 +398,79 @@ jobs:
           if [ "$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)" = true ]; then
             gh release delete "$TAG" -R "$GITHUB_REPOSITORY" --yes
           fi
+
+  # LP は desktop の版をビルド時に tauri.conf.json から読む (apps/web/app/lib/site.ts)。desktop の公開後に LP を配信し直し、
+  # 表示する版を公開した desktop に合わせる。配信するのは main ではなく最後の web のタグのソース (main にある未リリースの
+  # web の変更を出さないため) に、公開した desktop のタグの tauri.conf.json だけを重ねたもの。web の版・タグは変えない。
+  # 失敗しても desktop の公開は済んでいる。この job を Re-run する (docs/release.md)
+  deploy-web-for-desktop:
+    name: Deploy web (desktop version)
+    needs: [prepare, publish-desktop]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: production-web
+      url: https://mukuchi.minimalcorp.com
+    permissions:
+      id-token: write # AWS の OIDC 用
+      contents: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      DESKTOP_TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      # 古い run を Re-run した時に、後から公開した desktop の版の表示を古い版で上書きしないよう、最新の desktop のタグか確かめる
+      - name: Find latest tags
+        id: web
+        run: |
+          set -euo pipefail
+          url="https://github.com/$GITHUB_REPOSITORY.git"
+          latest_desktop="$(git ls-remote --tags --refs "$url" 'refs/tags/desktop-v*' | sed 's|.*refs/tags/||' | sort -V | tail -n 1)"
+          [ "$latest_desktop" = "$DESKTOP_TAG" ] || { echo "::error::最新の desktop のタグは $latest_desktop ($DESKTOP_TAG でない)。配信しない"; exit 1; }
+          tag="$(git ls-remote --tags --refs "$url" 'refs/tags/web-v*' \
+            | sed 's|.*refs/tags/||' | sort -V | tail -n 1)"
+          [ -n "$tag" ] || { echo "::error::web のタグ (web-v*) がない"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.web.outputs.tag }}
+          persist-credentials: false
+      - name: Overlay desktop version
+        run: |
+          set -euo pipefail
+          conf=apps/desktop/src-tauri/tauri.conf.json
+          git fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "refs/tags/$DESKTOP_TAG"
+          git checkout FETCH_HEAD -- "$conf"
+          v="$(node -p "require('./$conf').version")"
+          [ "$v" = "$VERSION" ] || { echo "::error::$DESKTOP_TAG の tauri.conf.json の版 ($v) が $VERSION と違う"; exit 1; }
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+      # 版を tauri.conf.json から読まない古い web のタグだと、配信しても版が変わらない。配信の前にビルドして確かめる
+      # (sst deploy は同じビルドをもう一度行う)
+      - name: Check built version
+        env:
+          WEB_TAG: ${{ steps.web.outputs.tag }}
+        run: |
+          set -euo pipefail
+          pnpm --filter @mukuchi/web build
+          grep -qF "v$VERSION" apps/web/build/client/index.html \
+            || { echo "::error::$WEB_TAG のビルドに v$VERSION がない (版を tauri.conf.json から読まない web の版)。web をリリースし直す"; exit 1; }
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: sst deploy
+        env:
+          MUKUCHI_WEB_CERT_ARN: ${{ vars.MUKUCHI_WEB_CERT_ARN }}
+          WEB_TAG: ${{ steps.web.outputs.tag }}
+        run: |
+          set -euo pipefail
+          pnpm exec sst deploy --stage production
+          echo "web \`$WEB_TAG\` を desktop $VERSION の版で配信し直した" >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------- web
 

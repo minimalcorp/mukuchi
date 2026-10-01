@@ -1,5 +1,7 @@
-// LP に載せる数値・版・URL はここだけで管理する (リリースのたびにここを直す)。
+// LP に載せる数値・版・URL はここだけで管理する。
 // 値の根拠は docs/plans/lp-spec.md の「数値・文言」。デザインの仮の値ではなく実装と実測を正とする
+// with { type: "json" } は e2e (Playwright が Node で読む) に必要。Node は JSON の名前付き import を許さないため既定の import にする
+import tauriConf from "../../../desktop/src-tauri/tauri.conf.json" with { type: "json" };
 
 export const SITE_URL = "https://mukuchi.minimalcorp.com";
 
@@ -19,9 +21,14 @@ export const GA_MEASUREMENT_ID = "G-C0XCXY11HB";
 export const GOOGLE_PARTNER_SITES_URL =
   "https://policies.google.com/technologies/partner-sites?hl=ja";
 
-export const VERSION = "v0.1.0";
+/**
+ * desktop アプリの版 (フッター・ダウンロードの補足・動作環境の表に出す)。手で書かず、ビルド時に desktop の版の元
+ * (tauri.conf.json) を読む。desktop のリリースは版上げを main へ push した後に web も配信し直す (release.yml の
+ * deploy-web-for-desktop) ため、配信中の LP は常に最新の desktop の版を表示する
+ */
+export const VERSION = `v${tauriConf.version}`;
 export const PRICE = "無料";
-/** 署名・公証済み dmg の実測 (v0.1.0: 35.95 MB) */
+/** 署名・公証済み dmg の実測 (v0.1.0: 35.95 MB、v0.1.3: 36.21 MB)。版と違い自動では変わらない。大きく変わったら直す */
 export const DMG_SIZE = "36 MB";
 /** 既定のモデル minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit (2,185,804,096 B)。初回セットアップはこれだけを取得する */
 export const MODEL_SIZE = "約 2.2 GB";

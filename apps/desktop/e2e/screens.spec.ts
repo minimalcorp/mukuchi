@@ -263,7 +263,7 @@ test("panel: 理由が長くてもメーターを潰さず、文言を省略す�
     api.started(1);
     api.result({ kind: "failed", id: 1, text: "こんにちは", error: { code: "insert_failed", message: "${"とても長いエラーの説明".repeat(6)}", action: null } });
   })()`);
-  await expect(page.getByTestId("panel-card")).toHaveCSS("width", "440px");
+  await expect(page.getByTestId("panel-card")).toHaveCSS("width", "360px");
   const meter = await page.getByTestId("level-meter").boundingBox();
   expect(meter!.width).toBeGreaterThanOrEqual(64);
   const card = await page.getByTestId("panel-card").boundingBox();

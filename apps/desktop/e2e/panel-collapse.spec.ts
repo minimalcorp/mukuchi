@@ -97,7 +97,7 @@ for (const anchor of ["bottom-center", "top-center", "top-left", "bottom-right"]
     await open(page, anchor);
     const idle = await page.getByTestId("panel-card").boundingBox();
 
-    const expand = await record(page, SPEAK, CARD_IS(440));
+    const expand = await record(page, SPEAK, CARD_IS(360));
     const expanded = expand.at(-1)!;
     // 展開は最初に最終の大きさを 1 回だけ送る
     expect(expanded.sizes).toHaveLength(1);
@@ -117,14 +117,14 @@ for (const anchor of ["bottom-center", "top-center", "top-left", "bottom-right"]
     // 途中の大きさを経由して (アニメーションして) 縮み、幅・高さは単調に減る
     const widths = collapse.map((s) => s.right - s.left);
     const heights = collapse.map((s) => s.bottom - s.top);
-    expect(widths.some((w) => w > 240.5 && w < 439.5)).toBe(true);
+    expect(widths.some((w) => w > 240.5 && w < 359.5)).toBe(true);
     for (let i = 1; i < collapse.length; i++) {
       expect(widths[i]).toBeLessThanOrEqual(widths[i - 1] + 0.01);
       expect(heights[i]).toBeLessThanOrEqual(heights[i - 1] + 0.01);
     }
 
     // 最終結果の文字は出したまま、縮み終わる前に消える (80ms)
-    const shrinkStart = collapse.findIndex((s) => s.right - s.left < 439.5);
+    const shrinkStart = collapse.findIndex((s) => s.right - s.left < 359.5);
     expect(collapse[Math.max(0, shrinkStart - 1)].opacity).toBeGreaterThan(0.9);
     const hidden = collapse.findIndex((s) => s.opacity === 0);
     expect(hidden).toBeGreaterThan(-1);
@@ -144,34 +144,34 @@ for (const anchor of ["bottom-center", "top-center", "top-left", "bottom-right"]
 
 test("panel: 収縮の途中で再び展開した時は、展開時の大きさのまま送り直さない", async ({ page }) => {
   await open(page, "bottom-center");
-  await record(page, SPEAK, CARD_IS(440));
+  await record(page, SPEAK, CARD_IS(360));
   const before = (await sizes(page)).length;
   // 消えてピルへ戻り始めた直後に次の発話が始まる
   const samples = await record(
     page,
     `${INSERT}
      const wait = () => {
-       // 縮み始めてから (幅 400px 未満になってから) 次の発話を始める
-       if (document.querySelector('[data-testid="panel-card"]').getBoundingClientRect().width >= 400) return requestAnimationFrame(wait);
+       // 縮み始めてから (幅 320px 未満になってから) 次の発話を始める
+       if (document.querySelector('[data-testid="panel-card"]').getBoundingClientRect().width >= 320) return requestAnimationFrame(wait);
        ${SPEAK.replaceAll("1", "2")}
        window.__reexpanded = true;
      };
      wait();`,
-    `window.__reexpanded && ${CARD_IS(440)} && document.querySelector('[data-testid="panel-card"]').dataset.collapsing === "false"`,
+    `window.__reexpanded && ${CARD_IS(360)} && document.querySelector('[data-testid="panel-card"]').dataset.collapsing === "false"`,
     3000,
   );
-  expect(samples.some((s) => s.right - s.left < 439.5)).toBe(true);
+  expect(samples.some((s) => s.right - s.left < 359.5)).toBe(true);
   // 大きさは展開時のまま (高さはプレビューの行数で変わりうるので、送ったとしても幅は展開時の幅)
   const sent = (await sizes(page)).slice(before);
-  expect(sent.every((s) => s.width === 488)).toBe(true);
+  expect(sent.every((s) => s.width === 408)).toBe(true);
 });
 
 test("panel: 動きを減らす設定では、アニメーションせずにすぐ最終の大きさを 1 回送る", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await open(page, "bottom-center");
-  await record(page, SPEAK, CARD_IS(440));
+  await record(page, SPEAK, CARD_IS(360));
   const collapse = await record(page, INSERT, `${CARD_IS(240)} && api.calls.at(-1)?.cmd === "set_panel_size"`, 3000);
   expect(collapse.at(-1)!.sizes).toEqual([PILL_SIZE]);
   const widths = collapse.map((s) => s.right - s.left);
-  expect(widths.every((w) => w > 439.5 || w < 240.5)).toBe(true);
+  expect(widths.every((w) => w > 359.5 || w < 240.5)).toBe(true);
 });

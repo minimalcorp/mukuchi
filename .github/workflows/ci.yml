@@ -1,5 +1,8 @@
 # PR の検査。job の name は main の ruleset の required status checks と一致させる (変えたら ruleset も直す)。
-# required にする job には paths フィルタを付けない (スキップされると pending のまま残るため)。
+# PR の変更ファイルに応じて必要な job だけ動かす。on: の paths は使わない (ワークフローごとスキップされると
+# required checks が pending のまま残るため)。代わりに changes job で判定し、各 job の if でスキップする
+# (job 単位のスキップは skipped として required を満たす)。changes が失敗したら全 job を動かす
+# (needs が失敗した job は skipped になり、検査なしで required を素通りしてしまうため)。
 # 手元の make と同じ道具で動かすため、desktop の job は flake の devShell (nix develop) の中で実行する。
 # nix develop はサブディレクトリからでも上位の flake.nix (リポジトリ直下) を見つける。
 # web の job は macOS 固有の道具を使わないため ubuntu で動かす (flake は aarch64-darwin のみ)。
@@ -20,8 +23,127 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # 変更ファイルから動かす job を決める。checkout せず API で一覧を取る (サードパーティ action は使わない)
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.detect.outputs.rust }}
+      frontend: ${{ steps.detect.outputs.frontend }}
+      asr: ${{ steps.detect.outputs.asr }}
+      web: ${{ steps.detect.outputs.web }}
+    steps:
+      - name: Detect changed areas
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -euo pipefail
+
+          set_all() {
+            for k in rust frontend asr web; do echo "$k=$1" >> "$GITHUB_OUTPUT"; done
+          }
+
+          # workflow_dispatch (PR なし) は全部動かす
+          if [ -z "${PR_NUMBER:-}" ]; then
+            echo "PR ではないため全 job を実行"; set_all true; exit 0
+          fi
+          # files API は 3000 件までしか返さない。取りこぼしで検査が抜けないよう全部動かす
+          if [ "${CHANGED_FILES:-0}" -ge 3000 ]; then
+            echo "変更ファイルが ${CHANGED_FILES} 件 (API の上限以上) のため全 job を実行"; set_all true; exit 0
+          fi
+
+          # リネームは移動元も見る (移動元の領域の検査も必要なため)
+          files=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)')
+          echo "変更ファイル:"; printf '%s\n' "$files"
+
+          # 正規表現はリポジトリ相対のパスに対する grep -E
+          # ci.yml 自体の変更は全 job で確かめる
+          ALL=( '^\.github/workflows/ci\.yml$' )
+          # macOS の3 job は flake の devShell で動くため
+          DEVSHELL=( '^flake\.(nix|lock)$' )
+          RUST=(
+            '^apps/desktop/src-tauri/'
+            '^rust-toolchain\.toml$'
+            # CI の Prepare bundle resources で使う
+            '^apps/desktop/scripts/(prepare-bundle-resources|fetch-uv|make-verify-wav)\.sh$'
+            # tauri.conf.json の bundle.resources (tauri-build が要求する)
+            '^apps/desktop/THIRD_PARTY_NOTICES$'
+          )
+          FRONTEND=(
+            '^apps/desktop/src/'
+            '^apps/desktop/e2e/'
+            # package.json・vite/tsconfig/eslint/playwright の設定・index.html・components.json 等
+            '^apps/desktop/[^/]+$'
+            # AboutSection.tsx が ?raw で import する
+            '^LICENSE$'
+            # workspace 全体の依存
+            '^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml)$'
+          )
+          ASR=( '^apps/desktop/asr-server/' )
+          WEB=(
+            '^apps/web/'
+            # リリース用スクリプトのテスト (node --test scripts/*.test.mjs)
+            '^scripts/'
+            # typecheck で検査する
+            '^(sst\.config\.ts|tsconfig\.json)$'
+            # workspace 全体の依存
+            '^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml)$'
+            # scripts/bump-version.test.mjs が実ファイルを複製してテストする
+            '^apps/desktop/src-tauri/(tauri\.conf\.json|Cargo\.toml|Cargo\.lock)$'
+            '^apps/desktop/package\.json$'
+          )
+          # どの job の検査にも影響しない (ビルド・テストが読む .md は無い)。各 job の対象より優先する
+          # (apps/web/README.md 等、job の対象のディレクトリにある文書だけの変更で job を動かさないため)
+          IGNORE=(
+            '^(docs|\.claude|assets|spikes|\.vscode)/'
+            '\.md$'
+            '^(Makefile|process-compose\.yaml|\.envrc|\.gitignore)$'
+            '^\.github/workflows/(release|undeploy-web)\.yml$'
+            # make build*・setup・reset・uninstall 用 (CI のどの job も実行しない)。RUST の3本は除く
+            '^apps/desktop/scripts/(build-macos|dev-reset|setup|uninstall|verify-macos)\.sh$'
+            '^apps/desktop/scripts/(check-dmg-layout|dmg-settings|run-dmgbuild)\.py(\.lock)?$'
+          )
+
+          # 配列の正規表現を | でつないで1つでも当たれば 0
+          matches() {
+            local IFS='|'
+            grep -Eq "$*" <<< "$files"
+          }
+          result() {
+            if matches "$@"; then echo true; else echo false; fi
+          }
+
+          ignore=$(IFS='|'; echo "${IGNORE[*]}")
+          files=$(grep -Ev "$ignore" <<< "$files" || true)
+
+          # どの分類にも当たらないファイルがあれば全部動かす (新しいファイルの分類漏れで検査が抜けないように)
+          known=$(IFS='|'; echo "${ALL[*]}|${DEVSHELL[*]}|${RUST[*]}|${FRONTEND[*]}|${ASR[*]}|${WEB[*]}")
+          unknown=$(grep -Ev "$known" <<< "$files" || true)
+          if [ -n "$unknown" ]; then
+            echo "分類されていないファイルがあるため全 job を実行:"; printf '%s\n' "$unknown"
+            set_all true; exit 0
+          fi
+
+          {
+            echo "rust=$(result "${ALL[@]}" "${DEVSHELL[@]}" "${RUST[@]}")"
+            echo "frontend=$(result "${ALL[@]}" "${DEVSHELL[@]}" "${FRONTEND[@]}")"
+            echo "asr=$(result "${ALL[@]}" "${DEVSHELL[@]}" "${ASR[@]}")"
+            echo "web=$(result "${ALL[@]}" "${WEB[@]}")"
+          } | tee -a "$GITHUB_OUTPUT"
+
   rust:
     name: Rust (fmt, clippy, test)
+    needs: changes
+    # changes が成功しなかったら (失敗・タイムアウト) 判定に頼らず動かす
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     # MLX・Core Audio 等の都合で対象は Apple Silicon の macOS のみ (flake も aarch64-darwin のみ)
     runs-on: macos-15
     timeout-minutes: 60
@@ -55,6 +177,9 @@ jobs:
 
   frontend:
     name: Frontend (lint, build, e2e)
+    needs: changes
+    # changes が成功しなかったら (失敗・タイムアウト) 判定に頼らず動かす
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.frontend == 'true') }}
     runs-on: macos-15
     timeout-minutes: 30
     defaults:
@@ -85,6 +210,9 @@ jobs:
 
   asr-server:
     name: ASR server (ruff, pytest)
+    needs: changes
+    # changes が成功しなかったら (失敗・タイムアウト) 判定に頼らず動かす
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.asr == 'true') }}
     runs-on: macos-15
     timeout-minutes: 30
     defaults:
@@ -110,6 +238,9 @@ jobs:
 
   web:
     name: Web (lint, typecheck, build)
+    needs: changes
+    # changes が成功しなかったら (失敗・タイムアウト) 判定に頼らず動かす
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

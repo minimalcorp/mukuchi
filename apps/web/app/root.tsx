@@ -10,6 +10,8 @@ import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
 import "@fontsource/ibm-plex-mono/600.css";
 import "./globals.css";
+import { ANALYTICS_ENABLED, GTAG_INIT_SCRIPT } from "./lib/analytics";
+import { GA_MEASUREMENT_ID } from "./lib/site";
 
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
@@ -24,6 +26,16 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
         <Meta />
         <Links />
+        {/* 事前生成の HTML に含め、ハイドレーションを待たずに計測を始める */}
+        {ANALYTICS_ENABLED && (
+          <>
+            <script
+              async
+              src={`https://www.googletagmanager.com/gtag/js?id=${GA_MEASUREMENT_ID}`}
+            />
+            <script dangerouslySetInnerHTML={{ __html: GTAG_INIT_SCRIPT }} />
+          </>
+        )}
       </head>
       <body>
         {children}

@@ -38,6 +38,7 @@ import { errorActionView } from "@/lib/error-actions";
 import { usePanelDrag } from "@/lib/panel-drag";
 import { cn } from "@/lib/utils";
 import { usePanelModel, type PanelItem } from "./usePanelModel";
+import type { DiffKind } from "./preview-diff";
 
 const ON_PHASES: AppStatus["phase"][] = ["listening", "speaking", "finalizing", "done"];
 
@@ -638,7 +639,7 @@ function StatusLabel({ expanded, items }: { expanded: boolean; items: PanelItem[
   );
 }
 
-/** プレビュー。確定部分は濃く、未確定の末尾は薄いグレー。3 行を超えたら古い行を上に送る */
+/** プレビュー。前回の表示から挿入・書き換えされた語を一瞬色付けする。3 行を超えたら古い行を上に送る */
 function Preview({ items, ref }: { items: PanelItem[]; ref?: Ref<HTMLDivElement> }) {
   return (
     <div ref={ref} className="border-b border-line-subtle px-3.5 pt-2.5 pb-2">
@@ -655,15 +656,26 @@ function Preview({ items, ref }: { items: PanelItem[]; ref?: Ref<HTMLDivElement>
   );
 }
 
+const DIFF_CLASS: Record<Exclude<DiffKind, "same">, string> = {
+  insert: "text-fg-diff-insert animate-preview-diff",
+  replace: "text-fg-diff-replace animate-preview-diff",
+};
+
 function PreviewItem({ item }: { item: PanelItem }) {
-  const stable = item.text.slice(0, item.stableLength);
-  const tail = item.text.slice(item.stableLength);
   const r = item.result;
   return (
     <div className="flex flex-none flex-col gap-1">
       <p className="m-0 text-md leading-[1.6] text-pretty text-fg-strong">
-        {stable}
-        {tail ? <span className="text-fg-unstable">{tail}</span> : null}
+        {item.segments.map((seg, i) =>
+          seg.kind === "same" ? (
+            seg.text
+          ) : (
+            // revision をキーに含め、次の表示で同じ位置に色付けが続いても作り直してアニメーションを最初からにする
+            <span key={`${item.revision}:${i}`} data-diff={seg.kind} className={DIFF_CLASS[seg.kind]}>
+              {seg.text}
+            </span>
+          ),
+        )}
       </p>
       {r?.kind === "command" ? (
         <div className="flex items-center gap-1.5 text-xs leading-[1.6] text-fg-muted">

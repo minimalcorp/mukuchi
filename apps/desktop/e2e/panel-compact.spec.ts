@@ -207,8 +207,8 @@ test("panel: 通常 → コンパクトは面が縮んでから円を出し、�
   await expect.poll(async () => (await panelSizes(page)).length).toBeGreaterThan(0);
   const before = (await panelSizes(page)).length;
   await mock(page, `api.invoke("update_settings", { patch: { panelStyle: "compact" } });`);
-  await expect(page.getByTestId("panel-style-morph")).toBeVisible();
-  await expect(page.getByTestId("panel-style-morph")).toHaveCount(0);
+  await expect(page.getByTestId("panel-morph")).toBeVisible();
+  await expect(page.getByTestId("panel-morph")).toBeHidden();
   await expect(compact(page)).toBeVisible();
   // 縮み終わってから最終の大きさを 1 回だけ送る (途中の大きさでウィンドウを縮めない)
   await expect.poll(async () => (await panelSizes(page)).slice(before)).toEqual([COMPACT_SIZE]);
@@ -220,7 +220,7 @@ test("panel: コンパクト → 通常は最初に最終の大きさを送る",
   const before = (await panelSizes(page)).length;
   await mock(page, `api.invoke("update_settings", { patch: { panelStyle: "full" } });`);
   await expect(page.getByText("待機中")).toBeVisible();
-  await expect(page.getByTestId("panel-style-morph")).toHaveCount(0);
+  await expect(page.getByTestId("panel-morph")).toBeHidden();
   const sizes = (await panelSizes(page)).slice(before);
   // 広げる時は最初の 1 回で最終の大きさ (カードが途中で切れない)
   expect(sizes.length).toBeGreaterThan(0);

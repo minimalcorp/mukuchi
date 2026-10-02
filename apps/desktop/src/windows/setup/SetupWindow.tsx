@@ -142,7 +142,7 @@ function WelcomeStep({ provisioning, onNext }: { provisioning: ProvisioningStatu
         <AppLogo size={44} />
         <Title large>mukuchi へようこそ</Title>
         <p className="m-0 text-md leading-[1.6] text-fg-body">
-          画面下のパネルで音声入力をオンにすると、話した内容が前面のアプリに入力されます。
+          話すだけで文字を入力できる音声入力アプリです。いくつかの準備を済ませると使えるようになります。
         </p>
         <ul className="m-0 mt-1 flex list-none flex-col gap-2 p-0 text-sm text-fg-muted">
           <li className="flex items-center gap-2">
@@ -503,7 +503,7 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
       <StepBody>
         <Title>試しに話してみてください</Title>
         <p className="m-0 text-sm leading-[1.6] text-fg-muted">
-          画面下のパネルでオンにして、「今日は晴れています」のように話してください。
+          画面の下にパネルを表示しました。パネルで音声入力をオンにして、「君は無口だね」のように話してください。
         </p>
         <div className="flex h-8 flex-none items-center gap-2.5 rounded-md bg-surface-muted px-3">
           <AudioLines size={16} className="flex-none text-blue-500" aria-hidden />
@@ -571,7 +571,7 @@ function DoneStep({ provisioning }: { provisioning: ProvisioningStatus | null })
           mukuchi はメニューバーに常駐します。設定はメニューバーのアイコンから開けます。
         </p>
         <div className="flex items-center gap-2.5 rounded-lg border border-line-default px-3.5 py-3 text-sm">
-          <span className="flex-1">オン／オフは画面下のパネルか、メニューバーのアイコンから切り替えます</span>
+          <span className="flex-1">オン／オフはパネルか、メニューバーのアイコンから切り替えます</span>
         </div>
         <Switch
           label="ログイン時に起動"

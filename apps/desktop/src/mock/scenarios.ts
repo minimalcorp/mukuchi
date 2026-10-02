@@ -401,8 +401,8 @@ const SETUP: Scenario[] = [
     script: (api) => {
       setTimeout(() => {
         api.started(1);
-        api.typeIntoFocused("今日は晴れています。");
-        api.result({ kind: "inserted", id: 1, text: "今日は晴れています。", appName: "mukuchi" });
+        api.typeIntoFocused("君は無口だね。");
+        api.result({ kind: "inserted", id: 1, text: "君は無口だね。", appName: "mukuchi" });
       }, 300);
       setTimeout(() => {
         api.started(2);

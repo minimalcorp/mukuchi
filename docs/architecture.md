@@ -26,8 +26,9 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 | VAD | Silero VAD (`ort`、arm64は静的リンク)。差し替え可能なtraitの背後に置く | 代替: earshot |
 | ASR | Python + MLX (`mlx-qwen3-asr`)。既定のモデルは `neosophie/Qwen3-ASR-1.7B-JA` を全層8bit量子化したもの (自前変換、`minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit`、約2.2GB)。元の bf16 版 (`neosophie/Qwen3-ASR-1.7B-JA`、約4.1GB) は既に手元にある導入でのみ一覧に出る (下の「モデルの管理」)。どちらも revision (commit) を固定して取得 | Rust実装(candle/MLX)は約3倍遅い (spikes/asr-bench)。8bitはfp16と同等精度・約2割速い・メモリ1/3 (spikes/asr-bench/MODEL_DECISION.md) |
 | モデルの管理 | 候補はアプリに固定 (`provisioning/models.rs` の `CATALOG`)。常に「取得済みのモデルが1つ選択されている」状態を保つ (取得途中は選べない、選択中は削除できない)。取得 (進捗・一時停止・再開・中止)・削除はモデルごと。**取得中にできるのは1つ** (一時停止・失敗で止まっているものは複数あってよい)。モデルの操作はセットアップ完了後のみ (セットアップの取得と同時に走らせない)。詳細は「モデルの管理」の節 | 2026-10-01 決定 |
-| 操作 | 音声入力のON/OFFは **常時表示パネルのボタン** と **メニューバー** のみ。**キーボードショートカットは設けない**。押している間だけ録音するモードも実装しない | 2026-09-30 確定 |
+| 操作 | 音声入力のON/OFFは **常時表示パネルのボタン**・**メニューバー**・**グローバルショートカット** (既定 ⌥Space、`Settings.shortcut` で変更・無効化可。`tauri-plugin-global-shortcut` = macOS は Carbon `RegisterEventHotKey` で追加の権限は不要)。押下で、OFF なら ON。ON なら入力モードで分岐: 常に聞き取る→OFF / 1回ずつ聞き取るで未発話→取り消して OFF / 発話中→無音を待たずに確定して OFF。押している間だけ録音するモードは実装しない | 2026-09-30 確定、2026-10-02 ショートカットを追加 (周囲に人がいる環境で入力のタイミングを自分で決める「1回ずつ聞き取る」の開始手段として) |
 | 入力単位 | ONの間、発話(VAD区間)ごとに文字起こしし、話し終わったら入力。入力は単一キューで直列化 | 必須要件 |
+| 入力モード | `Settings.inputMode`。`continuous` (常に聞き取る・既定): ONの間ずっと発話ごとに入力。`oneShot` (1回ずつ聞き取る): ONにしてから1発話を確定 (VAD の話し終わり・最大長、またはショートカットの再押下) したら自動で OFF。短すぎる発話 (誤検出) では OFF にしない。ON (または誤検出) から10秒 (固定) 話し始めなければ OFF。開始手段 (パネル・メニューバー・ショートカット) によらず同じ。セットアップの「入力モード」ステップと 設定 > 音声入力 で選ぶ | 2026-10-02 決定。ひとりなら常に聞き取る、周りに人がいる・会話が聞こえる場所では入力のタイミングを自分で決めたいため |
 | リアルタイムプレビュー | 発話中は前回から音声が0.8秒以上伸び、かつ途中表示の要求が処理中でなければ、発話開始からの音声を文字起こしし直してパネルに表示する。入力するのは話し終わり時点の最終結果のみ。確定後は最終結果で表示を置き換えて750ms表示する (入力成功時は成功マークのみで入力先アプリ名は出さない)。推論時間の見積もり(実測から学習)が話し終わりの無音(silenceMs)を超える場合は送らない。長い発話は区切り (見積もりが silenceMs に収まる最長、3〜12秒) ごとに静かな所で確定し、以後は区切りの後の音声だけを送る (表示は確定した区切りの文字 + 今の区切りの文字。1回の推論が発話の長さに比例して伸びず、確定を遅らせない) | 2026-09-30 確定。値はtsunagiの音声入力に準拠 (implementation-plan.md「音声入力の体験」)。途中表示の応答待ちを取り消してもサーバーの推論は止まらず(直列実行)、確定がその分遅れるため |
 | 入力方式 | クリップボード + ⌘V、元のクリップボードを復元 | IMEの影響を受けない |
 | 音声コマンド | 「言い方→キー」対応表(既定: 確定/エンター→Enter、改行→Shift+Enter、送信→⌘+Enter)。発話全体が正規化後に完全一致した時のみ。機能ごとON/OFF可 | 表記揺れは複数の言い方で吸収 |
@@ -42,7 +43,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 | 実行環境の導入 | アプリは軽量に保ち、初回セットアップでuv(同梱)がPython・依存・モデルを導入 | |
 | アンインストール | 設定 > ストレージ の「完全にアンインストール」+ `apps/desktop/scripts/uninstall.sh`。「実行環境とモデルのみ削除」も提供 | |
 | 開発環境 | Nix flakes devShell + Makefile + process-compose。monorepo (`apps/desktop`、LP は `apps/web`。LP は SST (`sst.config.ts`) で AWS に公開) で JS/TS は pnpm workspace、Rust は Cargo (`apps/desktop/src-tauri` 単独)、Python は uv | [monorepo-plan.md](plans/monorepo-plan.md) |
-| 作らない機能 | キーボードショートカット、押している間だけ録音するモード、文字起こし履歴、入力完了時の効果音、「取り消し」音声での破棄 | 2026-09-30 決定 |
+| 作らない機能 | 押している間だけ録音するモード、文字起こし履歴、入力完了時の効果音、「取り消し」音声での破棄 | 2026-09-30 決定 |
 
 ## 識別子・パス
 
@@ -214,7 +215,10 @@ type Settings = {
   panelPosition: { x: number; y: number; displayId: string; version: 2 } | null; // null=既定位置。Rust (ドラッグ) だけが書く (フロントエンドは null にするだけ)。x,y はピル (影の余白を除いた描画内容) のアンカー点の、ディスプレイ左下からの位置 (整数pt、y上向き)。アンカー点はアンカー (panel-anchor) に当たるピルの辺・角 (例: 右上なら右上の角、中央下なら下辺の中央) で、アンカーはこの点の visibleFrame 内の位置 (左右3等分・上下2等分) から決まる。displayId は CGDirectDisplayID (ピルの中心があるディスプレイ)。version なし (旧形式: ウィンドウの下端中央) は起動時に Rust が見た目の位置を変えずに移行して保存し直す。大きさの変更で画面に収めるための自動のずれは保存しない
   setupCompleted: boolean;
   panelStyle: "full" | "compact";         // 既定 "full"。compact はマイクの円形ボタンのみ (プレビュー・文言なし)
+  inputMode: "continuous" | "oneShot";    // 既定 "continuous" (「決定事項」の入力モード)。未知の値は既定として読む
+  shortcut: string | null;                // 既定 "Alt+Space"。null=無効。形式は「修飾+…+キー」: 修飾は Ctrl・Alt・Shift・Cmd をこの順で1つ以上、キーは KeyboardEvent.code (例 "Space" "KeyM" "Digit1" "F5")。登録できなければ (形式の誤り・OS が拒否) update_settings は保存せずエラー。他アプリが同じキーを使っていても登録は成功しうる (global-hotkey 0.8 は非排他で `RegisterEventHotKey` するため衝突を検出できない。どちらに届くかは未確認)
 };
+type ShortcutStatus = { shortcut: string | null; registered: boolean; error: string | null }; // error: 起動時などに登録できなかった時の表示用 (日本語)
 type KeyCombo = { key: "enter" | "tab" | "escape" | "backspace"; modifiers: ("cmd" | "shift" | "option" | "ctrl")[] };
 
 type Permissions = {
@@ -263,7 +267,9 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | command | 引数 → 戻り値 | 用途 |
 |---|---|---|
 | `get_status` | → `AppStatus` | 初期表示 |
-| `set_listening` | `{ on: boolean }` → `()` | パネル・メニューのON/OFF |
+| `set_listening` | `{ on: boolean }` → `()` | パネル・メニューのON/OFF (oneShot でも同じ。ONにすると1発話で OFF に戻る) |
+| `get_shortcut_status` | → `ShortcutStatus` | ショートカットの登録状態 (設定・セットアップでの警告表示) |
+| `set_shortcut_suspended` | `{ suspended: boolean }` → `()` | ショートカットの記録中に登録を一時解除する (記録中に押したキーで ON/OFF しないため)。記録の終了・取り消し・ウィンドウを閉じた時に false で戻す |
 | `get_settings` / `update_settings` | → `Settings` / `{ patch: Partial<Settings> }` → `Settings` | 設定の読み書き(即時保存・即時反映。感度・無音時間は録音中も約0.5秒以内に反映、マイクの変更は録音をやり直す) |
 | `list_input_devices` | → `AudioDevice[]` | マイク選択 |
 | `get_permissions` | → `Permissions` | 権限表示(setupでは1秒ごとに再取得) |
@@ -306,6 +312,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `settings-navigate` | `{ category: SettingsCategory }` | settingsウィンドウ宛。表示中のカテゴリを切り替える |
 | `panel-anchor` | `{ horizontal: "left" \| "center" \| "right"; vertical: "top" \| "bottom" }` | panel宛。大きさが変わる時にウィンドウのどの辺・角を固定して広げるか。フロントエンドは描画内容をこの基準に寄せて配置する (例: top なら上端から下へ広がる、right なら右端から左へ)。ピルの中心が visibleFrame の左1/3なら left・右1/3なら right・他は center、上半分なら top・他は bottom。変わった時 (ドラッグ中を含む) と panel 作成直後に送る。変わる時は新しいフレームを設定する前に送る。読み込み直後は `get_panel_anchor` で取る |
 | `permissions-changed` | `Permissions` | 権限の変化を検知した時 |
+| `shortcut-status-changed` | `ShortcutStatus` | ショートカットの登録状態が変わった時 (起動時の登録・変更・一時解除からの復帰) |
 | `input-devices-changed` | `AudioDevice[]` | マイクの接続・取り外し・既定の変更を検知した時 (2秒ごとのポーリング。settings/setup を開いている間か ON の間のみ) |
 | `provisioning-progress` | `ProvisioningStatus` | 実行中は変化があれば約4Hz。段階の変化 (開始・完了・一時停止・失敗) は即時 |
 | `models-changed` | `ModelInfo[]` | モデルの状態・選択が変わった時は即時 (取得の開始・完了・一時停止・失敗・中止・削除・選択、セットアップの完了、実行環境とモデルのみ削除)。取得中は変化があれば約4Hz |

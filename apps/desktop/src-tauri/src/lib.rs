@@ -12,6 +12,7 @@ mod permissions;
 mod pipeline;
 mod provisioning;
 mod settings;
+mod shortcut;
 mod state;
 mod storage;
 mod tray;
@@ -113,6 +114,21 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_nspanel::init())
+        // 登録は Core (shortcut.rs) が設定に従って行う。押した時だけ反応する (離した時は無視)
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        return;
+                    }
+                    // プラグインのロックを持ったメインスレッドから呼ばれるため、処理は別タスクで行う
+                    if let Some(core) = app.try_state::<Arc<Core>>() {
+                        let core = core.inner().clone();
+                        tauri::async_runtime::spawn(async move { core.on_shortcut().await });
+                    }
+                })
+                .build(),
+        )
         .setup(|app| {
             // 常駐アプリのため Dock に出さない (設定・セットアップ表示中のみ Regular にする)
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -193,12 +209,19 @@ pub fn run() {
             // 設定・セットアップは閉じたら破棄し、他に開いていなければ Dock から消す
             (label @ (windows::SETTINGS | windows::SETUP), WindowEvent::Destroyed) => {
                 windows::update_activation_policy(window.app_handle(), Some(label));
+                // キーの記録中にウィンドウを閉じられると、フロントエンドが一時解除を戻せないことがある
+                // (閉じるボタン等)。記録はこの2つのウィンドウでしか行わないため、ここで必ず戻す (何度呼んでもよい)
+                if let Some(core) = window.app_handle().try_state::<Arc<Core>>() {
+                    core.shortcut.set_suspended(false);
+                }
             }
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::set_listening,
+            commands::get_shortcut_status,
+            commands::set_shortcut_suspended,
             commands::get_settings,
             commands::update_settings,
             commands::list_input_devices,

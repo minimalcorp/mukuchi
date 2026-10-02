@@ -12,6 +12,7 @@ import {
   type Permissions,
   type ProvisioningStatus,
   type Settings,
+  type ShortcutStatus,
 } from "./ipc";
 
 export function useAppStatus(): AppStatus | null {
@@ -105,6 +106,13 @@ export function usePermissions(pollMs?: number): [Permissions | null, (p: Permis
     return () => clearInterval(t);
   }, [pollMs]);
   return [perms, setPerms];
+}
+
+/** ショートカットの登録状態。起動時に登録できなかった時の警告表示に使う */
+export function useShortcutStatus(): ShortcutStatus | null {
+  const [status, setStatus] = useState<ShortcutStatus | null>(null);
+  useEffect(() => subscribeWithInitial("shortcut-status-changed", commands.getShortcutStatus, setStatus), []);
+  return status;
 }
 
 export function useProvisioning(): ProvisioningStatus | null {

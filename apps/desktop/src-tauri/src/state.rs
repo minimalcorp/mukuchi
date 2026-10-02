@@ -218,6 +218,12 @@ impl StateManager {
         lock(&self.facts).0.listening
     }
 
+    /// ON で発話中か (VAD が発話を検出してから確定・破棄まで)
+    pub fn is_speaking(&self) -> bool {
+        let f = &lock(&self.facts).0;
+        f.listening && f.speaking
+    }
+
     pub fn is_asr_ready(&self) -> bool {
         lock(&self.facts).0.asr_ready
     }

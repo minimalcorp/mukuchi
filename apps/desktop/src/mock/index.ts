@@ -25,6 +25,7 @@ import type {
   UtteranceResult,
 } from "@/lib/ipc";
 import { devOverrides } from "@/lib/env";
+import { formatShortcut } from "@/lib/shortcut";
 import { findScenario } from "./scenarios";
 import { createDb, model, provisioning, visibleModels, GB, MODEL_TOTAL, type MockDb, type ModelId } from "./data";
 
@@ -71,6 +72,13 @@ export function installMock(params: URLSearchParams) {
   const setStatus = (patch: Partial<Omit<AppStatus, "seq">>) => {
     db.status = { ...db.status, ...patch, seq: db.status.seq + 1 };
     fire("status-changed", db.status);
+  };
+
+  // 一時解除中は登録しない。それ以外は設定の値を登録する (モックでは登録の失敗は update_settings でのみ起きる)
+  const setShortcutStatus = () => {
+    const shortcut = db.settings.shortcut;
+    db.shortcut = { shortcut, registered: shortcut != null && !db.shortcutSuspended, error: null };
+    fire("shortcut-status-changed", db.shortcut);
   };
 
   // 入力レベルを約15Hz で流す。静止シナリオでは同じ値を流し続ける (購読が後から始まっても表示されるように)
@@ -239,10 +247,23 @@ export function installMock(params: URLSearchParams) {
         }
         case "get_settings":
           return db.settings;
-        case "update_settings":
-          db.settings = { ...db.settings, ...(a.patch as Partial<Settings>) };
+        case "update_settings": {
+          const patch = a.patch as Partial<Settings>;
+          // Rust は登録できないショートカット (形式の誤り・OS が拒否) では保存せずに reject する
+          if (patch.shortcut != null && db.shortcutRejected.includes(patch.shortcut)) {
+            throw `ショートカット「${formatShortcut(patch.shortcut)}」を登録できませんでした。別のキーに変更してください`;
+          }
+          db.settings = { ...db.settings, ...patch };
           fire("settings-changed", db.settings);
+          if ("shortcut" in patch) setShortcutStatus();
           return db.settings;
+        }
+        case "get_shortcut_status":
+          return db.shortcut;
+        case "set_shortcut_suspended":
+          db.shortcutSuspended = Boolean(a.suspended);
+          setShortcutStatus();
+          return null;
         case "list_input_devices":
           return db.devices;
         case "get_permissions":

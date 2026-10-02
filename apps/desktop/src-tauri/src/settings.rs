@@ -135,6 +135,36 @@ impl<'de> Deserialize<'de> for PanelStyle {
     }
 }
 
+/// 入力モード (docs/architecture.md「入力モード」)。oneShot は1発話を確定したら自動で OFF に戻る
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InputMode {
+    #[default]
+    Continuous,
+    OneShot,
+}
+
+impl InputMode {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "continuous" => Some(Self::Continuous),
+            "oneShot" => Some(Self::OneShot),
+            _ => None,
+        }
+    }
+}
+
+/// PanelStyle と同じく、未知の値は既定として読む (設定全体を捨てない)
+impl<'de> Deserialize<'de> for InputMode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Self::parse(&s).unwrap_or_default())
+    }
+}
+
+/// ショートカットの既定 (⌥Space)
+pub const DEFAULT_SHORTCUT: &str = "Alt+Space";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -149,6 +179,9 @@ pub struct Settings {
     pub panel_position: Option<PanelPosition>,
     pub setup_completed: bool,
     pub panel_style: PanelStyle,
+    pub input_mode: InputMode,
+    /// ON/OFF のグローバルショートカット (`shortcut::parse` の形式)。None は無効
+    pub shortcut: Option<String>,
 }
 
 impl Default for Settings {
@@ -166,6 +199,8 @@ impl Default for Settings {
             panel_position: None,
             setup_completed: false,
             panel_style: PanelStyle::Full,
+            input_mode: InputMode::Continuous,
+            shortcut: Some(DEFAULT_SHORTCUT.to_string()),
         }
     }
 }
@@ -222,6 +257,9 @@ impl Settings {
             if k == "panelStyle" && v.as_str().and_then(PanelStyle::parse).is_none() {
                 anyhow::bail!("panelStyle が不正です: {v}");
             }
+            if k == "inputMode" && v.as_str().and_then(InputMode::parse).is_none() {
+                anyhow::bail!("inputMode が不正です: {v}");
+            }
             obj.insert(k.clone(), v.clone());
         }
         let next: Settings =
@@ -230,6 +268,11 @@ impl Settings {
         // 保存済みの値は検証しない (古い設定が不正でも他の項目を変更できるように)。変更する時だけ
         if patch.contains_key("voiceCommands") {
             crate::voice_command::validate(&next.voice_commands)?;
+        }
+        if patch.contains_key("shortcut") {
+            if let Some(sc) = &next.shortcut {
+                crate::shortcut::parse(sc)?;
+            }
         }
         Ok(next)
     }
@@ -382,6 +425,56 @@ mod tests {
         assert_eq!(next.panel_style, PanelStyle::Compact);
         assert!(s.apply_patch(&json!({ "panelStyle": "tiny" })).is_err());
         assert!(s.apply_patch(&json!({ "panelStyle": 1 })).is_err());
+    }
+
+    #[test]
+    fn input_mode_default_patch_and_lenient_load() {
+        let s = Settings::default();
+        assert_eq!(s.input_mode, InputMode::Continuous);
+        assert_eq!(serde_json::to_value(&s).unwrap()["inputMode"], "continuous");
+        // 旧設定 (キーなし) は continuous、未知の値でも設定全体は捨てない
+        let old: Settings = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(old.input_mode, InputMode::Continuous);
+        let s2: Settings =
+            serde_json::from_value(json!({ "inputMode": "pushToTalk", "silenceMs": 800 })).unwrap();
+        assert_eq!((s2.input_mode, s2.silence_ms), (InputMode::Continuous, 800));
+        let next = s.apply_patch(&json!({ "inputMode": "oneShot" })).unwrap();
+        assert_eq!(next.input_mode, InputMode::OneShot);
+        assert_eq!(serde_json::to_value(&next).unwrap()["inputMode"], "oneShot");
+        assert!(s.apply_patch(&json!({ "inputMode": "one_shot" })).is_err());
+        assert!(s.apply_patch(&json!({ "inputMode": 1 })).is_err());
+    }
+
+    #[test]
+    fn shortcut_default_patch_and_null() {
+        let s = Settings::default();
+        assert_eq!(s.shortcut.as_deref(), Some("Alt+Space"));
+        assert_eq!(serde_json::to_value(&s).unwrap()["shortcut"], "Alt+Space");
+        // キーなしは既定、null は無効
+        let old: Settings = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(old.shortcut.as_deref(), Some("Alt+Space"));
+        let off: Settings = serde_json::from_value(json!({ "shortcut": null })).unwrap();
+        assert_eq!(off.shortcut, None);
+        let next = s
+            .apply_patch(&json!({ "shortcut": "Ctrl+Shift+KeyM" }))
+            .unwrap();
+        assert_eq!(next.shortcut.as_deref(), Some("Ctrl+Shift+KeyM"));
+        let next = s.apply_patch(&json!({ "shortcut": null })).unwrap();
+        assert_eq!(next.shortcut, None);
+        for bad in [
+            "Space",
+            "Shift+Alt+Space",
+            "Alt+M",
+            "Alt+",
+            "Alt+Foo",
+            "Alt+Alt",
+        ] {
+            assert!(
+                s.apply_patch(&json!({ "shortcut": bad })).is_err(),
+                "{bad} は不正"
+            );
+        }
+        assert!(s.apply_patch(&json!({ "shortcut": 1 })).is_err());
     }
 
     #[test]

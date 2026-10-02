@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { DEMO_SCRIPT } from "../app/lib/content";
+import { DEMO_SCRIPTS, MODES_LEAD, STEPS } from "../app/lib/content";
 import { COMPANY_NAME, COMPANY_URL, DOWNLOAD_URL, GOOGLE_PARTNER_SITES_URL } from "../app/lib/site";
 
 const PC = { width: 1280, height: 800 };
@@ -76,15 +76,13 @@ async function fakeNavigator(page: Page, env: FakeNavigator) {
 
 const heroPc = (page: Page) => page.getByTestId("hero-cta-pc");
 
-const DEMO_CYCLE_MS = DEMO_SCRIPT.reduce((sum, st) => sum + st.ms, 0);
+const scriptMs = (mode: keyof typeof DEMO_SCRIPTS) =>
+  DEMO_SCRIPTS[mode].reduce((sum, st) => sum + st.ms, 0);
+/** 常に聞き取る → 1回ずつ聞き取る の 1 巡 (最後まで進むと交互に替わる) */
+const DEMO_CYCLE_MS = scriptMs("always") + scriptMs("once");
 
-/**
- * デモを 2 周分動かしながら、デモの高さと直後のセクションの位置が変わらないこと、
- * 固定した各部から中身がはみ出さないことを確かめる (時計を止めて決まった間隔で進める)
- */
-async function expectStableDemo(page: Page) {
-  await page.clock.install();
-  await page.goto("/");
+/** 開発サーバーの critical CSS が外れ、フォントを読み終えるまで待つ (時計を止めている時用) */
+async function settleDevCss(page: Page) {
   // 開発サーバーでは、ハイドレーション後に React Router が開発時だけの critical CSS を外す。
   // その時に @font-face が読み直されて一時的に代替フォントで描画され、後続の位置がずれる。
   // 時計を止めているので外れるまで進め、フォントを読み終えてから計測する (本番の出力には無い)
@@ -98,6 +96,16 @@ async function expectStableDemo(page: Page) {
     void document.body.offsetHeight;
     return document.fonts.ready;
   });
+}
+
+/**
+ * デモを 2 巡分 (両方のモードを 2 回ずつ) 動かしながら、デモの高さと直後のセクションの位置が変わらないこと、
+ * 固定した各部から中身がはみ出さないことを確かめる (時計を止めて決まった間隔で進める)
+ */
+async function expectStableDemo(page: Page) {
+  await page.clock.install();
+  await page.goto("/");
+  await settleDevCss(page);
   const demo = page.getByTestId("demo");
   await expect(demo).toBeVisible();
 
@@ -105,7 +113,7 @@ async function expectStableDemo(page: Page) {
   for (let t = 0; t <= DEMO_CYCLE_MS * 2; t += 100) {
     samples.push(
       await demo.evaluate((el) => {
-        const next = document.getElementById("features")!;
+        const next = document.getElementById("modes")!;
         const overflow = ["demo-sent", "demo-input", "demo-caption"].filter((id) => {
           const part = el.querySelector<HTMLElement>(`[data-testid="${id}"]`)!;
           return part.scrollHeight > part.clientHeight || part.scrollWidth > part.clientWidth;
@@ -121,9 +129,10 @@ async function expectStableDemo(page: Page) {
     await page.clock.runFor(100);
   }
 
-  // 全場面を通ったこと (キー操作の場面まで進んでいる)
-  expect(samples.some((x) => x.status.includes("キー操作"))).toBe(true);
-  expect(samples.some((x) => x.status.includes("認識中"))).toBe(true);
+  // 両方のモードの全場面を通ったこと (キー操作・聞き取り中の場面まで進んでいる)
+  for (const word of ["キー操作", "認識中", "聞き取り中", "AI チャット", "メモ"]) {
+    expect(samples.some((x) => x.status.includes(word))).toBe(true);
+  }
   expect(new Set(samples.map((x) => x.height))).toEqual(new Set([samples[0].height]));
   expect(new Set(samples.map((x) => x.nextY))).toEqual(new Set([samples[0].nextY]));
   expect(samples.flatMap((x) => x.overflow)).toEqual([]);
@@ -154,7 +163,7 @@ test.describe("PC", () => {
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(
       "話した言葉だけを、そのまま入力。",
     );
-    for (const id of ["features", "privacy", "setup"]) {
+    for (const id of ["modes", "features", "privacy", "setup"]) {
       await expect(page.locator(`#${id}`)).toBeVisible();
       await expect(page.locator(`nav a[href="#${id}"]`)).toBeVisible();
     }
@@ -166,17 +175,105 @@ test.describe("PC", () => {
       "「改行」⇧ + Enter",
       "「送信」⌘ + Enter",
     ]);
-    await expect(page.getByText("取り消し")).toHaveCount(0);
+    // アプリが未対応の音声コマンド「取り消し」を載せない (入力モードの「聞き取りを取り消します」は別の話なので特長の中だけを見る)
+    await expect(page.locator("#features").getByText("取り消し")).toHaveCount(0);
 
     const reqs = page.locator("#requirements dl");
     await expect(reqs).toContainText("macOS 13 Ventura 以降");
     await expect(reqs).toContainText("空き容量 6 GB 以上");
-    await expect(page.getByText("モデル（約 2.2 GB）", { exact: false })).toBeVisible();
-    await expect(page.getByText("モデルの取得以外に通信しません。")).toBeVisible();
+    await expect(reqs).toContainText("動作確認M1 Max・M3 Pro");
+    await expect(reqs).toContainText("Qwen3-ASR 1.7B（日本語・約 2.2 GB）");
+    await expect(page.getByText("Qwen3-ASR 1.7B（約 2.2 GB）をダウンロードします。")).toBeVisible();
+    await expect(page.getByText("音声認識モデルのダウンロード以外に通信しません。")).toBeVisible();
     await expect(heroPc(page)).toContainText("36 MB");
     await expect(page.getByTestId("cta-note").first()).toHaveText(/検出しました/);
     await expectCompanyLink(page);
     expect(errors).toEqual([]);
+  });
+
+  test("入力モードの節に 2 つのモードを並べ、ヘッダーから移動できる", async ({ page }) => {
+    await fakeNavigator(page, ENVS.macArm);
+    await page.goto("/");
+    await page.locator('header nav a[href="#modes"]').click();
+    await expect(page).toHaveURL(/#modes$/);
+    const modes = page.locator("#modes");
+    await expect(modes).toBeInViewport();
+    await expect(modes.getByRole("heading", { level: 2 })).toHaveText(
+      "聞き取り方は、2 つから選べます",
+    );
+    await expect(modes).toContainText(MODES_LEAD);
+    const always = page.getByTestId("mode-always");
+    const once = page.getByTestId("mode-once");
+    await expect(always.getByRole("heading")).toHaveText("常に聞き取る");
+    await expect(once.getByRole("heading")).toHaveText("1回ずつ聞き取る");
+    // 既定のバッジは常に聞き取るだけ
+    await expect(always.getByText("既定", { exact: true })).toBeVisible();
+    await expect(once.getByText("既定", { exact: true })).toHaveCount(0);
+    await expect(always.locator("dt")).toHaveCount(1);
+    await expect(once.locator("dt")).toHaveCount(4);
+    await expect(once).toContainText("⌥Space → 1 回分を入力");
+    await expect(modes).toContainText("どのアプリを使っていても、⌥Space で操作できます");
+  });
+
+  test("セットアップは 5 ステップ", async ({ page }) => {
+    await fakeNavigator(page, ENVS.macArm);
+    await page.goto("/");
+    const steps = page.locator("#setup ol > li");
+    await expect(steps).toHaveCount(5);
+    expect(STEPS).toHaveLength(5);
+    await expect(steps.nth(0)).toContainText("dmg（約 36 MB）");
+    await expect(steps.nth(3)).toContainText("入力モードとショートカットを選ぶ");
+    await expect(steps.nth(3)).toContainText("既定は ⌥Space");
+    await expect(page.locator("#setup")).toContainText(
+      "アカウント登録は不要です。モデルのダウンロードを含めて約 5 分で完了します。",
+    );
+  });
+
+  test("デモは 2 つのモードを交互に再生し、タブを押すとそのモードに固定する", async ({ page }) => {
+    await fakeNavigator(page, ENVS.macArm);
+    await page.clock.install();
+    await page.goto("/");
+    await settleDevCss(page);
+    const demo = page.getByTestId("demo");
+    const appName = page.getByTestId("demo-app-name");
+    const tab = (name: string) => demo.getByRole("button", { name });
+    await expect(appName).toHaveText("AI チャット");
+    await expect(tab("常に聞き取る")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("demo-mode-note")).toHaveText("既定のモード");
+
+    // 常に聞き取るを最後まで進めると、1回ずつ聞き取るに替わる (critical CSS 待ちで進めた分を差し引くため時刻ではなく表示で待つ)
+    for (let i = 0; i < 200 && (await appName.textContent()) !== "メモ"; i++) {
+      await page.clock.runFor(100);
+    }
+    await expect(appName).toHaveText("メモ");
+    await expect(tab("1回ずつ聞き取る")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByTestId("demo-status")).toHaveText("オフ");
+    await expect(page.getByTestId("demo-mode-note")).toHaveText("⌥Space で 1 回分を入力");
+
+    // タブで常に聞き取るを選ぶと、何巡しても替わらない
+    await tab("常に聞き取る").click();
+    await expect(appName).toHaveText("AI チャット");
+    await expect(page.getByTestId("demo-status")).toHaveText("待機中");
+    for (let t = 0; t < DEMO_CYCLE_MS * 2; t += 500) {
+      await page.clock.runFor(500);
+      await expect(appName).toHaveText("AI チャット");
+    }
+
+    await tab("1回ずつ聞き取る").click();
+    await expect(appName).toHaveText("メモ");
+    await page.clock.runFor(DEMO_CYCLE_MS * 2);
+    await expect(appName).toHaveText("メモ");
+  });
+
+  test("開発時は ?heroMode= でデモのモードを固定できる", async ({ page }) => {
+    await fakeNavigator(page, ENVS.macArm);
+    await page.clock.install();
+    await page.goto("/?heroMode=once");
+    await settleDevCss(page);
+    const appName = page.getByTestId("demo-app-name");
+    await expect(appName).toHaveText("メモ");
+    await page.clock.runFor(DEMO_CYCLE_MS * 2);
+    await expect(appName).toHaveText("メモ");
   });
 
   test("Apple Silicon (Chrome・Edge) はダウンロードできる", async ({ page }) => {

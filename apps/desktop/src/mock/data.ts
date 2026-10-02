@@ -8,6 +8,7 @@ import type {
   Permissions,
   ProvisioningStatus,
   Settings,
+  ShortcutStatus,
 } from "@/lib/ipc";
 import type { MockApi } from "./index";
 
@@ -18,6 +19,12 @@ export type MockDb = {
   provisioning: ProvisioningStatus;
   /** list_models の値 (カタログ順) */
   models: ModelInfo[];
+  /** get_shortcut_status の値 */
+  shortcut: ShortcutStatus;
+  /** set_shortcut_suspended の状態 (記録中に登録を一時解除しているか) */
+  shortcutSuspended: boolean;
+  /** 登録できない (OS が拒否する) 想定のショートカット。update_settings で設定すると reject する */
+  shortcutRejected: string[];
   /** select_model を読み込みの途中で失敗させる (元のモデルに戻して reject する) 時のメッセージ */
   modelSelectFail: string | null;
   level: AudioLevel;
@@ -49,6 +56,8 @@ const DEFAULT_SETTINGS: Settings = {
   panelPosition: null,
   setupCompleted: true,
   panelStyle: "full",
+  inputMode: "continuous",
+  shortcut: "Alt+Space",
 };
 
 export const GB = 1_000_000_000;
@@ -167,6 +176,10 @@ export function createDb(): MockDb {
     provisioning: provisioning("done"),
     // 新規の導入: 旧候補 (bf16) は出ない
     models: [model("ja-8bit", "downloaded", { selected: true })],
+    shortcut: { shortcut: DEFAULT_SETTINGS.shortcut, registered: true, error: null },
+    shortcutSuspended: false,
+    // エラー表示の確認用。実機で何が拒否されるかは OS 次第 (他アプリと同じキーでも登録は成功しうる)
+    shortcutRejected: ["Cmd+Space", "Ctrl+Space"],
     modelSelectFail: null,
     level: { level: 0.18, threshold: 0.55, speech: false },
     devices: [

@@ -1,5 +1,6 @@
 /*
  * モデルの管理 (設定 > 認識) の確認: 状態ごとの表示・取得 (進捗・一時停止・再開・中止)・切り替え・削除の確認・エラー。
+ * bf16 は旧候補 (手元にある時だけ出る)。bf16 を含むシナリオは旧版から bf16 を使っていた人の状態。
  * スクリーンショットは e2e/screenshots/settings-models-*.png。
  */
 import { expect, test, type Page } from "@playwright/test";
@@ -40,18 +41,28 @@ const shot = (page: Page, name: string) => page.screenshot({ path: `e2e/screensh
 for (const dark of [false, true]) {
   const suffix = dark ? "-dark" : "";
 
-  test(`既定: 8bit を使用中 (推奨)、bf16 は未取得${suffix}`, async ({ page }) => {
+  test(`既定: 8bit のみ (推奨・使用中)。旧候補の bf16 は出ない${suffix}`, async ({ page }) => {
     await open(page, "default", dark);
     const r8 = row(page, "ja-8bit");
     await expect(r8).toContainText("日本語 (8bit)");
     await expect(r8).toContainText("推奨");
     await expect(r8).toContainText("使用中");
     await expect(r8).toContainText("ダウンロード済み ・ 2.2 GB");
-    const rb = row(page, "ja-bf16");
-    await expect(rb).toContainText("未ダウンロード ・ 4.1 GB");
-    await expect(rb).not.toContainText("推奨");
-    await expect(rb.getByRole("button", { name: "ダウンロード" })).toBeEnabled();
+    // 切り替え先がないため削除ボタンは出さない
+    await expect(r8.getByRole("button", { name: "削除" })).toHaveCount(0);
+    await expect(page.getByTestId("model-ja-bf16")).toHaveCount(0);
     await shot(page, `default${suffix}`);
+  });
+
+  test(`旧候補: bf16 が手元にあれば出て、使う・削除できる${suffix}`, async ({ page }) => {
+    await open(page, "models-legacy", dark);
+    const rb = row(page, "ja-bf16");
+    await expect(rb).toContainText("日本語 (bf16)");
+    await expect(rb).toContainText("ダウンロード済み ・ 4.1 GB");
+    await expect(rb).not.toContainText("推奨");
+    await expect(rb.getByRole("button", { name: "使う" })).toBeEnabled();
+    await expect(rb.getByRole("button", { name: "削除" })).toBeEnabled();
+    await shot(page, `legacy${suffix}`);
   });
 
   test(`取得中: 進捗バー・残り時間・一時停止・中止${suffix}`, async ({ page }) => {
@@ -87,8 +98,8 @@ test("失敗: 理由を表示し、再試行で取得を再開する", async ({ 
 });
 
 test("使用中のモデルは削除できず、理由を Tooltip で示す", async ({ page }) => {
-  await open(page, "default");
-  const del = row(page, "ja-8bit").getByRole("button", { name: "削除" });
+  await open(page, "models-both");
+  const del = row(page, "ja-bf16").getByRole("button", { name: "削除" });
   await expect(del).toBeDisabled();
   await page.getByLabel("使用中のモデルは削除できません。", { exact: false }).hover();
   await expect(page.getByRole("tooltip")).toContainText("他のモデルに切り替えてから削除してください");
@@ -100,7 +111,7 @@ test("セットアップ未完了: 案内を出し、操作できない", async 
   await expect(page.getByTestId("models-setup-incomplete")).toContainText("セットアップが完了するまで");
   await expect(row(page, "ja-8bit").getByRole("button", { name: "再開" })).toBeDisabled();
   await expect(row(page, "ja-8bit").getByRole("button", { name: "中止" })).toBeDisabled();
-  await expect(row(page, "ja-bf16").getByRole("button", { name: "ダウンロード" })).toBeDisabled();
+  await expect(page.getByTestId("model-ja-bf16")).toHaveCount(0);
   await shot(page, "setup-incomplete");
 });
 
@@ -125,46 +136,46 @@ test("同時に取得できるのは1つ: 他が取得中ならダウンロー�
 
 // ---------- 取得 ----------
 
-test("取得: 開始 → 進捗 → 一時停止 → 再開 → 完了で「使う」が出る", async ({ page }) => {
+test("取得: 再開 → 進捗 → 一時停止 → 再開 → 完了で「使う」が出る", async ({ page }) => {
   await page.clock.install({ time: 0 });
   await page.clock.pauseAt(1000);
-  await open(page, "default");
+  // 旧候補は新たに取得を始められないため、途中で止まっているものを再開する
+  await open(page, "models-paused");
   const rb = row(page, "ja-bf16");
-  await rb.getByRole("button", { name: "ダウンロード" }).click();
+  await rb.getByRole("button", { name: "再開" }).click();
   expect(await calls(page, "download_model")).toEqual([{ cmd: "download_model", args: { id: "ja-bf16" } }]);
   await page.clock.runFor(250);
   // 最初の約2秒は残り時間が出ない
-  await expect(rb).toContainText("0.1 / 4.1 GB ・ 残り時間を計算しています");
+  await expect(rb).toContainText("1.6 / 4.1 GB ・ 残り時間を計算しています");
   await page.clock.runFor(2000);
   await expect(rb).toContainText(/\d\.\d \/ 4\.1 GB ・ 残り約 \d+ 分|残り 1 分未満/);
   // 一時停止は止まるまで (300ms) 押せない
   await rb.getByRole("button", { name: "一時停止" }).click();
   await expect(rb.getByRole("button", { name: "中止" })).toBeDisabled();
   await page.clock.runFor(300);
-  await expect(rb).toContainText("一時停止中 ・ 0.9 / 4.1 GB");
+  await expect(rb).toContainText("一時停止中 ・ 2.4 / 4.1 GB");
   await rb.getByRole("button", { name: "再開" }).click();
   await expect(page.getByTestId("model-ja-bf16")).toHaveAttribute("data-state", "downloading");
-  await page.clock.runFor(250 * 35);
+  await page.clock.runFor(250 * 20);
   await expect(page.getByTestId("model-ja-bf16")).toHaveAttribute("data-state", "downloaded");
   await expect(rb).toContainText("ダウンロード済み ・ 4.1 GB");
   await expect(rb.getByRole("button", { name: "使う" })).toBeEnabled();
   await expect(rb.getByRole("button", { name: "削除" })).toBeEnabled();
 });
 
-test("取得: 中止すると未取得に戻る", async ({ page }) => {
+test("取得: 旧候補を中止すると一覧から消える", async ({ page }) => {
   await open(page, "models-paused");
-  const rb = row(page, "ja-bf16");
-  await rb.getByRole("button", { name: "中止" }).click();
-  await expect(page.getByTestId("model-ja-bf16")).toHaveAttribute("data-state", "not_downloaded");
-  await expect(rb).toContainText("未ダウンロード ・ 4.1 GB");
+  await row(page, "ja-bf16").getByRole("button", { name: "中止" }).click();
+  await expect(page.getByTestId("model-ja-bf16")).toHaveCount(0);
+  await expect(page.getByTestId("model-ja-8bit")).toBeVisible();
   expect(await calls(page, "cancel_model_download")).toEqual([{ cmd: "cancel_model_download", args: { id: "ja-bf16" } }]);
 });
 
 test("取得: command の失敗はその行に表示する", async ({ page }) => {
-  await open(page, "default");
+  await open(page, "models-paused");
   await mock(page, `api.fail.download_model = "他のモデルをダウンロード中です";`);
   const rb = row(page, "ja-bf16");
-  await rb.getByRole("button", { name: "ダウンロード" }).click();
+  await rb.getByRole("button", { name: "再開" }).click();
   await expect(rb.getByRole("alert")).toHaveText("他のモデルをダウンロード中です");
 });
 
@@ -221,6 +232,35 @@ test("削除: 確認ダイアログでキャンセルすると消さず、削除
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByTestId("model-ja-8bit")).toHaveAttribute("data-state", "not_downloaded");
   expect(await calls(page, "delete_model")).toEqual([{ cmd: "delete_model", args: { id: "ja-8bit" } }]);
+});
+
+test("削除: 旧候補 (bf16) を削除すると一覧から消える", async ({ page }) => {
+  await open(page, "models-legacy");
+  await row(page, "ja-bf16").getByRole("button", { name: "削除" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "削除" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByTestId("model-ja-bf16")).toHaveCount(0);
+  expect(await calls(page, "delete_model")).toEqual([{ cmd: "delete_model", args: { id: "ja-bf16" } }]);
+  // 1件になったので使用中の 8bit に削除ボタンは出ない
+  await expect(row(page, "ja-8bit").getByRole("button", { name: "削除" })).toHaveCount(0);
+});
+
+test("切り替え: 旧候補 (bf16) に切り替えられる", async ({ page }) => {
+  await page.clock.install({ time: 0 });
+  await page.clock.pauseAt(1000);
+  await open(page, "models-legacy");
+  await row(page, "ja-bf16").getByRole("button", { name: "使う" }).click();
+  await page.clock.runFor(1000);
+  await expect(row(page, "ja-bf16")).toContainText("使用中");
+  await expect(row(page, "ja-8bit").getByRole("button", { name: "使う" })).toBeEnabled();
+});
+
+test("実行環境とモデルのみ削除の後は 8bit (未取得・選択中) だけになる", async ({ page }) => {
+  await open(page, "models-both");
+  await mock(page, `void api.invoke("delete_runtime_and_model");`);
+  await expect(page.getByTestId("model-ja-bf16")).toHaveCount(0);
+  await expect(page.getByTestId("model-ja-8bit")).toHaveAttribute("data-state", "not_downloaded");
+  await expect(row(page, "ja-8bit")).toContainText("使用中");
 });
 
 test("削除: 失敗はダイアログに表示し、閉じない", async ({ page }) => {

@@ -24,7 +24,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 | ダークモード | システム設定に追従。デザインの参考表示(gray 700〜900を面に使用)に従う | |
 | 録音 | Rust (cpal) | WebView経由のgetUserMediaは権限ダイアログ二重表示等の既知問題あり |
 | VAD | Silero VAD (`ort`、arm64は静的リンク)。差し替え可能なtraitの背後に置く | 代替: earshot |
-| ASR | Python + MLX (`mlx-qwen3-asr`)。既定のモデルは `neosophie/Qwen3-ASR-1.7B-JA` を全層8bit量子化したもの (自前変換、`minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit`、約2.2GB)。元の bf16 版 (`neosophie/Qwen3-ASR-1.7B-JA`、約4.1GB) も選べる (下の「モデルの管理」)。どちらも revision (commit) を固定して取得 | Rust実装(candle/MLX)は約3倍遅い (spikes/asr-bench)。8bitはfp16と同等精度・約2割速い・メモリ1/3 (spikes/asr-bench/MODEL_DECISION.md) |
+| ASR | Python + MLX (`mlx-qwen3-asr`)。既定のモデルは `neosophie/Qwen3-ASR-1.7B-JA` を全層8bit量子化したもの (自前変換、`minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit`、約2.2GB)。元の bf16 版 (`neosophie/Qwen3-ASR-1.7B-JA`、約4.1GB) は既に手元にある導入でのみ一覧に出る (下の「モデルの管理」)。どちらも revision (commit) を固定して取得 | Rust実装(candle/MLX)は約3倍遅い (spikes/asr-bench)。8bitはfp16と同等精度・約2割速い・メモリ1/3 (spikes/asr-bench/MODEL_DECISION.md) |
 | モデルの管理 | 候補はアプリに固定 (`provisioning/models.rs` の `CATALOG`)。常に「取得済みのモデルが1つ選択されている」状態を保つ (取得途中は選べない、選択中は削除できない)。取得 (進捗・一時停止・再開・中止)・削除はモデルごと。**取得中にできるのは1つ** (一時停止・失敗で止まっているものは複数あってよい)。モデルの操作はセットアップ完了後のみ (セットアップの取得と同時に走らせない)。詳細は「モデルの管理」の節 | 2026-10-01 決定 |
 | 操作 | 音声入力のON/OFFは **常時表示パネルのボタン** と **メニューバー** のみ。**キーボードショートカットは設けない**。押している間だけ録音するモードも実装しない | 2026-09-30 確定 |
 | 入力単位 | ONの間、発話(VAD区間)ごとに文字起こしし、話し終わったら入力。入力は単一キューで直列化 | 必須要件 |
@@ -120,9 +120,11 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 | id | リポジトリ@revision | 容量 (取得するファイルの合計) | |
 |---|---|---|---|
 | `ja-8bit` | `minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit@698eff963b084561b12a045c95bc4a208898337f` | 2,185,804,096 B (約2.2GB) | 既定・推奨 (`recommended`)。新規のセットアップで取得する |
-| `ja-bf16` | `neosophie/Qwen3-ASR-1.7B-JA@987bda160f2dabfa6757550bcff7cdda2ba0648c` | 4,092,092,275 B (約4.1GB) | 元の bf16 版 (任意) |
+| `ja-bf16` | `neosophie/Qwen3-ASR-1.7B-JA@987bda160f2dabfa6757550bcff7cdda2ba0648c` | 4,092,092,275 B (約4.1GB) | 元の bf16 版。**旧候補** (`legacy`): 手元にある導入でのみ出す (下の「旧候補」) |
 
 容量は固定した revision の tree API の値 (取得対象 `*.json *.safetensors *.txt *.model` の合計)。表示名・説明も同じ定数に持ち `list_models` で返す。
+
+- **旧候補** (2026-10-02 決定): 新規に選べる候補は既定の `ja-8bit` のみ。`legacy` の候補は、選択中か取得中か手元にファイル (そのモデルのディレクトリ。取得済み・途中・古い revision を含む) がある時だけ `list_models` に出し、それ以外 (`not_downloaded` かつ選択中でない) は出さない。出ていない旧候補への `download_model`・`select_model`・`delete_model`・`cancel_model_download` は「不明なモデルです」。既に使っている人はそのまま使い続けられ、削除すると一覧から消える (再取得はできない)。複数モデルの取得・選択・削除の仕組みは残す (今後候補を足すため)。一覧が1件の時は使用中の行に削除ボタンを出さない (切り替え先が無いため)
 
 - **選択**: 選択中のモデルは `provisioned.json` の `selectedModel` に記録する (`Settings` には置かない。「取得済みのものだけ選べる」は導入の記録と一緒に保つ必要があり、「実行環境とモデルのみ削除」で記録ごと既定に戻るため)。`select_model` は取得済み (現在の revision の記録があり `config.json` がある) のモデルだけ受け付け、ASR サーバーを新しいモデルで起動し直す (音声入力は OFF になり phase は loading を経由)。準備完了 (`/health`) まで待ち、**準備完了してから選択を記録して** 返る (切り替えの途中でアプリが終わっても、読み込めるか分からないモデルを選択中に残さない。その間 `ModelInfo.selected` は元のモデルのまま)。切り替えの起動は自動再起動なしで行い、準備完了したら自動再起動を有効にする
 - **切り替えの失敗**: 新しいモデルでサーバーが準備完了にならなければ (異常終了・読み込みの上限10分)、元のモデル (選択は元のまま) で起動し直し (自動再起動あり)、エラーで reject する (「『<新>』を読み込めませんでした。『<元>』に戻しました」)。新しいモデルの異常終了は `asr_stopped` にしない (元のモデルの読み込み中に停止エラーを出さないため)。準備完了後に選択を記録できなかった場合も元のモデルに戻して reject する。元のモデルでも起動できなければ通常の `asr_stopped`
@@ -235,7 +237,7 @@ type StorageUsage = { runtimeBytes: number; modelBytes: number; otherBytes: numb
 
 type ModelState = "not_downloaded" | "downloading" | "paused" | "error" | "downloaded";
 type ModelInfo = {
-  id: string;               // カタログの id ("ja-8bit" | "ja-bf16")。list_models はカタログ順 (表示もこの順)
+  id: string;               // カタログの id ("ja-8bit" | "ja-bf16")。list_models はカタログ順 (表示もこの順)。旧候補 (ja-bf16) は手元にある時だけ出る
   name: string;             // 表示名
   description: string;      // 説明 (1文程度)
   sizeBytes: number;        // 取得するファイルの合計 (固定した revision の値)。進捗の分母・「約 2.2 GB」の表示に使う
@@ -272,7 +274,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `start_provisioning` / `pause_provisioning` | → `()` | ダウンロード開始・再開・失敗後の再試行 (実行中・完了済みなら何もしない) / 一時停止 (止まるまで待って返る) |
 | `get_storage_usage` | → `StorageUsage` | runtime = python・venv・uv・cache・asr-server、model = models (全モデル)、other = settings.json・provisioned.json・ログ (ディスク上の使用量) |
 | `delete_runtime_and_model` | → `()` | 実行環境とモデルのみ削除 (セットアップ一時停止・モデルの取得の停止・ASR停止の後。全モデルを消す。設定・ログは残す)。以後 provisioning は idle、status は `runtime_missing`、モデルの選択は既定 (`models-changed` を送る) |
-| `list_models` | → `ModelInfo[]` | モデルの一覧 (カタログ順) |
+| `list_models` | → `ModelInfo[]` | モデルの一覧 (カタログ順。旧候補は手元にある時だけ。「モデルの管理」の旧候補) |
 | `select_model` | `{ id: string }` → `()` | 使うモデルを切り替える (取得済みのみ)。ASR を新しいモデルで起動し直し、準備完了まで待って選択を記録してから返る。失敗したら元のモデルに戻してエラー (「モデルの管理」)。選んだモデルが既に選択中なら何もしない |
 | `download_model` | `{ id: string }` → `()` | 取得の開始・一時停止からの再開・失敗後の再試行。開始したらすぐ返る (進捗は `models-changed`)。取得済み・取得中なら何もしない。他のモデルが取得中ならエラー |
 | `pause_model_download` | `{ id: string }` → `()` | 一時停止 (止まるまで待って返る)。途中のファイルは残す。取得中でなければ何もしない |

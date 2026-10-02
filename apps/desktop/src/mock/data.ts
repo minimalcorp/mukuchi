@@ -63,6 +63,7 @@ const CATALOG = [
     description: "元のモデルと同等の精度で、より速く、メモリの使用量が少ない (約3GB)",
     sizeBytes: 2_185_804_096,
     recommended: true,
+    legacy: false,
   },
   {
     id: "ja-bf16",
@@ -70,10 +71,22 @@ const CATALOG = [
     description: "量子化していない元のモデル。容量とメモリの使用量 (約8.5GB) が大きい",
     sizeBytes: 4_092_092_275,
     recommended: false,
+    // 旧候補: 手元にある時だけ一覧に出る (docs/architecture.md「モデルの管理」の旧候補)
+    legacy: true,
   },
 ] as const;
 
 export type ModelId = (typeof CATALOG)[number]["id"];
+
+/**
+ * Rust の list_models と同じく、旧候補は選択中か手元にある時だけ出す (not_downloaded かつ未選択なら除く)。
+ * カタログにない id (テストで足した行) はそのまま出す
+ */
+export function visibleModels(models: ModelInfo[]): ModelInfo[] {
+  return models.filter(
+    (m) => !(CATALOG.find((c) => c.id === m.id)?.legacy && m.state === "not_downloaded" && !m.selected),
+  );
+}
 
 /**
  * Rust と同じ形の ModelInfo を作る。bytesDone は downloading・paused・error の時だけ使う
@@ -84,7 +97,9 @@ export function model(
   state: ModelInfo["state"],
   opts: { selected?: boolean; bytesDone?: number; eta?: number | null; error?: string } = {},
 ): ModelInfo {
-  const c = CATALOG.find((m) => m.id === id)!;
+  // legacy は Rust の ModelInfo にない (返す値に含めない)
+  const { name, description, sizeBytes, recommended } = CATALOG.find((m) => m.id === id)!;
+  const c = { id, name, description, sizeBytes, recommended };
   const bytesDone =
     state === "downloaded" ? c.sizeBytes : state === "not_downloaded" ? 0 : (opts.bytesDone ?? 0.9 * GB);
   return {
@@ -150,7 +165,8 @@ export function createDb(): MockDb {
     settings: structuredClone(DEFAULT_SETTINGS),
     permissions: { microphone: "granted", accessibility: true },
     provisioning: provisioning("done"),
-    models: [model("ja-8bit", "downloaded", { selected: true }), model("ja-bf16", "not_downloaded")],
+    // 新規の導入: 旧候補 (bf16) は出ない
+    models: [model("ja-8bit", "downloaded", { selected: true })],
     modelSelectFail: null,
     level: { level: 0.18, threshold: 0.55, speech: false },
     devices: [

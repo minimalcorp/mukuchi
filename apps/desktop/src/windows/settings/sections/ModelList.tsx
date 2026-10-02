@@ -84,6 +84,7 @@ export function ModelList() {
               key={m.id}
               model={m}
               last={i === models.length - 1}
+              alone={models.length === 1}
               ready={ready}
               switching={switching}
               busyOp={busy?.id === m.id ? busy.op : null}
@@ -109,6 +110,7 @@ export function ModelList() {
 function ModelRow({
   model: m,
   last,
+  alone,
   ready,
   switching,
   busyOp,
@@ -122,6 +124,8 @@ function ModelRow({
 }: {
   model: ModelInfo;
   last: boolean;
+  /** 一覧がこの1件だけ (切り替え先がない) */
+  alone: boolean;
   ready: boolean;
   switching: string | null;
   busyOp: Op | null;
@@ -149,7 +153,8 @@ function ModelRow({
         使用中
       </Badge>,
     );
-    if (m.state === "downloaded") {
+    // 切り替え先がない時は「切り替えてから削除」の案内が成り立たないため、削除ボタン自体を出さない
+    if (m.state === "downloaded" && !alone) {
       actions.push(
         <WithReason key="delete" reason={IN_USE}>
           <Button size="sm" disabled>

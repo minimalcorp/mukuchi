@@ -112,7 +112,7 @@ export type StorageUsage = { runtimeBytes: number; modelBytes: number; otherByte
 
 export type ModelState = "not_downloaded" | "downloading" | "paused" | "error" | "downloaded";
 export type ModelInfo = {
-  /** カタログの id ("ja-8bit" | "ja-bf16")。list_models はカタログ順 (表示もこの順) */
+  /** カタログの id ("ja-8bit" | "ja-bf16")。list_models はカタログ順 (表示もこの順)。旧候補 (ja-bf16) は手元にある時だけ出る */
   id: string;
   name: string;
   description: string;

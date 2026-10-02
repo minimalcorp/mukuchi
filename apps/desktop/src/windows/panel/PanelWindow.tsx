@@ -4,6 +4,7 @@
  * Rust はウィンドウをその大きさにし、アンカー (panel-anchor) の辺・角を固定して広げる/縮める (透明部分がクリックを奪わないように)。
  * 描画内容もアンカーに寄せて配置し、展開・収縮がアンカーの辺・角から始まるようにする。
  * 表示形式 (Settings.panelStyle) が compact の時はマイクの円形ボタンだけを出す。
+ * 描画内容の種類 (OFF・待機中/認識中・読み込み中・エラー・コンパクト) が変わる時は、面の大きさをアニメーションさせる (useBodyMorph)。
  */
 import {
   AudioLines,
@@ -19,7 +20,7 @@ import {
   TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import {
   commands,
   runCommand,
@@ -69,15 +70,13 @@ const sizeOf = (el: HTMLElement): Size => {
   return { width: rect.width, height: rect.height };
 };
 
-/** 表示形式と、切り替え直後のアニメーションの開始時の大きさ (切り替え前の描画内容の大きさ) */
-type StyleView = { style: PanelStyle; morphFrom: Size | null };
+/** 描画内容の種類。種類が変わる時だけ大きさのアニメーション (useBodyMorph) を付ける */
+type BodyKind = "compact" | "listening" | "loading" | "error" | "off";
 
 export function PanelWindow() {
   const { status, items, lastShown, errorVisible } = usePanelModel();
   const anchor = usePanelAnchor();
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const morphRef = useRef<HTMLDivElement>(null);
-  const [view, setView] = useState<StyleView | null>(null);
+  const [style, setStyle] = useState<PanelStyle | null>(null);
   // WebView 標準のメニュー (再読み込み・要素の詳細を表示等) は出さない。ピル・カード上では独自のメニューを出す
   useEffect(() => {
     const suppress = (e: Event) => e.preventDefault();
@@ -85,43 +84,39 @@ export function PanelWindow() {
     return () => document.removeEventListener("contextmenu", suppress);
   }, []);
   // 表示形式は右クリックメニュー・設定画面から変わる (settings-changed)
-  useEffect(
-    () =>
-      subscribeWithInitial("settings-changed", commands.getSettings, (s) => {
-        // 切り替えのアニメーション中に再び切り替わった時は、アニメーション中の大きさから始める
-        const shown = morphRef.current ?? bodyRef.current;
-        const from = shown ? sizeOf(shown) : null;
-        setView((prev) => {
-          if (prev?.style === s.panelStyle) return prev;
-          // 初回 (まだ何も描いていない) はアニメーションしない
-          return { style: s.panelStyle, morphFrom: prev ? from : null };
-        });
-      }),
-    [],
-  );
-  const endMorph = useCallback(() => setView((v) => (v && v.morphFrom ? { ...v, morphFrom: null } : v)), []);
-  if (!status || !view) return null;
+  useEffect(() => subscribeWithInitial("settings-changed", commands.getSettings, (s) => setStyle(s.panelStyle)), []);
 
-  const isOn = ON_PHASES.includes(status.phase);
+  const isOn = status ? ON_PHASES.includes(status.phase) : false;
   const expanded = items.length > 0;
 
-  let body: ReactNode;
-  if (view.style === "compact") {
+  let kind: BodyKind | null = null;
+  let body: ReactNode = null;
+  if (!status || !style) {
+    // 状態・設定の取得前は何も描かない
+  } else if (style === "compact") {
+    kind = "compact";
     body = <CompactPanel status={status} items={items} />;
   } else if (expanded || isOn) {
+    kind = "listening";
     body = <ListeningPanel anchor={anchor} isOn={isOn} expanded={expanded} items={expanded ? items : lastShown} />;
   } else if (status.phase === "loading") {
+    kind = "loading";
     body = <LoadingPill progress={status.loadingProgress} />;
   } else if (status.phase === "error" && errorVisible && status.error) {
+    kind = "error";
     body = <ErrorPill error={status.error} />;
   } else {
+    kind = "off";
     body = <OffPill />;
   }
+
+  const { containerRef, bodyRef, morphRef } = useBodyMorph(kind);
+  if (!kind) return null;
 
   return (
     <div
       data-anchor={`${anchor.vertical}-${anchor.horizontal}`}
-      data-panel-style={view.style}
+      data-panel-style={style}
       className={cn(
         "flex h-full w-full overflow-hidden",
         // 実機ではウィンドウ = PanelFrame の大きさだが、大きさの反映が遅れる間もアンカー側を合わせておく
@@ -132,62 +127,108 @@ export function PanelWindow() {
       )}
     >
       <PanelFrame>
-        {/* 切り替えのアニメーション中は、切り替え後の内容を見えないまま置き、その上に大きさだけが変わる面を重ねる。
-            ウィンドウはアニメーションの間 切り替え前と後の大きい方に保ち、終わってから最終の大きさにする
-            (ListeningPanel の展開・収縮と同じ考え方。縮む途中でウィンドウを変えると、描画と反映がずれて面が揺れる) */}
-        <div
-          className={cn("grid", ALIGN[anchor.vertical], GRID_JUSTIFY[anchor.horizontal])}
-          style={view.morphFrom ? { minWidth: view.morphFrom.width, minHeight: view.morphFrom.height } : undefined}
-        >
-          <div ref={bodyRef} className={cn("[grid-area:1/1]", view.morphFrom && "invisible")}>
+        {/* 描画内容と、種類の切り替え中だけ出す面 (morph) をアンカーに揃えて重ねる。切り替え中の表示は useBodyMorph が DOM に直接書く */}
+        <div ref={containerRef} className={cn("grid", ALIGN[anchor.vertical], GRID_JUSTIFY[anchor.horizontal])}>
+          <div ref={bodyRef} className="[grid-area:1/1]">
             {body}
           </div>
-          {view.morphFrom ? (
-            <StyleMorph ref={morphRef} from={view.morphFrom} targetRef={bodyRef} onDone={endMorph} />
-          ) : null}
+          <div
+            ref={morphRef}
+            hidden
+            data-testid="panel-morph"
+            aria-hidden
+            className="rounded-[18px] border border-line-default bg-surface-card shadow-md [grid-area:1/1]"
+          />
         </div>
       </PanelFrame>
     </div>
   );
 }
 
+const MORPH_DURATION = 180;
+const MORPH_EASING = "cubic-bezier(0.2, 0, 0, 1)";
+
 /**
- * 表示形式の切り替え (通常 ⇄ コンパクト) のアニメーション。ピル・カードと同じ面の大きさを
- * 切り替え前の大きさから切り替え後の大きさへ 180ms で変え、終わったら onDone で切り替え後の内容を出す。
- * 終わりを知るため CSS transition ではなく Web Animations を使う (大きさが同じでも finished が解決する)
+ * 描画内容の種類の切り替え (OFF ⇄ 待機中、通常 ⇄ コンパクト、読み込み中・エラー ⇄ 他) のアニメーション。
+ * ピル・カードと同じ面 (morph) を切り替え前の大きさから切り替え後の大きさへ 180ms で変え、その間 切り替え後の内容は見えないまま置く。
+ * ウィンドウはアニメーションの間 切り替え前と後の大きい方に保ち (コンテナの min-width/height)、終わってから最終の大きさにする
+ * (ListeningPanel の展開・収縮と同じ考え方。縮む途中でウィンドウを変えると、描画と反映がずれて面が揺れる)。
+ * 描画前に切り替えるため、useLayoutEffect で DOM に直接書く (state にすると切り替え後の内容が 1 フレーム見える)
  */
-function StyleMorph({ from, targetRef, onDone, ref }: {
-  from: Size;
-  targetRef: RefObject<HTMLDivElement | null>;
-  onDone: () => void;
-  ref: RefObject<HTMLDivElement | null>;
-}) {
+function useBodyMorph(kind: BodyKind | null) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const morphRef = useRef<HTMLDivElement>(null);
+  // 描画内容の最後の大きさ。ListeningPanel は CSS transition で大きさが変わるため、切り替えたコミットの時点で測ると
+  // 古い (展開カードのまま OFF になる等)。ResizeObserver はレイアウトの後に届くので、種類が変わったコミットの
+  // layout effect の時点では切り替え前の大きさが残っている
+  const lastSizeRef = useRef<Size | null>(null);
+  // アニメーション中に再び切り替わった時の開始の大きさ (やり直す直前の面の大きさ)
+  const interruptedRef = useRef<Size | null>(null);
+  const prevKindRef = useRef<BodyKind | null>(null);
+  const shown = kind !== null;
+
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      lastSizeRef.current = sizeOf(el);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [shown]);
+
+  // 子 (ListeningPanel) の layout effect が先に最終の大きさ (target) を与えるので、ここで測る body は切り替え後の大きさになる
   useLayoutEffect(() => {
-    const el = ref.current;
-    const target = targetRef.current;
-    if (!el || !target) return;
-    const to = sizeOf(target);
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const anim = el.animate(
+    const prev = prevKindRef.current;
+    prevKindRef.current = kind;
+    const container = containerRef.current;
+    const body = bodyRef.current;
+    const morph = morphRef.current;
+    const from = interruptedRef.current ?? lastSizeRef.current;
+    interruptedRef.current = null;
+    // 初回 (まだ何も描いていない) と動きを減らす設定ではアニメーションしない
+    // (duration 0 でも finished は非同期に解決し、面だけが 1 フレーム見えうるため、始めない)
+    if (!prev || !kind || !container || !body || !morph || !from) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const to = sizeOf(body);
+    container.style.minWidth = `${from.width}px`;
+    container.style.minHeight = `${from.height}px`;
+    body.style.visibility = "hidden";
+    morph.hidden = false;
+    const anim = morph.animate(
       [
         { width: `${from.width}px`, height: `${from.height}px` },
         { width: `${to.width}px`, height: `${to.height}px` },
       ],
-      { duration: reduced ? 0 : 180, easing: "cubic-bezier(0.2, 0, 0, 1)", fill: "forwards" },
+      { duration: MORPH_DURATION, easing: MORPH_EASING, fill: "forwards" },
     );
-    // cancel (アンマウント・やり直し) の時は reject されるので何もしない
-    anim.finished.then(onDone, () => {});
-    return () => anim.cancel();
-  }, [from, ref, targetRef, onDone]);
-  return (
-    <div
-      ref={ref}
-      data-testid="panel-style-morph"
-      aria-hidden
-      className="rounded-[18px] border border-line-default bg-surface-card shadow-md [grid-area:1/1]"
-      style={{ width: from.width, height: from.height }}
-    />
-  );
+    const finish = () => {
+      morph.hidden = true;
+      body.style.visibility = "";
+      container.style.minWidth = "";
+      container.style.minHeight = "";
+    };
+    let done = false;
+    // cancel (やり直し・アンマウント) の時は reject される。後始末は cleanup で行う
+    anim.finished.then(
+      () => {
+        done = true;
+        finish();
+        anim.cancel();
+      },
+      () => {},
+    );
+    return () => {
+      if (done) return;
+      // 次の切り替えはこの面の今の大きさから始める
+      interruptedRef.current = sizeOf(morph);
+      anim.cancel();
+      finish();
+    };
+  }, [kind]);
+
+  return { containerRef, bodyRef, morphRef };
 }
 
 /**

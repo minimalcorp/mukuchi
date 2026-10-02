@@ -179,7 +179,7 @@ test("setup: ダウンロードが進み完了すると次へ進める", async (
 test("setup: 動作テストでは欄に入力が入る", async ({ page }) => {
   await open(page, { name: "", query: "window=setup&mock=test", texts: [], viewport: SETUP });
   await expect(page.getByLabel("テスト入力欄")).toBeFocused();
-  await expect(page.getByLabel("テスト入力欄")).toHaveValue(/今日は晴れています。/);
+  await expect(page.getByLabel("テスト入力欄")).toHaveValue(/君は無口だね。/);
 });
 
 test("panel: オンにすると発話が流れ、入力後 750ms でピルに戻る", async ({ page }) => {

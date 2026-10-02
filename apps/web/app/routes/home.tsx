@@ -10,18 +10,24 @@ import {
 } from "@/components/cta";
 import { Demo } from "@/components/demo";
 import { track, type CtaLocation } from "@/lib/analytics";
-import { ButtonLink, Icon } from "@/components/ui";
+import { Badge, ButtonLink, Icon, Keycap } from "@/components/ui";
 import {
   ALWAYS_ROWS,
   COMMANDS,
+  EXTRAS,
   FEATURES,
+  MODE_CARDS,
+  MODE_NAMES,
+  MODES_LEAD,
   PRIVACY,
   REQUIREMENT_ROWS,
   REQUIREMENTS_LEAD,
   SETUP_LEAD,
+  SHORTCUT_CALLOUT,
   STEPS,
   VAD_BARS,
   type Feature,
+  type ModeCard,
 } from "@/lib/content";
 import type { Platform } from "@/lib/platform";
 import {
@@ -33,6 +39,7 @@ import {
   GITHUB_URL,
   GOOGLE_PARTNER_SITES_URL,
   SETUP_DURATION,
+  SHORTCUT_KEYS,
   SITE_DESCRIPTION,
   SITE_NAME,
   SITE_TITLE,
@@ -66,7 +73,7 @@ export function meta(): Route.MetaDescriptors {
 }
 
 /**
- * スマホ版 (2a SP) を基本に、lg (1024px) 以上で PC 版 (1b LP) の配置にする。
+ * スマホ版 (1b SP) を基本に、lg (1024px) 以上で PC 版 (1a PC) の配置にする。
  * デザインは PC 1280px・SP 390px の固定幅なので、中身の最大幅をそれぞれに合わせる
  */
 const INNER = "mx-auto w-full max-w-[640px] lg:max-w-[1280px]";
@@ -89,6 +96,7 @@ export default function Home() {
       <Header platform={pcPlatform} />
       <main>
         <Hero platform={platform} pcPlatform={pcPlatform} spShare={spShare} share={share} />
+        <Modes />
         <Features />
         <Privacy />
         <SetupAndRequirements />
@@ -116,6 +124,9 @@ function Header({ platform }: { platform: Platform }) {
           GitHub
         </a>
         <nav aria-label="ページ内" className="hidden gap-6 text-[14px] lg:flex">
+          <a href="#modes" className="text-body hover:underline">
+            入力モード
+          </a>
           <a href="#features" className="text-body hover:underline">
             特長
           </a>
@@ -173,10 +184,21 @@ function Hero({
             <br />
             そのまま入力。
           </h1>
-          <p className="m-0 text-[15px] leading-[1.7] text-pretty text-body lg:text-[16px]">
-            mukuchi は Mac
-            に常駐する音声入力アプリです。マイクが拾った発話だけを検知して文字に起こし、前面のアプリへそのまま入力します。ホットキーを押す必要はありません。
-          </p>
+          {/* スマホ版は本文と補足の行を他の要素と同じ間隔で、PC 版は 1 つのまとまりとして詰めて並べる */}
+          <div className="flex flex-col gap-5 lg:gap-3">
+            <p className="m-0 text-[15px] leading-[1.7] text-pretty text-body lg:text-[16px]">
+              mukuchi は Mac
+              に常駐する音声入力アプリです。発話だけを検知して文字に起こし、前面のアプリのカーソル位置へ入力します。オンにしておけば、話すたびに入力が進みます。
+            </p>
+            {/* 幅の狭い画面では文の途中で自然に折り返すよう、キーキャップは文中に置く */}
+            <p className="m-0 text-[14px] leading-[1.7] text-body">
+              周りに人がいるときは
+              <span className="mx-1.5 lg:mx-2">
+                <Keycap keys={SHORTCUT_KEYS} />
+              </span>
+              で 1 回ずつ聞き取れます。
+            </p>
+          </div>
 
           {/* スマホ版の配置 */}
           <div className="lg:hidden" data-testid="hero-cta-sp">
@@ -235,6 +257,137 @@ function Hero({
   );
 }
 
+function Modes() {
+  return (
+    <section id="modes" aria-labelledby="modes-title" className="border-t border-line-subtle">
+      <div className={`${INNER} flex flex-col gap-6 px-5 py-12 lg:gap-10 lg:px-12 lg:py-20`}>
+        <div className="flex flex-col gap-2.5 lg:max-w-[720px] lg:gap-3">
+          <h2
+            id="modes-title"
+            className="m-0 text-[24px] leading-[1.35] font-semibold text-strong lg:text-[30px] lg:leading-[1.3]"
+          >
+            聞き取り方は、
+            <br className="lg:hidden" />2 つから選べます
+          </h2>
+          <p className="m-0 text-[14px] leading-[1.7] text-pretty text-body lg:text-[15px]">
+            {MODES_LEAD}
+          </p>
+        </div>
+        <div className="flex flex-col gap-6 lg:grid lg:grid-cols-2">
+          {MODE_CARDS.map((m) => (
+            <ModeCardView key={m.mode} card={m} />
+          ))}
+        </div>
+        <ShortcutCallout />
+      </div>
+    </section>
+  );
+}
+
+function ModeCardView({ card }: { card: ModeCard }) {
+  return (
+    <article
+      data-testid={`mode-${card.mode}`}
+      className="flex flex-col gap-4 rounded-lg border border-line px-4 py-5 lg:gap-5 lg:p-7"
+    >
+      <div className="flex flex-col gap-1.5 lg:gap-2">
+        <div className="flex items-center gap-2 lg:gap-2.5">
+          <Icon name={card.icon} size={20} className="text-blue-500" />
+          <h3 className="m-0 text-[18px] font-semibold text-strong lg:text-[20px]">
+            {MODE_NAMES[card.mode]}
+          </h3>
+          {card.isDefault && <Badge tone="neutral">既定</Badge>}
+        </div>
+        <p className="m-0 text-[14px] leading-[1.7] text-pretty text-body lg:text-[15px]">
+          {card.body}
+        </p>
+      </div>
+
+      {/* 波形。聞き取る区間の背景を塗り、その下に区間の説明を置く */}
+      <div className="flex flex-col gap-2 rounded-lg border border-line-subtle bg-gray-50 px-3 pt-3 pb-2.5 lg:px-4 lg:pt-4 lg:pb-3">
+        <div className="flex h-11 items-end gap-px lg:h-14 lg:gap-0.5" aria-hidden="true">
+          {card.bars.map((b, i) => (
+            <span
+              key={i}
+              className={`flex h-full flex-1 items-center ${b.band ? "bg-blue-50" : "bg-transparent"}`}
+            >
+              <span
+                className={`w-full rounded-[1px] ${b.speech ? "bg-blue-500" : "bg-gray-300"}`}
+                style={{ height: `${b.h}%` }}
+              />
+            </span>
+          ))}
+        </div>
+        <div className="flex gap-0.5 text-[11px] leading-[1.4] lg:text-xs">
+          {card.segs.map((seg) => (
+            <span
+              key={seg.t}
+              className={`min-w-0 border-t-2 pt-1 lg:pt-1.5 ${seg.active ? "border-blue-500 text-strong" : "border-gray-300 text-muted"}`}
+              style={{ flex: seg.f }}
+            >
+              <span className="lg:hidden">{seg.tSp}</span>
+              <span className="hidden lg:inline">{seg.t}</span>
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs font-semibold text-muted lg:text-[13px]">こんなときに</span>
+        <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+          {card.when.map((w) => (
+            <li
+              key={w}
+              className="flex items-start gap-2 text-[13px] leading-[1.6] text-strong lg:items-center lg:text-[14px]"
+            >
+              <Icon name="check" size={16} className="mt-0.5 text-success lg:mt-0" />
+              {w}
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <dl className="m-0 flex flex-col gap-2.5 border-t border-line-subtle pt-3.5 lg:gap-2 lg:pt-4">
+        {card.keys.map((k) => (
+          <div
+            key={k.when}
+            className="flex flex-col gap-0.5 text-[13px] lg:grid lg:grid-cols-[200px_minmax(0,1fr)] lg:items-center lg:gap-3"
+          >
+            <dt className="flex items-center gap-1.5 text-muted">
+              <Keycap keys={SHORTCUT_KEYS} size="sm" />
+              {k.when}
+            </dt>
+            <dd className="m-0 leading-[1.6] text-strong">{k.does}</dd>
+          </div>
+        ))}
+      </dl>
+    </article>
+  );
+}
+
+/** ⌥Space の説明。キーキャップは大きく 1 キーずつ描く (修飾キーは正方形、Space は横長) */
+function ShortcutCallout() {
+  const [mod, key] = SHORTCUT_KEYS;
+  const cap =
+    "flex h-10 items-center justify-center rounded-md border border-b-[3px] border-line-strong bg-white font-mono font-medium text-strong lg:h-11";
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-line bg-gray-50 px-4 py-5 lg:grid lg:grid-cols-[auto_minmax(0,1fr)] lg:items-center lg:gap-7 lg:px-7 lg:py-6">
+      <div className="flex gap-1.5" aria-hidden="true">
+        <span className={`${cap} w-11 text-[18px] lg:w-12 lg:text-[20px]`}>{mod}</span>
+        <span className={`${cap} w-[120px] text-[15px] lg:w-[132px] lg:text-[16px]`}>{key}</span>
+      </div>
+      <div className="flex flex-col gap-3 lg:gap-1">
+        <h3 className="m-0 text-[15px] leading-[1.5] font-semibold text-strong lg:text-[16px]">
+          {SHORTCUT_CALLOUT.title}
+        </h3>
+        <p className="m-0 text-[13px] leading-[1.7] text-body lg:text-[14px]">
+          {SHORTCUT_CALLOUT.body}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function Features() {
   return (
     <section id="features" aria-labelledby="features-title" className="border-t border-line-subtle">
@@ -243,7 +396,7 @@ function Features() {
           id="features-title"
           className="m-0 text-[24px] leading-[1.35] font-semibold text-strong lg:text-[30px] lg:leading-[1.3]"
         >
-          操作しないで、入力する
+          入力を、声で済ませる
         </h2>
         {FEATURES.map((f) => (
           <article
@@ -266,6 +419,29 @@ function Features() {
             </div>
           </article>
         ))}
+        <div className="flex flex-col gap-3 border-t border-line-subtle pt-6 lg:gap-5 lg:pt-8">
+          <h3 className="m-0 text-[16px] font-semibold text-strong">
+            作業の邪魔をしないための機能
+          </h3>
+          <ul className="m-0 flex list-none flex-col p-0 lg:grid lg:grid-cols-3 lg:gap-4">
+            {EXTRAS.map((e) => (
+              <li
+                key={e.title}
+                className="grid grid-cols-[20px_minmax(0,1fr)] gap-3 border-b border-line-subtle py-3.5 lg:flex lg:flex-col lg:gap-2 lg:rounded-lg lg:border lg:border-line lg:p-5"
+              >
+                <Icon name={e.icon} size={20} className="text-muted" />
+                <div className="flex flex-col gap-0.5 lg:contents">
+                  <span className="text-[14px] font-semibold text-strong lg:text-[15px]">
+                    {e.title}
+                  </span>
+                  <span className="text-[13px] leading-[1.6] text-body lg:leading-[1.7]">
+                    {e.body}
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
       </div>
     </section>
   );
@@ -417,10 +593,7 @@ function SetupAndRequirements() {
                 className="grid grid-cols-[96px_minmax(0,1fr)] border-b border-line-subtle px-3.5 py-2.5 text-[13px] last:border-b-0 lg:grid-cols-[140px_minmax(0,1fr)] lg:px-4"
               >
                 <dt className="text-muted">{r.k}</dt>
-                <dd className="m-0 text-strong">
-                  {r.v}
-                  {r.sub && <span className="block text-xs text-muted">{r.sub}</span>}
-                </dd>
+                <dd className="m-0 text-strong">{r.v}</dd>
               </div>
             ))}
           </dl>

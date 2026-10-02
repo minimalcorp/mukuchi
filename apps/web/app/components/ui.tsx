@@ -1,7 +1,9 @@
 import type { AnchorHTMLAttributes, ButtonHTMLAttributes, ReactNode } from "react";
 import {
+  AppWindowIcon,
   ArrowRightIcon,
   BanIcon,
+  BookAIcon,
   CheckIcon,
   CircleCheckIcon,
   ClockIcon,
@@ -15,18 +17,23 @@ import {
   LaptopIcon,
   LinkIcon,
   MicIcon,
+  MicOffIcon,
   MonitorIcon,
-  MousePointerClickIcon,
+  PanelTopIcon,
+  RepeatIcon,
   ShareIcon,
   Trash2Icon,
+  UserRoundIcon,
   WifiOffIcon,
   type LucideIcon,
 } from "lucide-react";
 
 // デザインの Icon (lucide-static の名前指定) を lucide-react に対応させる
 const ICONS = {
+  "app-window": AppWindowIcon,
   "arrow-right": ArrowRightIcon,
   ban: BanIcon,
+  "book-a": BookAIcon,
   check: CheckIcon,
   "circle-check": CircleCheckIcon,
   clock: ClockIcon,
@@ -40,10 +47,13 @@ const ICONS = {
   laptop: LaptopIcon,
   link: LinkIcon,
   mic: MicIcon,
+  "mic-off": MicOffIcon,
   monitor: MonitorIcon,
-  "mouse-pointer-click": MousePointerClickIcon,
+  "panel-top": PanelTopIcon,
+  repeat: RepeatIcon,
   share: ShareIcon,
   "trash-2": Trash2Icon,
+  "user-round": UserRoundIcon,
   "wifi-off": WifiOffIcon,
 } satisfies Record<string, LucideIcon>;
 
@@ -163,5 +173,19 @@ export function Badge({ tone, children }: { tone: "success" | "neutral"; childre
     >
       {children}
     </span>
+  );
+}
+
+/**
+ * キーキャップ。文中 (md: 13px) と表の中 (sm: 12px) で使う。
+ * 修飾キーとキーは 1 つの枠に空白区切りで並べる (デザインの「⌥ Space」)
+ */
+export function Keycap({ keys, size = "md" }: { keys: readonly string[]; size?: "sm" | "md" }) {
+  return (
+    <kbd
+      className={`inline-block flex-none rounded-sm border border-b-2 border-line-strong bg-white px-1.5 font-mono font-medium whitespace-nowrap text-strong ${size === "md" ? "text-[13px] leading-[22px]" : "text-xs leading-5"}`}
+    >
+      {keys.join(" ")}
+    </kbd>
   );
 }

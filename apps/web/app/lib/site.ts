@@ -32,15 +32,24 @@ export const PRICE = "無料";
 export const DMG_SIZE = "36 MB";
 /** 既定のモデル minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit (2,185,804,096 B)。初回セットアップはこれだけを取得する */
 export const MODEL_SIZE = "約 2.2 GB";
+export const MODEL_NAME = "Qwen3-ASR 1.7B";
 export const SETUP_DURATION = "約 5 分";
+
+/**
+ * 音声入力のオン・オフのショートカットの既定 (desktop の Settings.shortcut の既定 "Alt+Space")。
+ * キーキャップは 1 キーずつ描くので配列で持つ
+ */
+export const SHORTCUT_KEYS = ["⌥", "Space"] as const;
+/** 文中に書く時の表記 (例: 「⌥Space で 1 回分を入力」) */
+export const SHORTCUT = SHORTCUT_KEYS.join("");
 
 export const REQUIREMENTS = {
   os: "macOS 13 Ventura 以降",
   chip: "Apple Silicon（M1 以降）",
-  chipVerified: "動作確認: M1 Max・M3 Pro",
+  chipVerified: "M1 Max・M3 Pro",
   memory: "16 GB 以上を推奨",
   storage: "空き容量 6 GB 以上",
-  model: "Qwen3-ASR 1.7B（日本語）",
+  model: `${MODEL_NAME}（日本語・${MODEL_SIZE}）`,
 } as const;
 
 /** フッターの著作権表示。会社名は COMPANY_URL へのリンクにする */

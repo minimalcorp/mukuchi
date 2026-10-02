@@ -454,11 +454,19 @@ const SETTINGS: Scenario[] = [
     },
   },
   // ---- モデルの管理 (認識) ----
+  // bf16 を含むものは旧版から bf16 を使っていた人の状態 (旧候補は手元にある時だけ出る)
   {
     name: "models-both",
     description: "モデル: 両方取得済み (bf16 を使用中)",
     setup: (db) => {
       db.models = [model("ja-8bit", "downloaded"), model("ja-bf16", "downloaded", { selected: true })];
+    },
+  },
+  {
+    name: "models-legacy",
+    description: "モデル: 両方取得済み (8bit を使用中、bf16 は旧候補)",
+    setup: (db) => {
+      db.models = [model("ja-8bit", "downloaded", { selected: true }), model("ja-bf16", "downloaded")];
     },
   },
   {
@@ -487,7 +495,7 @@ const SETTINGS: Scenario[] = [
     description: "モデル: セットアップ未完了 (操作不可)",
     setup: (db) => {
       db.provisioning = provisioning("paused");
-      db.models = [model("ja-8bit", "paused", { selected: true }), model("ja-bf16", "not_downloaded")];
+      db.models = [model("ja-8bit", "paused", { selected: true })];
     },
   },
 ];

@@ -26,7 +26,7 @@ import type {
 } from "@/lib/ipc";
 import { devOverrides } from "@/lib/env";
 import { findScenario } from "./scenarios";
-import { createDb, model, provisioning, GB, MODEL_TOTAL, type MockDb, type ModelId } from "./data";
+import { createDb, model, provisioning, visibleModels, GB, MODEL_TOTAL, type MockDb, type ModelId } from "./data";
 
 const HOME = "/Users/you";
 const RUNTIME_MISSING: AppError = {
@@ -170,9 +170,10 @@ export function installMock(params: URLSearchParams) {
   let modelTimer: ReturnType<typeof setInterval> | null = null;
   let modelTicks = 0;
   let switching = false;
+  // 未取得・未選択に戻った旧候補は一覧から消える (Rust の list_models と同じ規則)
   const setModels = (next: ModelInfo[]) => {
-    db.models = next;
-    fire("models-changed", next);
+    db.models = visibleModels(next);
+    fire("models-changed", db.models);
   };
   const patchModel = (id: string, patch: Partial<ModelInfo>) =>
     setModels(db.models.map((m) => (m.id === id ? { ...m, ...patch } : m)));
@@ -303,7 +304,7 @@ export function installMock(params: URLSearchParams) {
           setStatus({ phase: "error", loadingProgress: null, error: RUNTIME_MISSING });
           return null;
         case "list_models":
-          return db.models;
+          return visibleModels(db.models);
         case "select_model": {
           requireModelOps();
           const m = findModel(a.id);

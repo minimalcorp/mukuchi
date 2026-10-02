@@ -32,6 +32,9 @@ pub struct CatalogEntry {
     pub description: &'static str,
     /// 取得するファイル (hf.rs の ALLOW_SUFFIXES) の合計。固定した revision の tree API の値
     pub size_bytes: u64,
+    /// 旧候補: 新規には選ばせず、手元にある導入でのみ一覧に出す (docs/architecture.md「モデルの管理」の旧候補)。
+    /// カタログから消さないのは、既に使っている人がそのまま使い続け・削除できるようにするため
+    pub legacy: bool,
 }
 
 /// 既定・推奨。新規のセットアップで取得する
@@ -46,6 +49,7 @@ pub const CATALOG: [CatalogEntry; 2] = [
         name: "日本語 (8bit)",
         description: "元のモデルと同等の精度で、より速く、メモリの使用量が少ない (約3GB)",
         size_bytes: 2_185_804_096,
+        legacy: false,
     },
     CatalogEntry {
         id: "ja-bf16",
@@ -54,6 +58,7 @@ pub const CATALOG: [CatalogEntry; 2] = [
         name: "日本語 (bf16)",
         description: "量子化していない元のモデル。容量とメモリの使用量 (約8.5GB) が大きい",
         size_bytes: 4_092_092_275,
+        legacy: true,
     },
 ];
 
@@ -64,6 +69,7 @@ pub struct ModelDef {
     pub name: String,
     pub description: String,
     pub size_bytes: u64,
+    pub legacy: bool,
 }
 
 impl ModelDef {
@@ -74,6 +80,7 @@ impl ModelDef {
             name: e.name.into(),
             description: e.description.into(),
             size_bytes: e.size_bytes,
+            legacy: e.legacy,
         }
     }
 }
@@ -117,11 +124,16 @@ fn is_installed(rec: &Provisioned, paths: &DataPaths, m: &ModelDef) -> bool {
     rec.has_model(&m.hf.version()) && model_present(paths, &m.hf)
 }
 
+/// そのリポジトリの記録がある (revision は問わない)
+fn has_any_record(rec: &Provisioned, m: &ModelDef) -> bool {
+    let prefix = format!("{}@", m.hf.repo);
+    rec.models.keys().any(|k| k.starts_with(&prefix))
+}
+
 /// 選択を残してよい: そのリポジトリの記録 (revision は問わない) とディレクトリがある。
 /// revision が変わった選択中のモデル (アプリの更新) はセットアップの自動やり直しで取り直す
 fn is_usable(rec: &Provisioned, paths: &DataPaths, m: &ModelDef) -> bool {
-    let prefix = format!("{}@", m.hf.repo);
-    rec.models.keys().any(|k| k.starts_with(&prefix)) && m.hf.storage_dir(&paths.models()).is_dir()
+    has_any_record(rec, m) && m.hf.storage_dir(&paths.models()).is_dir()
 }
 
 /// 起動時に選択中のモデルを決める (docs/architecture.md「モデルの管理」の移行)。
@@ -294,6 +306,32 @@ impl ModelManager {
             .ok_or_else(|| anyhow!("不明なモデルです"))
     }
 
+    /// 一覧に出ているモデル。出ていない旧候補はカタログに無い id と同じに扱う (画面に無いものを操作させない)
+    fn listed_def(&self, id: &str) -> anyhow::Result<&ModelDef> {
+        let m = self.def(id)?;
+        if m.legacy {
+            let selected = self.selected_id();
+            if !self.is_listed(&lock(&self.inner), &selected, m) {
+                bail!("不明なモデルです");
+            }
+        }
+        Ok(m)
+    }
+
+    /// 旧候補は、選択中・手元にディレクトリがある (取得済み・途中・古い revision)・
+    /// メモリ上で取得中/進捗がある時だけ出す。旧候補でなければ常に出す。
+    /// 記録だけでは出さない (ディレクトリが無いと not_downloaded で出て、約4GBを取り直せてしまうため)
+    fn is_listed(&self, inner: &Inner, selected: &str, m: &ModelDef) -> bool {
+        !m.legacy
+            || m.id == selected
+            || inner.progress.contains_key(&m.id)
+            || inner
+                .active
+                .as_ref()
+                .is_some_and(|a| a.running() && a.id == m.id)
+            || self.storage_dir(m).is_dir()
+    }
+
     fn storage_dir(&self, m: &ModelDef) -> PathBuf {
         m.hf.storage_dir(&self.paths.models())
     }
@@ -325,6 +363,7 @@ impl ModelManager {
         self.catalog
             .iter()
             .enumerate()
+            .filter(|(_, m)| self.is_listed(&inner, &selected, m))
             .map(|(i, m)| {
                 let storage = self.storage_dir(m);
                 let progress = inner.progress.get(&m.id);
@@ -379,7 +418,7 @@ impl ModelManager {
 
     /// 選べるモデル (取得済み) かを確かめて返す。選択は変えない (起動を確かめてから `select` する)
     pub fn selectable(&self, id: &str) -> anyhow::Result<ModelDef> {
-        let m = self.def(id)?;
+        let m = self.listed_def(id)?;
         if !is_installed(
             &Provisioned::load(&self.paths.provisioned()),
             &self.paths,
@@ -407,8 +446,14 @@ impl ModelManager {
     /// 取得の開始・再開・再試行。取得済み・取得中なら何もしない。他のモデルが取得中ならエラー
     pub fn download(self: &Arc<Self>, id: &str) -> anyhow::Result<()> {
         let m = self.def(id)?.clone();
+        let selected = self.selected_id();
         {
             let mut inner = lock(&self.inner);
+            let rec = Provisioned::load(&self.paths.provisioned());
+            // 確認と開始を同じロックの中で行う (確認の後に削除されて、出ていない旧候補を取り直さないように)
+            if !self.is_listed(&inner, &selected, &m) {
+                bail!("不明なモデルです");
+            }
             if inner.suspended {
                 bail!("削除を実行中です");
             }
@@ -421,11 +466,7 @@ impl ModelManager {
                 }
                 bail!("他のモデルをダウンロード中です");
             }
-            if is_installed(
-                &Provisioned::load(&self.paths.provisioned()),
-                &self.paths,
-                &m,
-            ) {
+            if is_installed(&rec, &self.paths, &m) {
                 return Ok(());
             }
             let (cancel_tx, cancel) = Cancel::pair();
@@ -605,7 +646,7 @@ impl ModelManager {
 
     /// 中止: 取得中なら止め、途中のファイルを消して未取得に戻す。取得済みならエラー
     pub async fn cancel(self: &Arc<Self>, id: &str) -> anyhow::Result<()> {
-        let m = self.def(id)?.clone();
+        let m = self.listed_def(id)?.clone();
         if is_installed(
             &Provisioned::load(&self.paths.provisioned()),
             &self.paths,
@@ -630,7 +671,7 @@ impl ModelManager {
 
     /// 削除: 選択中・取得中はエラー。ディレクトリを消すため async ランタイムの外から呼ぶ
     pub fn delete(&self, id: &str) -> anyhow::Result<()> {
-        let m = self.def(id)?.clone();
+        let m = self.listed_def(id)?.clone();
         if m.id == self.selected_id() {
             bail!("使用中のモデルは削除できません");
         }
@@ -755,6 +796,9 @@ mod tests {
 
     const B_REPO: &str = "org/b";
     const B_REV: &str = "3333333333333333333333333333333333333333";
+    /// 旧候補 (legacy)
+    const C_REPO: &str = "org/c";
+    const C_REV: &str = "5555555555555555555555555555555555555555";
 
     fn content(n: usize, seed: u8) -> Vec<u8> {
         (0..n)
@@ -796,14 +840,20 @@ mod tests {
             paths.ensure_root().unwrap();
             let a = files(1, 40_000);
             let b = files(2, 30_000);
-            let (sa, sb) = (size(&a), size(&b));
+            let c = files(3, 20_000);
+            let (sa, sb, sc) = (size(&a), size(&b), size(&c));
             let server = MockHf::start(a);
             server.state().other_repos.push(Repo {
                 repo: B_REPO.into(),
                 revision: B_REV.into(),
                 files: b,
             });
-            let def = |id: &str, repo: &str, rev: &str, size_bytes| ModelDef {
+            server.state().other_repos.push(Repo {
+                repo: C_REPO.into(),
+                revision: C_REV.into(),
+                files: c,
+            });
+            let def = |id: &str, repo: &str, rev: &str, size_bytes, legacy| ModelDef {
                 id: id.into(),
                 hf: HfModel {
                     endpoint: server.endpoint.clone(),
@@ -813,10 +863,12 @@ mod tests {
                 name: format!("名前 {id}"),
                 description: String::new(),
                 size_bytes,
+                legacy,
             };
             let catalog = Catalog::new(vec![
-                def("a", REPO, REVISION, sa),
-                def("b", B_REPO, B_REV, sb),
+                def("a", REPO, REVISION, sa, false),
+                def("b", B_REPO, B_REV, sb, false),
+                def("c", C_REPO, C_REV, sc, true),
             ]);
             Self {
                 _tmp: tmp,
@@ -894,6 +946,9 @@ mod tests {
         assert_eq!(c.default_model().id, DEFAULT_MODEL_ID);
         let ids: Vec<&str> = c.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["ja-8bit", "ja-bf16"]);
+        // 新規に選べるのは既定のみ。既定が旧候補だと新規の導入で一覧が空になりうる
+        let legacy: Vec<bool> = c.iter().map(|m| m.legacy).collect();
+        assert_eq!(legacy, vec![false, true]);
         // リポジトリが重なると、削除・古い版の掃除が他のモデルのファイルを消すため
         let mut repos: Vec<&str> = c.iter().map(|m| m.hf.repo.as_str()).collect();
         repos.dedup();
@@ -1221,5 +1276,129 @@ mod tests {
             "{l:?}"
         );
         assert!(!fx.paths.provisioned().exists());
+    }
+
+    fn ids(l: &[ModelInfo]) -> Vec<&str> {
+        l.iter().map(|i| i.id.as_str()).collect()
+    }
+
+    #[test]
+    fn legacy_is_hidden_and_refused_when_absent() {
+        let fx = Fx::new();
+        fx.install("a");
+        let m = fx.manager();
+        assert_eq!(ids(&m.list()), vec!["a", "b"]);
+        let n = fx.server.state().requests.len();
+        let unknown = "不明なモデルです";
+        assert_eq!(m.download("c").unwrap_err().to_string(), unknown);
+        assert_eq!(m.select("c").unwrap_err().to_string(), unknown);
+        assert_eq!(m.delete("c").unwrap_err().to_string(), unknown);
+        assert_eq!(block_on(m.cancel("c")).unwrap_err().to_string(), unknown);
+        wait_idle(&m);
+        assert_eq!(fx.server.state().requests.len(), n, "取得を始めない");
+        assert!(!fx.def("c").hf.storage_dir(&fx.paths.models()).exists());
+        // 送った一覧にも出さない
+        assert!(fx
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|l| ids(l) == ["a", "b"]));
+    }
+
+    #[test]
+    fn legacy_is_listed_while_present_and_hidden_after_delete() {
+        let fx = Fx::new();
+        fx.install("a");
+        fx.install("c");
+        let m = fx.manager();
+        assert_eq!(ids(&m.list()), vec!["a", "b", "c"]);
+        let c = info(&m, "c");
+        assert_eq!((c.state, c.recommended), (ModelState::Downloaded, false));
+        // 取得済みの旧候補は選べ、選択中は消せない
+        m.select("c").unwrap();
+        assert!(info(&m, "c").selected);
+        assert_eq!(
+            m.delete("c").unwrap_err().to_string(),
+            "使用中のモデルは削除できません"
+        );
+        m.select("a").unwrap();
+        m.delete("c").unwrap();
+        assert_eq!(ids(&m.list()), vec!["a", "b"], "削除すると一覧から消える");
+        assert_eq!(
+            fx.events.lock().unwrap().last().map(|l| ids(l).len()),
+            Some(2)
+        );
+        assert_eq!(m.download("c").unwrap_err().to_string(), "不明なモデルです");
+    }
+
+    #[test]
+    fn legacy_is_listed_with_partial_files_or_record() {
+        let fx = Fx::new();
+        fx.install("a");
+        let m = fx.manager();
+        // 途中のファイル (起動し直した後) だけがある: 再開・中止できる
+        std::fs::create_dir_all(fx.def("c").hf.storage_dir(&fx.paths.models()).join("blobs"))
+            .unwrap();
+        assert_eq!(info(&m, "c").state, ModelState::Paused);
+        fx.server.state().throttle = Some(Duration::from_millis(20));
+        m.download("c").unwrap();
+        wait_bytes(&m, "c", 2048);
+        block_on(m.pause("c")).unwrap();
+        assert_eq!(info(&m, "c").state, ModelState::Paused);
+        block_on(m.cancel("c")).unwrap();
+        assert_eq!(ids(&m.list()), vec!["a", "b"], "中止すると一覧から消える");
+        fx.server.state().throttle = None;
+
+        // 記録だけがある (古い revision。ディレクトリは無い): 出さず、取り直させない
+        let old_rev = "9".repeat(40);
+        Provisioned::update(&fx.paths.provisioned(), |r| {
+            r.models.insert(
+                format!("{C_REPO}@{old_rev}"),
+                ModelRecord { completed_at: 1 },
+            );
+        })
+        .unwrap();
+        assert_eq!(ids(&m.list()), vec!["a", "b"]);
+        assert_eq!(m.download("c").unwrap_err().to_string(), "不明なモデルです");
+
+        // 古い revision のファイルが残っている: 出て、今の revision を取得できる
+        fx.server.state().other_repos.push(Repo {
+            repo: C_REPO.into(),
+            revision: old_rev.clone(),
+            files: files(8, 5000),
+        });
+        let old_def = ModelDef {
+            hf: HfModel {
+                revision: old_rev,
+                ..fx.def("c").hf.clone()
+            },
+            ..fx.def("c").clone()
+        };
+        block_on(async {
+            let (_tx, never) = Cancel::pair();
+            m.fetch(&old_def, &never).await.unwrap();
+        });
+        assert_eq!(info(&m, "c").state, ModelState::Paused);
+        m.download("c").unwrap();
+        let l = wait_idle(&m);
+        assert_eq!(info(&m, "c").state, ModelState::Downloaded, "{l:?}");
+    }
+
+    #[test]
+    fn selected_legacy_is_listed() {
+        let fx = Fx::new();
+        // 旧候補だけ導入済み: 既定を自動では取得せず、旧候補を選択中のまま使う
+        fx.install("c");
+        Provisioned::update(&fx.paths.provisioned(), |r| r.selected_model = None).unwrap();
+        let m = fx.manager();
+        assert_eq!(m.selected_id(), "c");
+        assert_eq!(ids(&m.list()), vec!["a", "b", "c"]);
+        assert!(info(&m, "c").selected);
+        assert_eq!(info(&m, "a").state, ModelState::NotDownloaded);
+        // ファイルも記録も無くても、選択中なら出す (セットアップの取得の途中・やり直し)
+        Provisioned::update(&fx.paths.provisioned(), |r| r.models.clear()).unwrap();
+        std::fs::remove_dir_all(fx.def("c").hf.storage_dir(&fx.paths.models())).unwrap();
+        assert!(m.list().iter().any(|i| i.id == "c" && i.selected));
     }
 }

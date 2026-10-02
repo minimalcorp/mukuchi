@@ -17,7 +17,7 @@
 | チップ | Apple Silicon (M1 以降) | Apple Silicon (M1 以降)。動作確認: M1 Max・M3 Pro | MLX が Apple Silicon 専用 |
 | メモリ | 16 GB 以上を推奨 | 16 GB 以上を推奨 | 16 GB 未満は未確認 |
 | ストレージ | 空き容量 5 GB 以上 | 空き容量 6 GB 以上 | 導入後の実測 4.4 GB (モデル 3.8 GB・実行環境 約 0.6 GB) + アプリ 66 MB + 余裕 |
-| モデル容量 | 約 2.4 GB | 約 2.2 GB | 既定のモデル (`minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit`、2,185,804,096 B)。初回セットアップはこれだけを取得する (bf16 版 約 4.1 GB は設定から任意で取得) |
+| モデル容量 | 約 2.4 GB | 約 2.2 GB | 既定のモデル (`minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit`、2,185,804,096 B)。初回セットアップはこれだけを取得する (bf16 版は新規には選べない。既に導入済みの人のみ設定に出る) |
 | 標準モデル | Qwen3-ASR 1.7B (日本語) | 同左 | |
 | バージョン | v0.1.0 | desktop の最新の版 | ビルド時に `apps/desktop/src-tauri/tauri.conf.json` から読む。desktop のリリースで LP も配信し直す (docs/release.md) |
 | 価格 | 無料 | 無料 | |

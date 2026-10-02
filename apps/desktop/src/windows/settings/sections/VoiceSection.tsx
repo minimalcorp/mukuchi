@@ -13,6 +13,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useAudioLevel } from "@/lib/audio-level";
 import { LevelMeter } from "@/components/app/level-meter";
+import { InputModeRadio } from "@/components/app/input-mode-options";
+import { SHORTCUT_HINT } from "@/lib/input-mode";
+import { ShortcutRecorder } from "@/components/app/shortcut-recorder";
 import { errorMessage, useDebouncedCommit } from "@/lib/hooks";
 import { commands, subscribeEvents, type AppStatus, type AudioDevice, type RunningApp } from "@/lib/ipc";
 import { Card, FieldError, FieldHeading, type SectionProps } from "./common";
@@ -95,6 +98,26 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
 
   return (
     <>
+      <div className="flex flex-col gap-2">
+        <FieldHeading
+          label="入力モード"
+          help="周りに人がいる・会話が聞こえる場所では、1回ずつ聞き取るにすると関係のない声を入力しません"
+        />
+        <InputModeRadio
+          value={settings.inputMode}
+          onChange={(m) => update({ inputMode: m })}
+        />
+        <FieldError message={errors.inputMode} />
+      </div>
+      <div className="flex flex-col gap-2">
+        <FieldHeading label="ショートカット" help="どのアプリを使っていても押せます。他のアプリと同じキーだと動かないことがあります" />
+        <ShortcutRecorder
+          shortcut={settings.shortcut}
+          onChange={(shortcut) => update({ shortcut })}
+          error={errors.shortcut}
+          hint={SHORTCUT_HINT[settings.inputMode]}
+        />
+      </div>
       <div className="flex flex-col gap-1.5">
         <Select
           label="マイク"

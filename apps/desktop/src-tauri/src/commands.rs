@@ -12,6 +12,7 @@ use crate::permissions::{self, Pane, Permissions};
 use crate::provisioning::models::ModelInfo;
 use crate::provisioning::ProvisioningStatus;
 use crate::settings::Settings;
+use crate::shortcut::ShortcutStatus;
 use crate::state::AppStatus;
 use crate::storage::{StorageUsage, UninstallTarget};
 use crate::windows::{self, SettingsCategory};
@@ -30,6 +31,18 @@ pub fn get_status(core: State<'_, Arc<Core>>) -> AppStatus {
 #[tauri::command]
 pub async fn set_listening(core: State<'_, Arc<Core>>, on: bool) -> CmdResult<()> {
     core.inner().set_listening(on).await.map_err(err)
+}
+
+#[tauri::command]
+pub fn get_shortcut_status(core: State<'_, Arc<Core>>) -> ShortcutStatus {
+    core.shortcut.status()
+}
+
+/// 同期 command (メインスレッドで実行) にする: 登録・解除はメインスレッドで行われ、
+/// 別スレッドから呼ぶとメインスレッドの完了を待つことになるため (shortcut.rs)
+#[tauri::command]
+pub fn set_shortcut_suspended(core: State<'_, Arc<Core>>, suspended: bool) {
+    core.shortcut.set_suspended(suspended);
 }
 
 #[tauri::command]

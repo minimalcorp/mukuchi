@@ -23,7 +23,8 @@ use crate::provisioning::hf::HfModel;
 use crate::provisioning::models::{Catalog, ModelInfo, ModelManager};
 use crate::provisioning::runtime::UvRuntime;
 use crate::provisioning::{Provisioner, ServerVerify, Stage};
-use crate::settings::{Settings, SettingsStore};
+use crate::settings::{InputMode, Settings, SettingsStore};
+use crate::shortcut::{PluginRegistrar, ShortcutManager};
 use crate::state::{AppError, ErrorCode, StateManager, DONE_DISPLAY};
 use crate::storage::{self, DevScope, UninstallContext};
 use crate::vad::VadParams;
@@ -39,6 +40,7 @@ pub mod events {
     pub const INPUT_DEVICES_CHANGED: &str = "input-devices-changed";
     pub const PROVISIONING_PROGRESS: &str = "provisioning-progress";
     pub const MODELS_CHANGED: &str = "models-changed";
+    pub const SHORTCUT_STATUS_CHANGED: &str = "shortcut-status-changed";
 }
 
 /// 未バンドルの開発実行 (tauri dev) で WebKit がキャッシュ等に使う名前 (実行ファイル名)
@@ -59,6 +61,9 @@ pub const ENV_DEV_TARGET_BUNDLE: &str = "MUKUCHI_DEV_TARGET_BUNDLE";
 const HEALTH_INTERVAL: Duration = Duration::from_secs(5);
 /// この回数続けて /health に失敗したら停止とみなす (推論中の一時的な遅れで誤判定しない)
 const HEALTH_FAILURES_TO_STOP: u32 = 2;
+/// 1回ずつ聞き取る: ON (または誤検出) からこの時間話し始めなければ OFF にする
+/// (押したまま忘れて、周りの会話を拾い続けないため。docs/architecture.md「入力モード」)
+const ONE_SHOT_NO_SPEECH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn dev_flag(name: &str) -> bool {
     cfg!(debug_assertions) && std::env::var(name).as_deref() == Ok("1")
@@ -195,6 +200,9 @@ pub struct Core {
     /// 録音の開始・停止を直列にする (マイク許可ダイアログ待ちの間に再度押された場合、
     /// マイク切り替えの停止→開始の間に他の操作が割り込む場合など)
     toggle_lock: tokio::sync::Mutex<()>,
+    pub shortcut: ShortcutManager,
+    /// 1回ずつ聞き取るの無発話タイマーの世代。張り直し・取り消しのたびに進め、古いタイマーを無効にする
+    no_speech_timer: AtomicU64,
 }
 
 impl Core {
@@ -235,6 +243,10 @@ impl Core {
                 let _ = emit_app.emit(events::PROVISIONING_PROGRESS, s);
             },
         )?;
+        let emit_app = app.clone();
+        let shortcut = ShortcutManager::new(PluginRegistrar(app.clone()), move |status| {
+            let _ = emit_app.emit(events::SHORTCUT_STATUS_CHANGED, status);
+        });
         let core = Arc::new(Self {
             app,
             settings: SettingsStore::load(paths.settings()),
@@ -256,6 +268,8 @@ impl Core {
             partial: Mutex::new(PartialState::default()),
             finals_in_flight: AtomicUsize::new(0),
             toggle_lock: tokio::sync::Mutex::new(()),
+            shortcut,
+            no_speech_timer: AtomicU64::new(0),
         });
         let app = core.app.clone();
         core.state.subscribe(move |status| {
@@ -280,8 +294,12 @@ impl Core {
         &self.app
     }
 
-    /// 入力キューと ASR 接続を開始する。
+    /// 入力キューと ASR 接続を開始し、ショートカットを登録する。
+    /// ショートカットはセットアップ中も有効にする (セットアップの「試しに話す」で使うため。
+    /// 使えない状態での ON は set_listening が理由を返す)。setup (メインスレッド) から呼ぶ
     pub fn start(self: &Arc<Self>) -> Result<()> {
+        self.shortcut.init(self.settings.get().shortcut);
+
         let weak_cfg = Arc::downgrade(self);
         let weak_res = Arc::downgrade(self);
         let app = self.app.clone();
@@ -875,11 +893,17 @@ impl Core {
         Source::Device(self.settings.get().input_device_id)
     }
 
+    /// 音声入力の ON/OFF。開始手段 (パネル・メニューバー・ショートカット) によらずここを通る。
+    /// 1回ずつ聞き取るでは ON にした時点から無発話タイマーを張る
     pub async fn set_listening(self: &Arc<Self>, on: bool) -> Result<()> {
         let _guard = self.toggle_lock.lock().await;
+        self.set_listening_locked(on).await
+    }
+
+    /// `set_listening` の本体。`toggle_lock` を持って呼ぶ
+    async fn set_listening_locked(self: &Arc<Self>, on: bool) -> Result<()> {
         if !on {
-            self.stop_capture().await;
-            self.state.set_listening(false);
+            self.off_locked(false).await;
             return Ok(());
         }
         if self.state.is_listening() {
@@ -925,6 +949,7 @@ impl Core {
 
         self.start_capture_locked().await?;
         self.state.set_listening(true);
+        self.reset_no_speech_timer();
         // セットアップを閉じてパネルが隠れたままでも、メニューバー等からONにしたら様子が見えるようにする
         if let Err(e) = crate::windows::show_panel(&self.app) {
             log::warn!("パネルを表示できません: {e:#}");
@@ -974,18 +999,120 @@ impl Core {
             return;
         }
         log::info!("マイクの変更のため録音をやり直す");
-        self.stop_capture().await;
+        self.stop_capture(false).await;
         if let Err(e) = self.start_capture_locked().await {
             log::error!("マイク切り替え後の再開に失敗: {e:#}");
+            return;
+        }
+        // 発話中だったものは破棄されたため、1回ずつ聞き取るなら待ち直す
+        self.reset_no_speech_timer();
+    }
+
+    /// OFF にする。`toggle_lock` を持って呼ぶ。`finish` なら発話中のものも確定してから止める
+    async fn off_locked(&self, finish: bool) {
+        self.cancel_no_speech_timer();
+        self.stop_capture(finish).await;
+        self.state.set_listening(false);
+    }
+
+    fn input_mode(&self) -> InputMode {
+        self.settings.get().input_mode
+    }
+
+    /// 動いている録音がこのセッションか (OFF・マイク切り替え後の古い通知を見分ける)
+    fn is_current_capture(&self, generation: u64) -> bool {
+        lock(&self.running).as_ref().map(|c| c.generation) == Some(generation)
+    }
+
+    /// ショートカットの押下 (docs/architecture.md「操作」)。
+    /// OFF なら ON。ON なら 常に聞き取る→OFF、1回ずつ聞き取る→発話中のものを無音を待たずに確定して OFF
+    /// (話していなければ取り消して OFF。どちらになるかは処理スレッドが止める時点で決める: `Running::finish`)。
+    /// 失敗はログだけ (エラーは状態としてパネル・メニューバーに出ている)
+    ///
+    /// ON/OFF の判定は `toggle_lock` を取ってから行う。ON の処理 (マイク許可の確認・録音の開始) は
+    /// ロックを持ったまま最後に listening を立てるため、先に判定すると、その間の再押下 (取り消し) が
+    /// 「OFF なので ON」と扱われて無視される。押下は順に処理され、2回目は ON になった後の OFF になる
+    pub async fn on_shortcut(self: &Arc<Self>) {
+        let _guard = self.toggle_lock.lock().await;
+        let result = if !self.state.is_listening() {
+            log::info!("ショートカット: ON");
+            self.set_listening_locked(true).await
+        } else if self.input_mode() == InputMode::OneShot {
+            log::info!("ショートカット: 確定して OFF");
+            self.off_locked(true).await;
+            Ok(())
+        } else {
+            log::info!("ショートカット: OFF");
+            self.off_locked(false).await;
+            Ok(())
+        };
+        if let Err(e) = result {
+            log::warn!("ショートカットでの切り替えに失敗: {e:#}");
         }
     }
 
-    /// 録音を止める。話し終わりの無音待ちのものは確定し、話している最中のものは破棄する。
+    /// 1回ずつ聞き取る: 発話を確定したら OFF にする。処理スレッドからの通知の中では止められない
+    /// (止める = 処理スレッドの終了待ち。`toggle_lock` も待つ) ため別タスクで行う。
+    /// その録音がもう動いていなければ (OFF・マイク切り替え・次の ON の後なら) 何もしない
+    fn finish_one_shot_later(self: &Arc<Self>, generation: u64) {
+        let core = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let _guard = core.toggle_lock.lock().await;
+            if !core.is_current_capture(generation) {
+                return;
+            }
+            log::info!("1回ずつ聞き取る: 発話を確定したため OFF にする");
+            core.off_locked(false).await;
+        });
+    }
+
+    fn cancel_no_speech_timer(&self) {
+        self.no_speech_timer.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// 無発話タイマーを張り直す (1回ずつ聞き取るで ON の間のみ。それ以外は取り消すだけ)
+    fn reset_no_speech_timer(self: &Arc<Self>) {
+        let seq = self.no_speech_timer.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.input_mode() != InputMode::OneShot || !self.state.is_listening() {
+            return;
+        }
+        let core = self.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(ONE_SHOT_NO_SPEECH_TIMEOUT).await;
+            if core.no_speech_timer.load(Ordering::SeqCst) != seq {
+                return;
+            }
+            let _guard = core.toggle_lock.lock().await;
+            // ロックを待つ間に話し始めた・OFF にした・モードを変えた場合はやめる
+            if core.no_speech_timer.load(Ordering::SeqCst) != seq
+                || !core.state.is_listening()
+                || core.input_mode() != InputMode::OneShot
+            {
+                return;
+            }
+            log::info!(
+                "1回ずつ聞き取る: {}秒話し始めなかったため OFF にする",
+                ONE_SHOT_NO_SPEECH_TIMEOUT.as_secs()
+            );
+            core.off_locked(false).await;
+        });
+    }
+
+    /// 録音を止める。話し終わりの無音待ちのものは確定し、話している最中のものは破棄する
+    /// (`finish` なら話している最中のものも確定する)。
     /// 確定処理中のものは入力まで続く。スレッドの終了待ちは async ランタイムの外で行う。
-    async fn stop_capture(&self) {
+    async fn stop_capture(&self, finish: bool) {
         let capture = lock(&self.running).take();
         if let Some(c) = capture {
-            if let Err(e) = tauri::async_runtime::spawn_blocking(move || c.running.stop()).await {
+            let r = tauri::async_runtime::spawn_blocking(move || {
+                if finish {
+                    c.running.finish()
+                } else {
+                    c.running.stop()
+                }
+            })
+            .await;
+            if let Err(e) = r {
                 log::error!("録音の停止処理が異常終了しました: {e}");
             }
         }
@@ -1003,7 +1130,8 @@ impl Core {
             }
         }
         log::error!("エラーのため音声入力をOFFにする: {}", error.message);
-        self.stop_capture().await;
+        self.cancel_no_speech_timer();
+        self.stop_capture(false).await;
         self.state.set_error(error);
     }
 
@@ -1022,22 +1150,42 @@ impl Core {
     /// - launchAtLogin: ログイン項目を登録・解除する (ここ。`login_item_change`)。登録・解除できなければ保存しない。
     ///   セットアップ完了前は値を保存するだけで、セットアップ完了時に反映する
     /// - setupCompleted: 起動時にセットアップを出すかの判定と、ログイン項目の反映の時期に使う
+    /// - shortcut: 登録し直す (ここ。`ShortcutManager::change`)。登録できなければ保存しない。
+    ///   同じ値でも、登録できていなければ (起動時の失敗) 登録を試し直す
+    /// - inputMode: ON/OFF・発話の確定・誤検出の時に読む。ON の間に変えた場合は今から新しいモードで動く
+    ///   (ここ。continuous にしたら無発話タイマーを取り消し、oneShot にしたら話していなければタイマーを張る。
+    ///   話している最中に oneShot にした場合は、その発話の確定で OFF になる)
     ///
-    /// 順序は 検証 → ログイン項目 → 保存。保存に失敗したらログイン項目を元に戻す。
+    /// 順序は 検証 → ショートカット → ログイン項目 → 保存。後の段で失敗したら前の段を元に戻す。
     pub fn update_settings(self: &Arc<Self>, patch: &serde_json::Value) -> Result<Settings> {
         let before = self.settings.get();
         let next = self.settings.update_with(
             patch,
             |before, next| {
+                let shortcut_prev =
+                    if patch.get("shortcut").is_some() || before.shortcut != next.shortcut {
+                        Some(self.shortcut.change(next.shortcut.clone())?)
+                    } else {
+                        None
+                    };
                 let Some(target) = login_item_change(before, next, cfg!(debug_assertions)) else {
-                    return Ok(None);
+                    return Ok((shortcut_prev, None));
                 };
                 let was_enabled = crate::autostart::status() == crate::autostart::Status::Enabled;
-                crate::autostart::set_enabled(target)?;
-                Ok(Some((target, was_enabled)))
+                if let Err(e) = crate::autostart::set_enabled(target) {
+                    if let Some(prev) = shortcut_prev {
+                        self.shortcut.rollback(prev);
+                    }
+                    return Err(e);
+                }
+                Ok((shortcut_prev, Some((target, was_enabled))))
             },
-            |applied| {
-                if let Some((target, was_enabled)) = applied {
+            |(shortcut_prev, login)| {
+                if let Some(prev) = shortcut_prev {
+                    log::warn!("設定を保存できないため、ショートカットを元に戻す");
+                    self.shortcut.rollback(prev);
+                }
+                if let Some((target, was_enabled)) = login {
                     if target != was_enabled {
                         log::warn!("設定を保存できないため、ログイン項目を元に戻す");
                         if let Err(e) = crate::autostart::set_enabled(was_enabled) {
@@ -1057,6 +1205,14 @@ impl Core {
         if before.input_device_id != next.input_device_id && self.state.is_listening() {
             let core = self.clone();
             tauri::async_runtime::spawn(async move { core.restart_capture().await });
+        }
+        if before.input_mode != next.input_mode && self.state.is_listening() {
+            if self.state.is_speaking() {
+                self.cancel_no_speech_timer();
+            } else {
+                // reset_no_speech_timer が新しいモードを読む (continuous なら取り消すだけ)
+                self.reset_no_speech_timer();
+            }
         }
         Ok(next)
     }
@@ -1530,6 +1686,7 @@ impl PipelineSink for Sink {
                 .app
                 .emit(events::UTTERANCE_STARTED, UtteranceStarted { id });
             c.state.set_speaking(true);
+            c.cancel_no_speech_timer();
         }
     }
 
@@ -1555,6 +1712,10 @@ impl PipelineSink for Sink {
         if let Some(c) = self.core.upgrade() {
             c.state.set_speaking(false);
             c.finalize(id, audio);
+            // 止める時 (OFF・即確定) の確定ではすでに録音を外しているため、動いている録音からの時だけ
+            if c.input_mode() == InputMode::OneShot && c.is_current_capture(self.generation) {
+                c.finish_one_shot_later(self.generation);
+            }
         }
     }
 
@@ -1566,6 +1727,10 @@ impl PipelineSink for Sink {
             let _ = c
                 .app
                 .emit(events::UTTERANCE_RESULT, UtteranceResult::Discarded { id });
+            // 誤検出では OFF にせず待ち直す (1回ずつ聞き取る)。止める時の破棄では張らない
+            if c.is_current_capture(self.generation) {
+                c.reset_no_speech_timer();
+            }
         }
     }
 

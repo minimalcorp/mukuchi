@@ -1,10 +1,11 @@
 /*
  * 初回セットアップ (デザイン 04、560×440)。
- * ようこそ → 権限 → 実行環境とモデルのダウンロード → 動作テスト → 完了 の 5 ステップ。
+ * ようこそ → 権限 → 実行環境とモデルのダウンロード → 入力モード → 動作テスト → 完了 の 6 ステップ。
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   AudioLines,
+  Check,
   Circle,
   CircleAlert,
   CircleCheck,
@@ -25,6 +26,9 @@ import { TrafficLights, WindowFrame } from "@/components/app/window-frame";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { InputModeRadio } from "@/components/app/input-mode-options";
+import { INPUT_MODES, SHORTCUT_HINT } from "@/lib/input-mode";
+import { ShortcutKeys, ShortcutRecorder } from "@/components/app/shortcut-recorder";
 import { HelpTip } from "@/components/ui/tooltip";
 import { useAudioLevel } from "@/lib/audio-level";
 import { useLevelEnvelope } from "@/lib/level-envelope";
@@ -39,10 +43,17 @@ import {
   useSettings,
 } from "@/lib/hooks";
 import { LaunchAtLoginError } from "@/components/app/launch-at-login-error";
-import { commands, runCommand, subscribeEvents, type Permissions, type ProvisioningStatus } from "@/lib/ipc";
+import {
+  commands,
+  runCommand,
+  subscribeEvents,
+  type InputMode,
+  type Permissions,
+  type ProvisioningStatus,
+} from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 
-const STEPS = 5;
+const STEPS = 6;
 
 /** 導入の途中 (実行中・一時停止・失敗) か */
 function inProgress(p: ProvisioningStatus): boolean {
@@ -88,8 +99,9 @@ export function SetupWindow() {
         {step === 1 && <WelcomeStep provisioning={provisioning} onNext={next} />}
         {step === 2 && <PermissionsStep onBack={back} onNext={next} />}
         {step === 3 && <DownloadStep provisioning={provisioning} onNext={next} />}
-        {step === 4 && <TestStep onBack={back} onNext={next} />}
-        {step === 5 && <DoneStep provisioning={provisioning} />}
+        {step === 4 && <InputModeStep onBack={back} onNext={next} />}
+        {step === 5 && <TestStep onBack={back} onNext={next} />}
+        {step === 6 && <DoneStep provisioning={provisioning} />}
       </div>
     </WindowFrame>
   );
@@ -459,7 +471,68 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
   );
 }
 
-/* ---------- 4. 動作テスト ---------- */
+/* ---------- 4. 入力モード ---------- */
+
+function InputModeStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }) {
+  const [settings, update, errors] = useSettings();
+  const mode = settings?.inputMode ?? "continuous";
+  const current = INPUT_MODES.find((m) => m.id === mode) ?? INPUT_MODES[0];
+  return (
+    <>
+      <StepBody dense>
+        <Title>入力のしかたを選んでください</Title>
+        <div className="flex gap-3">
+          <InputModeRadio
+            className="w-[264px] flex-none"
+            value={settings?.inputMode}
+            disabled={!settings}
+            onChange={(m) => update({ inputMode: m })}
+          />
+          {/* 選んでいるモードが向いている場面。選び替えると入れ替わる */}
+          <div data-testid="input-mode-use-cases" className="flex min-w-0 flex-1 flex-col gap-2 rounded-lg bg-surface-muted px-3.5 py-3">
+            <span className="text-xs font-semibold text-fg-muted">こんなときに</span>
+            <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-sm leading-[1.5] text-fg-body">
+              {current.useCases.map((u) => (
+                <li key={u} className="flex items-start gap-1.5">
+                  <Check size={14} className="mt-[3px] flex-none text-fg-success" aria-hidden />
+                  {u}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+        {errors.inputMode ? (
+          <p role="alert" className="m-0 text-xs leading-[1.5] text-fg-danger">
+            {errors.inputMode}
+          </p>
+        ) : null}
+        <div className="flex items-start gap-3">
+          <span className="flex h-[30px] flex-none items-center gap-1.5 text-sm font-medium">
+            ショートカット
+            <HelpTip content="どのアプリを使っていても押せます。他のアプリと同じキーだと動かないことがあります" />
+          </span>
+          <ShortcutRecorder
+            shortcut={settings?.shortcut}
+            disabled={!settings}
+            onChange={(shortcut) => update({ shortcut })}
+            error={errors.shortcut}
+            hint={SHORTCUT_HINT[mode]}
+          />
+        </div>
+      </StepBody>
+      <StepFooter align="between">
+        <Button variant="ghost" onClick={onBack}>
+          戻る
+        </Button>
+        <Button variant="primary" onClick={onNext}>
+          次へ
+        </Button>
+      </StepFooter>
+    </>
+  );
+}
+
+/* ---------- 5. 動作テスト ---------- */
 
 /** 入力レベル。約15Hz で更新されるのでここだけが購読・再描画する。長さはパネルと同じく平滑化する */
 function SetupLevelBar({ on }: { on: boolean }) {
@@ -472,8 +545,28 @@ function SetupLevelBar({ on }: { on: boolean }) {
   );
 }
 
+/** 動作テストの案内。1回ずつ聞き取るではショートカットで始めてもらい、自動でオフになることを先に伝える */
+function TestInstruction({ mode, shortcut }: { mode: InputMode; shortcut: string | null }) {
+  const keys = shortcut ? <ShortcutKeys shortcut={shortcut} className="mx-0.5 align-[1px]" /> : null;
+  if (mode === "oneShot") {
+    return (
+      <>
+        画面の下にパネルを表示しました。{keys ? <>{keys} を押して</> : "パネルで音声入力をオンにして"}
+        、「君は無口だね」のように話してください。話し終わると自動でオフになります。
+      </>
+    );
+  }
+  return (
+    <>
+      画面の下にパネルを表示しました。{keys ? <>パネルか {keys} で</> : "パネルで"}
+      音声入力をオンにして、「君は無口だね」のように話してください。
+    </>
+  );
+}
+
 function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }) {
   const status = useAppStatus();
+  const [settings] = useSettings();
   const [recognized, setRecognized] = useState(false);
   // 音声コマンドは欄にキー操作として届くため、何を送ったかをバッジで示す
   const [commandsSent, setCommandsSent] = useState<{ id: number; text: string; key: string }[]>([]);
@@ -502,8 +595,8 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
     <>
       <StepBody>
         <Title>試しに話してみてください</Title>
-        <p className="m-0 text-sm leading-[1.6] text-fg-muted">
-          画面の下にパネルを表示しました。パネルで音声入力をオンにして、「君は無口だね」のように話してください。
+        <p data-testid="test-instruction" className="m-0 text-sm leading-[1.6] text-fg-muted">
+          {settings ? <TestInstruction mode={settings.inputMode} shortcut={settings.shortcut} /> : null}
         </p>
         <div className="flex h-8 flex-none items-center gap-2.5 rounded-md bg-surface-muted px-3">
           <AudioLines size={16} className="flex-none text-blue-500" aria-hidden />
@@ -553,7 +646,7 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
   );
 }
 
-/* ---------- 5. 完了 ---------- */
+/* ---------- 6. 完了 ---------- */
 
 function DoneStep({ provisioning }: { provisioning: ProvisioningStatus | null }) {
   const [settings, update, settingsErrors] = useSettings();
@@ -571,7 +664,22 @@ function DoneStep({ provisioning }: { provisioning: ProvisioningStatus | null })
           mukuchi はメニューバーに常駐します。設定はメニューバーのアイコンから開けます。
         </p>
         <div className="flex items-center gap-2.5 rounded-lg border border-line-default px-3.5 py-3 text-sm">
-          <span className="flex-1">オン／オフはパネルか、メニューバーのアイコンから切り替えます</span>
+          <span data-testid="done-toggle-hint" className="flex-1 leading-[1.6]">
+            {settings?.shortcut && settings.inputMode === "oneShot" ? (
+              <>
+                <ShortcutKeys shortcut={settings.shortcut} className="mx-0.5 align-[1px]" />{" "}
+                を押すと1回聞き取ります。パネルやメニューバーのアイコンからも始められます
+              </>
+            ) : settings?.shortcut ? (
+              <>
+                オン／オフはパネル・メニューバーのアイコン・
+                <ShortcutKeys shortcut={settings.shortcut} className="mx-0.5 align-[1px]" />
+                で切り替えます
+              </>
+            ) : (
+              "オン／オフはパネルか、メニューバーのアイコンから切り替えます"
+            )}
+          </span>
         </div>
         <Switch
           label="ログイン時に起動"

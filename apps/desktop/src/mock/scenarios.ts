@@ -1,6 +1,6 @@
 /*
  * モックのシナリオ。URL の ?window=<panel|settings|setup>&mock=<名前> で選ぶ。
- * setup は &step=<1-5>、settings は &category=<カテゴリ> も併用できる。
+ * setup は &step=<1-6>、settings は &category=<カテゴリ> も併用できる。
  */
 import type { AppError, AppStatus } from "@/lib/ipc";
 import type { MockApi } from "./index";
@@ -11,7 +11,7 @@ export type Scenario = {
   description: string;
   /** true: 時間経過で状態が進む (結果表示も時間経過で消える) */
   live?: boolean;
-  /** setup の初期ステップ (1-5) */
+  /** setup の初期ステップ (1-6) */
   step?: number;
   setup?: (db: MockDb) => void;
   script?: (api: MockApi) => void;
@@ -288,6 +288,15 @@ const PANEL: Scenario[] = [
   errorScenario("runtime"),
 ];
 
+/** 起動時にショートカットを登録できなかった (Rust は設定を残したまま登録状態に error を入れる) */
+function shortcutConflict(db: MockDb) {
+  db.shortcut = {
+    shortcut: db.settings.shortcut,
+    registered: false,
+    error: "ショートカット「⌥ Space」を登録できませんでした。別のキーに変更してください",
+  };
+}
+
 const SETUP: Scenario[] = [
   {
     name: "default",
@@ -391,9 +400,24 @@ const SETUP: Scenario[] = [
     },
   },
   { name: "download-done", step: 3, description: "ダウンロード完了" },
+  { name: "input-mode", step: 4, description: "入力モードの選択 (既定の常に聞き取る)" },
+  {
+    name: "input-mode-oneshot",
+    step: 4,
+    description: "入力モードの選択 (1回ずつ聞き取るを選択済み)",
+    setup: (db) => {
+      db.settings.inputMode = "oneShot";
+    },
+  },
+  {
+    name: "input-mode-conflict",
+    step: 4,
+    description: "起動時にショートカットを登録できなかった",
+    setup: shortcutConflict,
+  },
   {
     name: "test",
-    step: 4,
+    step: 5,
     description: "動作テスト (話した想定で入力と音声コマンドを流す)",
     setup: (db) => {
       listening(db, 0.46);
@@ -411,12 +435,29 @@ const SETUP: Scenario[] = [
       }, 600);
     },
   },
-  { name: "test-empty", step: 4, description: "動作テスト (まだ話していない)", setup: (db) => listening(db, 0.1) },
-  { name: "done", step: 5, description: "完了" },
+  { name: "test-empty", step: 5, description: "動作テスト (まだ話していない)", setup: (db) => listening(db, 0.1) },
+  {
+    name: "test-oneshot",
+    step: 5,
+    description: "動作テスト (1回ずつ聞き取る。まだ話していない)",
+    setup: (db) => {
+      db.settings.inputMode = "oneShot";
+    },
+  },
+  { name: "done", step: 6, description: "完了" },
+  {
+    name: "done-oneshot",
+    step: 6,
+    description: "完了 (1回ずつ聞き取る)",
+    setup: (db) => {
+      db.settings.inputMode = "oneShot";
+    },
+  },
 ];
 
 const SETTINGS: Scenario[] = [
   { name: "default", description: "通常 (オン・待機中)", live: true, setup: (db) => { listening(db, 0.3); db.levelStream = true; } },
+  { name: "shortcut-conflict", description: "起動時にショートカットを登録できなかった", setup: shortcutConflict },
   {
     name: "perm-denied",
     description: "アクセシビリティ未許可 (サイドバーに黄色の点)",

@@ -166,6 +166,10 @@ test("setup: 動作テストのステップに入ると show_panel を呼ぶ", a
   await expect(page.getByText("試しに話してみてください")).toHaveCount(0);
   expect(await calls(page, "show_panel")).toHaveLength(0);
   await page.getByRole("button", { name: "次へ" }).click();
+  // 入力モードのステップでは出さない
+  await expect(page.getByText("入力のしかたを選んでください")).toBeVisible();
+  expect(await calls(page, "show_panel")).toHaveLength(0);
+  await page.getByRole("button", { name: "次へ" }).click();
   await expect(page.getByText("試しに話してみてください")).toBeVisible();
   await expect.poll(async () => (await calls(page, "show_panel")).length).toBeGreaterThan(0);
 });

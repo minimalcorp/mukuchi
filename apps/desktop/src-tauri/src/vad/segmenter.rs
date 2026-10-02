@@ -148,6 +148,20 @@ impl Segmenter {
         Some(event)
     }
 
+    /// 無音を待たずに今の発話を確定する (1回ずつ聞き取るでショートカットを再度押した時)。
+    ///
+    /// `stop` と違い、話している最中でも確定する (利用者が話し終えたと明示したため)。
+    /// 最短発話未満なら `Misfire`。発話中でなければ `None`。いずれの場合も以後は発話していない状態に戻る
+    pub fn finish_now(&mut self) -> Option<SegmentEvent> {
+        if !self.speaking {
+            self.reset();
+            return None;
+        }
+        let event = self.finish();
+        self.reset();
+        Some(event)
+    }
+
     pub fn reset(&mut self) {
         self.speaking = false;
         self.audio.clear();
@@ -334,6 +348,36 @@ mod tests {
             Some(SegmentEvent::Misfire),
             "最短発話未満は破棄"
         );
+    }
+
+    #[test]
+    fn finish_now_finalizes_while_talking() {
+        let mut seg = Segmenter::new(params());
+        // 発話 20 フレーム (話している最中) で確定
+        run(&mut seg, &seq(&[(0.0, 5), (0.9, 20)]), -20.0);
+        let Some(SegmentEvent::Ended { audio }) = seg.finish_now() else {
+            panic!("話している最中でも確定する")
+        };
+        // pre-pad 5 + 発話 20 (末尾の無音はまだない)
+        assert_eq!(audio.len(), (5 + 20) * FRAME_SAMPLES);
+        assert!(!seg.is_speaking());
+        assert_eq!(seg.finish_now(), None, "発話中でなければ何もしない");
+
+        // 無音待ちの途中: stop と同じく末尾は上限まで残す
+        let mut seg = Segmenter::new(params());
+        run(&mut seg, &seq(&[(0.9, 20), (0.0, 15)]), -20.0);
+        let Some(SegmentEvent::Ended { audio }) = seg.finish_now() else {
+            panic!()
+        };
+        assert_eq!(audio.len(), (20 + 10) * FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn finish_now_too_short_is_misfire() {
+        let mut seg = Segmenter::new(params());
+        run(&mut seg, &seq(&[(0.9, 3)]), -20.0);
+        assert_eq!(seg.finish_now(), Some(SegmentEvent::Misfire));
+        assert!(!seg.is_speaking());
     }
 
     #[test]

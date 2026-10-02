@@ -39,6 +39,9 @@ const SPLIT_SEARCH_SAMPLES: usize = SAMPLE_RATE as usize * 3;
 /// 静かさを測る幅 (160ms) と刻み (20ms)
 const SPLIT_WINDOW_SAMPLES: usize = SAMPLE_RATE as usize * 16 / 100;
 const SPLIT_STEP_SAMPLES: usize = SAMPLE_RATE as usize * 2 / 100;
+/// 即確定 (`Running::finish`) の時、止める前に溜まっている音声を処理する上限
+/// (押した瞬間までの声を取りこぼさない。録音は続いているため、空になるまで待つと終わらないことがある)
+const FINISH_DRAIN_LIMIT: Duration = Duration::from_millis(300);
 /// デバイスが失われた時に開き直すまでの待ち (AirPods のプロファイル切り替え等が落ち着くまで)
 const REOPEN_DELAY: Duration = Duration::from_millis(500);
 /// 開き直してからこの時間内に再び失われたら諦める (開き直しは1回まで)
@@ -106,6 +109,8 @@ pub enum StartError {
 
 pub struct Running {
     stop: Arc<AtomicBool>,
+    /// 止める時に発話中のものも確定する (`finish`)。`stop` より先に立てる
+    finish: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -117,6 +122,13 @@ impl Running {
         if let Some(w) = self.worker.take() {
             let _ = w.join();
         }
+    }
+
+    /// 発話中のものを無音を待たずに確定してから録音を止める ([`Segmenter::finish_now`])。
+    /// 判定は処理スレッドで止める時点に行う (押した瞬間に話し始めた・話し終えた場合も食い違わない)
+    pub fn finish(self) {
+        self.finish.store(true, Ordering::SeqCst);
+        self.stop();
     }
 }
 
@@ -153,14 +165,16 @@ pub fn start(source: Source, sink: Arc<dyn PipelineSink>) -> Result<Running, Sta
     vad.reset();
     let stream = open(&source).map_err(StartError::Capture)?;
     let stop = Arc::new(AtomicBool::new(false));
-    let stop2 = stop.clone();
+    let finish = Arc::new(AtomicBool::new(false));
+    let (stop2, finish2) = (stop.clone(), finish.clone());
     let worker = std::thread::Builder::new()
         .name("mukuchi-pipeline".into())
-        .spawn(move || run(source, stream, vad, sink, stop2))
+        .spawn(move || run(source, stream, vad, sink, stop2, finish2))
         .context("処理スレッドを起動できません")
         .map_err(StartError::Capture)?;
     Ok(Running {
         stop,
+        finish,
         worker: Some(worker),
     })
 }
@@ -171,6 +185,7 @@ fn run(
     vad: SileroVad,
     sink: Arc<dyn PipelineSink>,
     stop: Arc<AtomicBool>,
+    finish: Arc<AtomicBool>,
 ) {
     let mut proc = Processor::new(vad, sink.clone());
     let mut reopened_at: Option<Instant> = None;
@@ -211,7 +226,20 @@ fn run(
             }
         }
     }
-    proc.stop();
+    if finish.load(Ordering::SeqCst) {
+        let deadline = Instant::now() + FINISH_DRAIN_LIMIT;
+        while Instant::now() < deadline {
+            match stream.rx.try_recv() {
+                Ok(AudioMsg::Samples(buf)) => {
+                    stream.resampler.push(&buf, |frame| proc.frame(frame))
+                }
+                _ => break,
+            }
+        }
+        proc.finish_now();
+    } else {
+        proc.stop();
+    }
 }
 
 /// フレーム単位の処理。スレッドから切り離してテストできるようにする。
@@ -347,6 +375,15 @@ impl<V: VoiceActivityDetector> Processor<V> {
             SegmentEvent::Misfire => self.sink.utterance_discarded(id),
             SegmentEvent::Started => {}
         }
+    }
+
+    /// 即確定して止める時。話している最中でも確定する (短すぎれば破棄)。
+    pub fn finish_now(&mut self) {
+        if let Some(e) = self.segmenter.finish_now() {
+            self.deliver(e);
+        }
+        self.current = None;
+        self.vad.reset();
     }
 
     /// OFF・停止時。話し終わりの無音待ちなら確定し、話している最中なら破棄する。
@@ -660,6 +697,36 @@ mod tests {
         let log = sink.log.lock().unwrap();
         assert_eq!(log.first().map(String::as_str), Some("start 1"));
         assert_eq!(log.last().map(String::as_str), Some("end 1"));
+    }
+
+    #[test]
+    fn finish_now_finalizes_during_speech() {
+        let sink = Arc::new(Sink::default());
+        let mut p = Processor::new(Scripted(vec![0.9; 20], 0), sink.clone());
+        let loud = vec![0.3f32; FRAME_SAMPLES];
+        for _ in 0..20 {
+            p.frame(&loud);
+        }
+        p.finish_now();
+        let log: Vec<String> = sink
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| !l.starts_with("partial"))
+            .cloned()
+            .collect();
+        assert_eq!(log, vec!["start 1", "end 1"]);
+
+        // 短すぎる発話は破棄、発話していなければ何も出さない
+        let sink = Arc::new(Sink::default());
+        let mut p = Processor::new(Scripted(vec![0.9; 3], 0), sink.clone());
+        for _ in 0..3 {
+            p.frame(&loud);
+        }
+        p.finish_now();
+        p.finish_now();
+        assert_eq!(*sink.log.lock().unwrap(), vec!["start 1", "discard 1"]);
     }
 
     #[test]

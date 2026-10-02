@@ -82,9 +82,21 @@ export type Settings = {
   setupCompleted: boolean;
   /** パネルの表示形式。compact はマイクの円形ボタンのみ (プレビュー・文言なし) */
   panelStyle: PanelStyle;
+  /** 入力モード (docs/architecture.md「決定事項」の入力モード) */
+  inputMode: InputMode;
+  /**
+   * グローバルショートカット。null は無効。形式は「修飾+…+キー」: 修飾は Ctrl・Alt・Shift・Cmd をこの順で1つ以上、
+   * キーは KeyboardEvent.code (例 "Alt+Space" "Shift+Cmd+KeyM")。
+   * 登録できなければ (形式の誤り・OS が拒否) update_settings は保存せずに reject する。他アプリと同じキーでも登録は成功しうる (衝突は検出できない)
+   */
+  shortcut: string | null;
 };
 
 export type PanelStyle = "full" | "compact";
+/** continuous: ON の間ずっと発話ごとに入力 (常に聞き取る)。oneShot: 1発話を確定したら自動で OFF (1回ずつ聞き取る) */
+export type InputMode = "continuous" | "oneShot";
+/** error: 起動時などに登録できなかった時の表示用 (日本語) */
+export type ShortcutStatus = { shortcut: string | null; registered: boolean; error: string | null };
 
 export type MicrophonePermission = "granted" | "denied" | "not_determined";
 export type Permissions = {
@@ -175,6 +187,9 @@ export function runCommand(p: Promise<unknown>): void {
 export const commands = {
   getStatus: () => call<AppStatus>("get_status"),
   setListening: (on: boolean) => call<void>("set_listening", { on }),
+  getShortcutStatus: () => call<ShortcutStatus>("get_shortcut_status"),
+  /** ショートカットの記録中に登録を一時解除する (記録中に押したキーで ON/OFF しないため)。終わったら必ず false で戻す */
+  setShortcutSuspended: (suspended: boolean) => call<void>("set_shortcut_suspended", { suspended }),
   getSettings: () => call<Settings>("get_settings"),
   updateSettings: (patch: Partial<Settings>) => call<Settings>("update_settings", { patch }),
   listInputDevices: () => call<AudioDevice[]>("list_input_devices"),
@@ -226,6 +241,7 @@ export type EventMap = {
   "settings-navigate": { category: SettingsCategory };
   "panel-anchor": PanelAnchor;
   "permissions-changed": Permissions;
+  "shortcut-status-changed": ShortcutStatus;
   "provisioning-progress": ProvisioningStatus;
   // マイクの接続・切断。変化後の一覧を送る (Rust が送らない版でも購読は無害)
   "input-devices-changed": AudioDevice[];

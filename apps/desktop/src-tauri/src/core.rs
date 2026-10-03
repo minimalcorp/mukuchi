@@ -27,6 +27,7 @@ use crate::settings::{InputMode, Settings, SettingsStore};
 use crate::shortcut::{PluginRegistrar, ShortcutManager};
 use crate::state::{AppError, ErrorCode, StateManager, DONE_DISPLAY};
 use crate::storage::{self, DevScope, UninstallContext};
+use crate::update::UpdateManager;
 use crate::vad::VadParams;
 
 pub mod events {
@@ -56,6 +57,9 @@ pub const ENV_DEV_NO_PARTIAL: &str = "MUKUCHI_DEV_NO_PARTIAL";
 /// 開発用: 設定するとそのアプリ (bundle id) が前面にある時だけ入力する。
 /// 自動テストで利用者のアプリに入力しないため (デバッグビルドのみ)
 pub const ENV_DEV_TARGET_BUNDLE: &str = "MUKUCHI_DEV_TARGET_BUNDLE";
+
+/// アップデートのインストール中 (再起動待ちを含む) に他の操作を拒む文言
+const MSG_INSTALLING_UPDATE: &str = "アップデートをインストールしています";
 
 /// ON の間に ASR サーバーの死活を確かめる間隔
 const HEALTH_INTERVAL: Duration = Duration::from_secs(5);
@@ -185,6 +189,9 @@ pub struct Core {
     pub models: Arc<ModelManager>,
     /// モデルの切り替え中 (select_model)。切り替え・削除・restart_asr を重ねない
     model_switch: tokio::sync::Mutex<()>,
+    /// セットアップ・モデルの取得の開始と、アップデートのインストールの開始前の確認を直列にする
+    /// (確認と開始の間に割り込まれないように)。await を挟んで持たない
+    update_gate: std::sync::Mutex<()>,
     /// 新しいモデルで起動できるかを確かめている間 (select_model)。この間の異常終了は停止エラーにしない
     trying_model: std::sync::atomic::AtomicBool,
     /// アプリの終了中 (切り替えの失敗で元のモデルを起動し直さない)
@@ -203,6 +210,7 @@ pub struct Core {
     pub shortcut: ShortcutManager,
     /// 1回ずつ聞き取るの無発話タイマーの世代。張り直し・取り消しのたびに進め、古いタイマーを無効にする
     no_speech_timer: AtomicU64,
+    pub updates: Arc<UpdateManager>,
 }
 
 impl Core {
@@ -247,6 +255,7 @@ impl Core {
         let shortcut = ShortcutManager::new(PluginRegistrar(app.clone()), move |status| {
             let _ = emit_app.emit(events::SHORTCUT_STATUS_CHANGED, status);
         });
+        let updates = UpdateManager::new(app.clone());
         let core = Arc::new(Self {
             app,
             settings: SettingsStore::load(paths.settings()),
@@ -258,6 +267,7 @@ impl Core {
             provisioning,
             models,
             model_switch: tokio::sync::Mutex::new(()),
+            update_gate: std::sync::Mutex::new(()),
             trying_model: std::sync::atomic::AtomicBool::new(false),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             asr: RwLock::new(None),
@@ -270,6 +280,7 @@ impl Core {
             toggle_lock: tokio::sync::Mutex::new(()),
             shortcut,
             no_speech_timer: AtomicU64::new(0),
+            updates,
         });
         let app = core.app.clone();
         core.state.subscribe(move |status| {
@@ -331,6 +342,13 @@ impl Core {
         let core = self.clone();
         tauri::async_runtime::spawn(async move { core.connect_asr().await });
         self.clone().spawn_health_monitor();
+        let weak = Arc::downgrade(self);
+        self.updates.spawn_scheduler(move || {
+            weak.upgrade().is_some_and(|c| {
+                let s = c.settings.get();
+                s.auto_check_updates && s.setup_completed
+            })
+        });
         Ok(())
     }
 
@@ -562,10 +580,7 @@ impl Core {
         if self.managed_asr() {
             self.set_listening(false).await?;
         }
-        let _switch = self
-            .model_switch
-            .try_lock()
-            .map_err(|_| anyhow!("モデルを切り替え中です"))?;
+        let _switch = self.lock_model_switch()?;
         // 削除が終わるまでセットアップ・モデルの取得・サーバーの起動をさせない (落とすと解除)
         let _suspended = self.provisioning.suspend().await?;
         let _models_suspended = self.models.suspend().await?;
@@ -634,10 +649,7 @@ impl Core {
             storage::check_app_bundle(ctx.app_bundle.as_deref(), ctx.dev.is_some())
         })??;
         // モデルの切り替え中は行わない (切り替えの失敗で元のモデルを起動し直してしまうため)
-        let _switch = self
-            .model_switch
-            .try_lock()
-            .map_err(|_| anyhow!("モデルを切り替え中です"))?;
+        let _switch = self.lock_model_switch()?;
         let suspended = if dry_run {
             None
         } else {
@@ -668,6 +680,66 @@ impl Core {
             self.app.exit(0);
         }
         Ok(())
+    }
+
+    /// アップデートをインストールして再起動する (docs/architecture.md「アップデート」)。
+    /// セットアップ・モデルの取得・切り替え・削除・アンインストールの実行中はエラー
+    /// (再起動でそれらが途中で切れ、.app の置き換えと削除が重なるため)。
+    /// 確認の後、置き換えが終わるまで model_switch を持ち、切り替え・削除・アンインストールを始めさせない
+    pub async fn install_update(self: &Arc<Self>) -> Result<()> {
+        const BUSY: &str = "ダウンロード・削除の実行中は更新できません";
+        let mut switch = None;
+        let result = self
+            .updates
+            .install(|| async {
+                let guard = self.model_switch.try_lock().map_err(|_| anyhow!(BUSY))?;
+                {
+                    // ここでは既に installing。gate の中で確かめ、以後の開始 (start_provisioning・
+                    // download_model) は installing を見て拒まれる
+                    let _gate = self.update_gate();
+                    if self.provisioning.is_running()
+                        || self.provisioning.is_suspended()
+                        || self.models.is_busy()
+                    {
+                        return Err(anyhow!(BUSY));
+                    }
+                }
+                switch = Some(guard);
+                self.set_listening(false).await
+            })
+            .await;
+        drop(switch);
+        result
+    }
+
+    fn update_gate(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.update_gate.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// 切り替え・削除・restart_asr・アンインストールの前に model_switch を取る。アップデートのインストール中
+    /// (置き換え中は model_switch を持ち、置き換えの後は再起動待ち) は理由を分けて拒む
+    fn lock_model_switch(&self) -> Result<tokio::sync::MutexGuard<'_, ()>> {
+        if self.updates.is_installing() {
+            return Err(anyhow!(MSG_INSTALLING_UPDATE));
+        }
+        self.model_switch.try_lock().map_err(|_| {
+            if self.updates.is_installing() {
+                anyhow!(MSG_INSTALLING_UPDATE)
+            } else {
+                anyhow!("モデルを切り替え中です")
+            }
+        })
+    }
+
+    /// セットアップの開始・再開 (start_provisioning)。アップデートのインストール中は何もしない
+    /// (削除の実行中と同じく無視する。再起動後に続きから再開できる)
+    pub fn start_provisioning(&self) {
+        let _gate = self.update_gate();
+        if self.updates.is_installing() {
+            log::info!("アップデートのインストール中のためセットアップを開始しない");
+            return;
+        }
+        self.provisioning.start();
     }
 
     /// アプリ終了時: セットアップ (uv・ダウンロード・動作確認) と ASR サーバーを止める
@@ -732,10 +804,7 @@ impl Core {
         if self.provisioning.is_suspended() {
             return Err(anyhow!("削除を実行中です"));
         }
-        let _switch = self
-            .model_switch
-            .try_lock()
-            .map_err(|_| anyhow!("モデルを切り替え中です"))?;
+        let _switch = self.lock_model_switch()?;
         if self.managed_asr() {
             if !self.provisioning.is_done() {
                 return Err(anyhow!("実行環境とモデルが導入されていません"));
@@ -785,6 +854,10 @@ impl Core {
 
     pub fn download_model(&self, id: &str) -> Result<()> {
         self.check_models_available()?;
+        let _gate = self.update_gate();
+        if self.updates.is_installing() {
+            return Err(anyhow!(MSG_INSTALLING_UPDATE));
+        }
         self.models.download(id)
     }
 
@@ -811,20 +884,14 @@ impl Core {
         }
         self.check_models_available()?;
         // 切り替えの失敗で元のモデルに戻す間に、元のモデルを消させない
-        let _switch = self
-            .model_switch
-            .try_lock()
-            .map_err(|_| anyhow!("モデルを切り替え中です"))?;
+        let _switch = self.lock_model_switch()?;
         self.models.delete(id)
     }
 
     /// 使うモデルを切り替え、新しいモデルでサーバーを起動し直して準備完了まで待つ。
     /// 準備完了にならなければ元のモデルに戻して起動し直し、エラーを返す
     pub async fn select_model(self: &Arc<Self>, id: &str) -> Result<()> {
-        let _switch = self
-            .model_switch
-            .try_lock()
-            .map_err(|_| anyhow!("モデルを切り替え中です"))?;
+        let _switch = self.lock_model_switch()?;
         self.check_models_available()?;
         let prev = self.models.selected();
         if prev.id == id {
@@ -1199,6 +1266,12 @@ impl Core {
         if before.setup_completed != next.setup_completed {
             crate::tray::refresh_menu(&self.app);
         }
+        if before.setup_completed != next.setup_completed
+            || before.auto_check_updates != next.auto_check_updates
+        {
+            // 自動確認の条件が変わった: すぐに見直す (止める時は次の時期に確認しないだけ)
+            self.updates.wake();
+        }
         if before.panel_position != next.panel_position {
             crate::windows::on_settings_panel_position(&self.app, next.panel_position.clone());
         }
@@ -1231,6 +1304,7 @@ impl Core {
                 )?;
                 let _ = self.app.emit(events::SETTINGS_CHANGED, &next);
                 crate::tray::refresh_menu(&self.app);
+                self.updates.wake();
                 Ok(())
             }
         }

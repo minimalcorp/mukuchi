@@ -21,13 +21,25 @@ import type {
   ProvisioningStatus,
   Settings,
   SettingsCategory,
+  UpdateStatus,
   Utterance,
   UtteranceResult,
 } from "@/lib/ipc";
 import { devOverrides } from "@/lib/env";
 import { formatShortcut } from "@/lib/shortcut";
 import { findScenario } from "./scenarios";
-import { createDb, model, provisioning, visibleModels, GB, MODEL_TOTAL, type MockDb, type ModelId } from "./data";
+import {
+  createDb,
+  model,
+  provisioning,
+  updateStatus,
+  visibleModels,
+  GB,
+  MODEL_TOTAL,
+  UPDATE_TOTAL,
+  type MockDb,
+  type ModelId,
+} from "./data";
 
 const HOME = "/Users/you";
 const RUNTIME_MISSING: AppError = {
@@ -215,6 +227,25 @@ export function installMock(params: URLSearchParams) {
       }
       const eta = modelTicks < 8 ? null : Math.round(((m.sizeBytes - next) / (0.1 * GB)) * 0.25);
       patchModel(id, { bytesDone: next, diskBytes: next, etaSeconds: eta });
+    }, 250);
+  };
+
+  // Rust のアップデートを模す: 確認は約0.6秒。新しい版 (db.updateLatest) があれば 4 MB / 250ms で取得して ready
+  let updateTimer: ReturnType<typeof setInterval> | null = null;
+  const setUpdate = (patch: Partial<UpdateStatus>) => {
+    db.update = { ...db.update, ...patch };
+    fire("update-status-changed", db.update);
+  };
+  const startUpdateTicker = () => {
+    updateTimer = setInterval(() => {
+      const next = Math.min(UPDATE_TOTAL, db.update.bytesDone + 4_000_000);
+      if (next >= UPDATE_TOTAL) {
+        if (updateTimer) clearInterval(updateTimer);
+        updateTimer = null;
+        setUpdate({ state: "ready", bytesDone: UPDATE_TOTAL });
+      } else {
+        setUpdate({ bytesDone: next });
+      }
     }, 250);
   };
 
@@ -420,6 +451,32 @@ export function installMock(params: URLSearchParams) {
           return null;
         case "get_panel_anchor":
           return db.anchor;
+        case "get_update_status":
+          return db.update;
+        case "check_for_update": {
+          // unavailable・実行中は何もせず今の状態を返す
+          const st = db.update.state;
+          if (st === "unavailable" || st === "checking" || st === "downloading" || st === "installing") return db.update;
+          setUpdate({ state: "checking", error: null });
+          await new Promise((r) => setTimeout(r, 600));
+          const checkedAt = Math.floor(Date.now() / 1000);
+          if (db.updateLatest == null) {
+            setUpdate({ state: "idle", latestVersion: null, checkedAt });
+          } else {
+            setUpdate({ ...updateStatus("downloading", { latestVersion: db.updateLatest, bytesDone: 0 }), checkedAt });
+            startUpdateTicker();
+          }
+          return db.update;
+        }
+        case "install_update":
+          if (db.update.state !== "ready") throw "インストールできるアップデートがありません";
+          if (db.updateInstallError != null) {
+            setUpdate({ state: "error", error: db.updateInstallError });
+            throw db.updateInstallError;
+          }
+          // 実機は成功すると返らずに再起動する。モックは installing のまま止める
+          setUpdate({ state: "installing" });
+          return new Promise(() => {});
         case "get_app_info":
           return { version: "0.1.0", build: "42" };
         default:

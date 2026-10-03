@@ -30,7 +30,8 @@
 #   build … pnpm install・cargo で署名なしの .app と、dmgbuild で .dmg のテンプレート (背景・アイコン位置。.app なし) を作る。
 #           依存 (postinstall・build.rs 等の第三者のコード) が動くため secret を一切渡さない (environment も付けない)。
 #           両方を tar にして artifact で渡す
-#   sign  … 依存を入れず、ビルドもしない。受け取った .app を Apple のツールだけで署名・公証し、テンプレートに入れて .dmg にする
+#   sign  … 依存を入れず、ビルドもしない。受け取った .app を Apple のツールだけで署名・公証し、テンプレートに入れて .dmg にする。
+#           updater 用に staple 済みの .app の tar.gz も作る (署名 (.sig)・latest.json は publish-desktop が作る)
 #           (テンプレートは入れる前に apps/desktop/scripts/check-dmg-layout.py で余計なファイルがないことを確かめる)。
 #           ビルドした本体を実行する検証 (verify-macos.sh の --print-uv-path) は資格情報を片付けた後に行う
 # 同じ job の別 step にしないのは、ビルド中に起動されたプロセスが job の終わりまで残り、後の step の secret や
@@ -43,6 +44,8 @@
 #   APPLE_API_ISSUER            同 Issuer ID
 #   APPLE_API_KEY_P8            同 .p8 ファイルの中身 (PEM テキストそのまま)
 #   RELEASE_DEPLOY_KEY          main へ push する Deploy Key (write) の秘密鍵 (production-web にも同じもの)
+#   TAURI_SIGNING_PRIVATE_KEY   updater の署名鍵 (tauri signer generate の秘密鍵ファイルの中身。publish-desktop の署名の step だけが読む)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  同パスワード
 # production-web の変数: AWS_DEPLOY_ROLE_ARN・AWS_REGION・MUKUCHI_WEB_CERT_ARN (OIDC で AWS のロールを引き受ける。長期の鍵を置かない。
 # 手順は .claude/plans/aws-web-deploy-setup.md)
 name: Release
@@ -284,7 +287,7 @@ jobs:
       - name: Verify
         run: apps/desktop/scripts/verify-macos.sh
 
-      # 添付は版番号なしの mukuchi_aarch64.dmg (と .sha256) だけにする。LP は固定 URL
+      # 添付は版番号なしの mukuchi_aarch64.dmg (と .sha256) と updater 用の mukuchi_aarch64.app.tar.gz。LP は固定 URL
       # https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg を使い (latest/download は
       # 公開済みでプレリリースでない「Latest」の Release の添付を返す)、版は Release のタイトル・タグで分かるため。
       # 出典: https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases
@@ -300,6 +303,13 @@ jobs:
           /bin/cp -p "$src" "$out/mukuchi_aarch64.dmg"
           # .sha256 は添付のファイル名で書く (ダウンロードした名前のまま shasum -c で確かめられるように)
           (cd "$out" && shasum -a 256 mukuchi_aarch64.dmg > mukuchi_aarch64.dmg.sha256)
+          # updater 用 (build-macos.sh --sign-only が staple 後の .app から作り、Verify で中身・署名を確かめ済み)。
+          # .sha256 は publish-desktop での確認用で、Release には添付しない (署名は latest.json が持つ)
+          /bin/cp -p apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/updater/mukuchi_aarch64.app.tar.gz "$out/"
+          (cd "$out" && shasum -a 256 mukuchi_aarch64.app.tar.gz > mukuchi_aarch64.app.tar.gz.sha256)
+          # 最上位が mukuchi.app/ であること (updater は先頭のパス要素を捨てて展開する) を記録に残す
+          /usr/bin/tar -tzf "$out/mukuchi_aarch64.app.tar.gz" | head -n 5
+          python3 apps/desktop/scripts/check-updater-archive.py "$out/mukuchi_aarch64.app.tar.gz"
       # publish が失敗した時に手で Release を作り直せるよう数日残す
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -343,7 +353,7 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP/release"
           ls -l
-          sha256sum -c mukuchi_aarch64.dmg.sha256
+          sha256sum -c mukuchi_aarch64.dmg.sha256 mukuchi_aarch64.app.tar.gz.sha256
       - name: Bump version (same commit as build)
         env:
           BUMP: ${{ inputs.bump }}
@@ -352,6 +362,22 @@ jobs:
         run: scripts/release-commit.sh desktop "$BUMP" "$EPOCH" "$COMMIT"
       - name: Check main and tag
         run: scripts/release-push.sh --check-only "$TAG" "$GITHUB_SHA"
+      # updater の署名と latest.json (docs/architecture.md「アップデート」)。署名鍵はこの step にだけ渡す。
+      # scripts/sign-updater.mjs は Node の標準ライブラリだけで minisign 形式の署名を作り、tauri.conf.json の
+      # plugins.updater.pubkey (このコミットの .app に入っている公開鍵) で検証してから書く。
+      # trusted comment に版を入れる (requireSignedVersion)。url は版付き (Latest が変わっても版と中身がずれない)
+      - name: Sign updater archive (latest.json)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/updater"
+          mkdir -p "$out"
+          node scripts/sign-updater.mjs --file "$RUNNER_TEMP/release/mukuchi_aarch64.app.tar.gz" --version "$VERSION" \
+            --url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/mukuchi_aarch64.app.tar.gz" \
+            --pubkey-config apps/desktop/src-tauri/tauri.conf.json --out "$out"
+          cat "$out/latest.json"
       # 下書きは contents: write のトークンでないと見えないため、ここで下書きを含めて確かめる
       - name: Create draft release
         id: draft
@@ -373,7 +399,8 @@ jobs:
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
             --title "mukuchi $VERSION" --notes "macOS (Apple Silicon) / Developer ID 署名・公証済み" \
             --generate-notes "${start[@]}" \
-            "$out/mukuchi_aarch64.dmg" "$out/mukuchi_aarch64.dmg.sha256"
+            "$out/mukuchi_aarch64.dmg" "$out/mukuchi_aarch64.dmg.sha256" \
+            "$out/mukuchi_aarch64.app.tar.gz" "$RUNNER_TEMP/updater/latest.json"
       - name: Push version bump and tag
         id: push
         run: scripts/release-push.sh "$TAG" "$GITHUB_SHA"
@@ -386,6 +413,25 @@ jobs:
           latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
           [ "$latest" = "$TAG" ] || { echo "::error::Latest の Release が $latest ($TAG でない)"; exit 1; }
           echo "https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
+      # アプリの endpoint (releases/latest/download/latest.json) がこの版の latest.json を返すこと。
+      # 公開済みなので、ここで失敗しても取り消さない。job は失敗にせず警告に留める
+      # (失敗にすると deploy-web-for-desktop が skip され、LP の版の表示だけ古いまま残るため。docs/release.md の「失敗した時」)
+      - name: Check updater endpoint
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
+          for _ in 1 2 3 4 5 6; do
+            if curl -fsSL --retry 2 -o "$RUNNER_TEMP/latest-check.json" "$url" \
+              && cmp -s "$RUNNER_TEMP/latest-check.json" "$RUNNER_TEMP/updater/latest.json"; then
+              echo "updater: $url → $VERSION" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning::$url がこの版の latest.json を返さない (アプリは前の版のままになる)"
+          cat "$RUNNER_TEMP/latest-check.json" 2>/dev/null || true
+          exit 1
       # push できなかった時は公開しない。下書きを消して、同じ版で実行し直せるようにする
       # (push 済みで公開だけ失敗した時は下書きを残す。docs/release.md の「失敗した時」)
       - name: Delete draft release (push failed)

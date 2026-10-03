@@ -651,6 +651,13 @@ impl Provisioner {
         self.suspended.load(Ordering::SeqCst)
     }
 
+    /// 実行中 (uv・ダウンロード・動作確認) か。アップデートのインストールを拒む判定に使う
+    pub fn is_running(&self) -> bool {
+        lock(&self.running)
+            .as_ref()
+            .is_some_and(|r| !*r.finished.borrow())
+    }
+
     /// アプリの終了時: 実行中のもの (uv・ダウンロード・動作確認) を止め、終わるまで最大 `timeout` 待つ。
     /// async ランタイムの外 (イベントループ) から呼ぶため同期で待つ
     pub fn shutdown_blocking(&self, timeout: Duration) {

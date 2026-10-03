@@ -13,6 +13,7 @@ import {
   type ProvisioningStatus,
   type Settings,
   type ShortcutStatus,
+  type UpdateStatus,
 } from "./ipc";
 
 export function useAppStatus(): AppStatus | null {
@@ -119,6 +120,44 @@ export function useProvisioning(): ProvisioningStatus | null {
   const [status, setStatus] = useState<ProvisioningStatus | null>(null);
   useEffect(() => subscribeWithInitial("provisioning-progress", commands.getProvisioningStatus, setStatus), []);
   return status;
+}
+
+/**
+ * アップデートの状態。null は取得前。取得の失敗は error に入れる (状態が無くてもこの画面の他の項目は使えるため)。
+ * applyResponse は check_for_update の応答を反映する。呼んでから状態を受け取っていれば (event・再取得)
+ * 応答は古い可能性があるので捨てる (取得中は約4Hz で進捗が届き、応答の bytesDone で巻き戻さないため)
+ */
+export function useUpdateStatus(): {
+  status: UpdateStatus | null;
+  error: string | null;
+  applyResponse: (p: Promise<UpdateStatus>) => Promise<void>;
+} {
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const received = useRef(0);
+  useEffect(
+    () =>
+      subscribeWithInitial(
+        "update-status-changed",
+        () =>
+          commands.getUpdateStatus().catch((e: unknown) => {
+            setError(errorMessage(e));
+            throw e;
+          }),
+        (s) => {
+          received.current += 1;
+          setStatus(s);
+          setError(null);
+        },
+      ),
+    [],
+  );
+  const applyResponse = useCallback(async (p: Promise<UpdateStatus>) => {
+    const at = received.current;
+    const s = await p;
+    if (received.current === at) setStatus(s);
+  }, []);
+  return { status, error, applyResponse };
 }
 
 /** モデルの一覧。null は取得前。取得の失敗は error に入れる (一覧が無くても他の設定は使えるため) */

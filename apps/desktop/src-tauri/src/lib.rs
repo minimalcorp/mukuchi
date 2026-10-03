@@ -16,6 +16,7 @@ mod shortcut;
 mod state;
 mod storage;
 mod tray;
+mod update;
 mod vad;
 mod voice_command;
 mod windows;
@@ -114,6 +115,8 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_nspanel::init())
+        // Rust からのみ使う (update.rs)。JS 用の command は capabilities で許可していない
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // 登録は Core (shortcut.rs) が設定に従って行う。押した時だけ反応する (離した時は無視)
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -245,6 +248,9 @@ pub fn run() {
             commands::list_running_apps,
             commands::open_logs_folder,
             commands::get_app_info,
+            commands::get_update_status,
+            commands::check_for_update,
+            commands::install_update,
             commands::open_settings,
             commands::open_setup,
             commands::complete_setup,
@@ -257,7 +263,8 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|app, event| match event {
-        // 最後のウィンドウが閉じても終了しない。明示的な終了 (app.exit) は code 付きで来る
+        // 最後のウィンドウが閉じても終了しない。明示的な終了 (app.exit) は code 付きで来る。
+        // アップデート後の再起動 (request_restart) も code (RESTART_EXIT_CODE) 付きで、RunEvent::Exit を経て起動し直す
         RunEvent::ExitRequested { api, code, .. } => {
             if code.is_none() {
                 api.prevent_exit();

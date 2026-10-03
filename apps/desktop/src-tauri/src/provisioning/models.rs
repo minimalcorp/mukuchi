@@ -749,6 +749,14 @@ impl ModelManager {
         Ok(guard)
     }
 
+    /// 取得・削除の実行中か (アンインストール等の削除中を含む)。アップデートのインストールを拒む判定に使う
+    pub fn is_busy(&self) -> bool {
+        let inner = lock(&self.inner);
+        inner.suspended
+            || !inner.removing.is_empty()
+            || inner.active.as_ref().is_some_and(|a| a.running())
+    }
+
     /// 全モデルを消した後: 進捗を捨て、選択を既定に戻す (記録ごと消えているため書き込まない)
     pub fn reset(&self) {
         lock(&self.inner).progress.clear();

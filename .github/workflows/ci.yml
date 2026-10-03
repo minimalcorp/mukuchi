@@ -109,7 +109,7 @@ jobs:
             '^\.github/workflows/(release|undeploy-web)\.yml$'
             # make build*・setup・reset・uninstall 用 (CI のどの job も実行しない)。RUST の3本は除く
             '^apps/desktop/scripts/(build-macos|dev-reset|setup|uninstall|verify-macos)\.sh$'
-            '^apps/desktop/scripts/(check-dmg-layout|dmg-settings|run-dmgbuild)\.py(\.lock)?$'
+            '^apps/desktop/scripts/(check-dmg-layout|check-updater-archive|dmg-settings|run-dmgbuild)\.py(\.lock)?$'
           )
 
           # 配列の正規表現を | でつないで1つでも当たれば 0

@@ -84,6 +84,8 @@ export type Settings = {
   panelStyle: PanelStyle;
   /** 入力モード (docs/architecture.md「決定事項」の入力モード) */
   inputMode: InputMode;
+  /** 自動でアップデートを確認・取得する (docs/architecture.md「アップデート」)。false でも手動の確認はできる */
+  autoCheckUpdates: boolean;
   /**
    * グローバルショートカット。null は無効。形式は「修飾+…+キー」: 修飾は Ctrl・Alt・Shift・Cmd をこの順で1つ以上、
    * キーは KeyboardEvent.code (例 "Alt+Space" "Shift+Cmd+KeyM")。
@@ -146,6 +148,25 @@ export type ModelInfo = {
 };
 export type AudioDevice = { id: string; name: string; isDefault: boolean };
 export type AppInfo = { version: string; build: string };
+export type UpdateState = "unavailable" | "idle" | "checking" | "downloading" | "ready" | "installing" | "error";
+/** 自動アップデートの状態 (docs/architecture.md「アップデート」) */
+export type UpdateStatus = {
+  /** unavailable: 開発ビルド・dmg から起動・App Translocation。idle: 未確認か最新 */
+  state: UpdateState;
+  currentVersion: string;
+  /** 見つかった新しい版 (downloading・ready・installing、取得・インストールの失敗時)。最新なら null */
+  latestVersion: string | null;
+  /** latest.json の notes */
+  notes: string | null;
+  /** downloading のみ意味がある */
+  bytesDone: number;
+  /** 大きさが分からなければ null */
+  bytesTotal: number | null;
+  /** 最後に確認が成功した時刻 (UNIX 秒。このプロセスでの値) */
+  checkedAt: number | null;
+  /** error・unavailable の時の表示用 (日本語) */
+  error: string | null;
+};
 export type UninstallTarget = { path: string; bytes: number };
 export type RunningApp = { bundleId: string; name: string };
 export type AudioLevel = { level: number; threshold: number; speech: boolean };
@@ -217,6 +238,11 @@ export const commands = {
   listRunningApps: () => call<RunningApp[]>("list_running_apps"),
   openLogsFolder: () => call<void>("open_logs_folder"),
   getAppInfo: () => call<AppInfo>("get_app_info"),
+  getUpdateStatus: () => call<UpdateStatus>("get_update_status"),
+  /** 手動の確認。確認が終わった時点の状態を返す (新しい版があれば取得を始めて downloading)。実行中なら今の状態を返す */
+  checkForUpdate: () => call<UpdateStatus>("check_for_update"),
+  /** ready の時にインストールして再起動する (成功すると返らない) */
+  installUpdate: () => call<void>("install_update"),
   openSettings: (category?: SettingsCategory) => call<void>("open_settings", { category }),
   /** panel の描画内容 (影の余白込み) の大きさ。論理ピクセル (CSS px) */
   setPanelSize: (width: number, height: number) => call<void>("set_panel_size", { width, height }),
@@ -246,6 +272,7 @@ export type EventMap = {
   // マイクの接続・切断。変化後の一覧を送る (Rust が送らない版でも購読は無害)
   "input-devices-changed": AudioDevice[];
   "models-changed": ModelInfo[];
+  "update-status-changed": UpdateStatus;
 };
 
 export type EventName = keyof EventMap;

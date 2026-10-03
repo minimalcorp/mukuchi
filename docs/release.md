@@ -1,6 +1,6 @@
 # リリース (署名・公証)
 
-配布物は Developer ID 署名 + 公証 (notarization) + staple 済みの `.dmg` のみ (Mac App Store は対象外)。
+配布物は Developer ID 署名 + 公証 (notarization) + staple 済みの `.dmg` と、自動アップデート用の同じ .app の `.app.tar.gz` (Mac App Store は対象外)。
 証明書・API キー・パスワードはリポジトリに置かない。
 
 ## 流れ (`make build` = `apps/desktop/scripts/build-macos.sh`)
@@ -9,14 +9,39 @@
 2. `tauri build --bundles app --no-sign` で .app。dmgbuild で .dmg のテンプレート (見た目だけ。.app なし) を作る (下記「.dmg の見た目」)
 3. `codesign --options runtime --timestamp --entitlements apps/desktop/src-tauri/Entitlements.plist` で .app に署名 (`--deep` なし。同梱 uv `Contents/Helpers/uv` は開発元の署名のまま)
 4. .app を zip にして `notarytool submit --wait` → `stapler staple`
-5. テンプレートに staple 済みの .app を `hdiutil`・`ditto` で入れて UDZO の .dmg にし、署名 → 公証 → staple
-6. `apps/desktop/scripts/verify-macos.sh` (`make verify`)
+5. staple 済みの .app を updater 用の tar.gz にする (下記「アップデートの配布物」)
+6. テンプレートに staple 済みの .app を `hdiutil`・`ditto` で入れて UDZO の .dmg にし、署名 → 公証 → staple
+7. `apps/desktop/scripts/verify-macos.sh` (`make verify`)
 
-生成物: `apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/mukuchi_<version>_aarch64.dmg`
+生成物 (`apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/` の下):
 
-手順 2 だけを `apps/desktop/scripts/build-macos.sh --build-only` (資格情報を見ない)、3〜5 だけを `--sign-only` (Apple のツールと標準ライブラリだけの python3 のみ。pnpm・cargo・uv の依存・本体を実行しない。6 は行わない) で実行できる。`make build` は両方を続けて行う。CI はこれを別 job に分け、第三者の依存が動くビルドを secret のない場所で行う。
+- `dmg/mukuchi_<version>_aarch64.dmg`
+- `updater/mukuchi_aarch64.app.tar.gz` (署名 (.sig)・`latest.json` は作らない。CI の publish-desktop が作る)
+
+手順 2 だけを `apps/desktop/scripts/build-macos.sh --build-only` (資格情報を見ない)、3〜6 だけを `--sign-only` (Apple のツールと標準ライブラリだけの python3 のみ。pnpm・cargo・uv の依存・本体を実行しない。7 は行わない) で実行できる。`make build` は両方を続けて行う。CI はこれを別 job に分け、第三者の依存が動くビルドを secret のない場所で行う。
 
 `make build-local` は手順 2・3 を ad-hoc 署名で行う (公証しない)。`make dmg-local` はそれに加えて .dmg を作る (署名・公証しない。ウィンドウの見た目の確認用)。`make verify` は ad-hoc の場合 Gatekeeper・公証・.dmg の署名の項目を SKIP と表示する。
+
+### アップデートの配布物
+
+仕様は docs/architecture.md の「アップデート」。Release `desktop-v<X.Y.Z>` に次の2つを添付する (.dmg と .dmg.sha256 に加えて):
+
+- `mukuchi_aarch64.app.tar.gz`: 公証・staple 済みの .app。最上位は `mukuchi.app/` (tauri-plugin-updater 2.13 は各エントリの先頭のパス要素を1つ捨てて展開し、.app と置き換える。`install_inner`)。`COPYFILE_DISABLE=1 /usr/bin/tar --no-mac-metadata --no-xattrs --no-acls --no-fflags` で AppleDouble (`._*`)・xattr を入れない。`apps/desktop/scripts/check-updater-archive.py` が最上位・余計なエントリがないこと・中身が .app と同じことを確かめる
+- `latest.json`: `{"version","pub_date","platforms":{"darwin-aarch64":{"signature","url"}}}`。url は版付き `https://github.com/minimalcorp/mukuchi/releases/download/desktop-v<X.Y.Z>/mukuchi_aarch64.app.tar.gz`。notes は書かない
+
+アプリは `https://github.com/minimalcorp/mukuchi/releases/latest/download/latest.json` を見る (公開済み・非プレリリースの Latest の添付)。
+
+platforms のキー: plugin は macOS で `darwin-aarch64-app` → `darwin-aarch64` の順に探す (`updater.rs` の `get_urls`。.app/.dmg は `app`)。前者のみだとバンドルの種類の判定 (`tauri_utils::platform::bundle_type`) に依存するため、後者だけを書く。
+
+#### アップデートの署名
+
+`scripts/sign-updater.mjs` (Node の標準ライブラリのみ。テスト `scripts/sign-updater.test.mjs`) が tauri signer と同じ形式で署名する (署名鍵を読む job で tauri-cli・minisign 等の第三者のコードを動かさないため)。形式は tauri-cli 2.12.0 が使う minisign crate 0.9.1 に合わせる:
+
+- 秘密鍵 (`TAURI_SIGNING_PRIVATE_KEY`): 鍵ファイルの中身 = base64 で包んだ minisign の秘密鍵 (`Ed`・`Sc` (scrypt)・`B2` (BLAKE2b-256 のチェックサム))。scrypt の N・r・p は鍵の opslimit・memlimit から minisign と同じ方法で決める (`tauri signer generate` の既定は N=2^15, r=8, p=1)
+- 署名: prehashed Ed25519 (`ED`。本体はファイルの BLAKE2b-512 に対する署名)。global signature は本体 + trusted comment に対する署名
+- trusted comment: `timestamp:<unix秒>\tfile:mukuchi_aarch64.app.tar.gz\tversion:<X.Y.Z>` (`tauri signer sign --app-version` と同じ)。plugin の `requireSignedVersion: true` が `version:` と `latest.json` の版の一致を見る
+- 書く前に `tauri.conf.json` の `plugins.updater.pubkey` で検証する (鍵の取り違えをリリース前に止める)
+- tauri signer は Ed25519 の nonce に乱数を混ぜるため、同じ入力でも署名のバイト列は毎回変わる (sign-updater.mjs は RFC 8032 どおり決定的)。どちらも同じ公開鍵で検証できる。テストは tauri signer の出力 (フィクスチャ) との形式の一致と相互の検証を確かめる。テストの鍵は `scripts/fixtures/updater-test-key/` のテスト専用の鍵 (本番と無関係)
 
 ### .dmg の見た目
 
@@ -67,18 +92,43 @@ notarytool で使えるのは **Team キー** のみ (Individual キーは notar
   ```
   (API キーの変数が1つでもあればプロファイルより優先する)
 
-### 3. GitHub Actions (`.github/workflows/release.yml`) の secret・変数
+### 3. updater の署名鍵
+
+一度作ったら変えない (変えると既存の利用者に更新を届けられない。下記)。
+
+1. 鍵を作る (パスワードを付ける。パスワードは対話入力):
+   ```sh
+   pnpm -C apps/desktop tauri signer generate -w ~/.config/mukuchi/updater.key
+   ```
+   `~/.config/mukuchi/updater.key` (秘密鍵。リポジトリに置かない) と `.pub` (公開鍵) ができる
+2. 公開鍵 (`.pub` の中身そのまま) を `apps/desktop/src-tauri/tauri.conf.json` の `plugins.updater.pubkey` に書いて PR で入れる
+3. secret に登録する:
+   ```sh
+   R=minimalcorp/mukuchi
+   gh secret set TAURI_SIGNING_PRIVATE_KEY -R $R --env production-desktop < ~/.config/mukuchi/updater.key
+   gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD -R $R --env production-desktop   # 対話入力
+   ```
+4. 秘密鍵ファイルとパスワードを GitHub の外 (パスワードマネージャー等) に保管する。GitHub の secret は読み出せないため、ここが唯一の控えになる。保管したら手元の `updater.key` は消してよい
+
+鍵を失った・漏れた時:
+
+- 失った (秘密鍵かパスワード): 既存の利用者 (今の公開鍵を持つ .app) には以後の更新を届けられない。新しい鍵を作って 1〜3 を行い、次の版を出す。既存の利用者は LP から .dmg を入れ直す必要がある (アプリ内では「確認」は失敗し続ける)。告知する
+- 漏れた: 偽の更新を作れるが、配るには `latest.json` (このリポジトリの Latest の Release) を書き換える必要がある。すぐに新しい鍵に替える (失った時と同じ)。漏れた鍵で署名した版が出ていないか Release を確認する
+- 計画的に替える: 新しい公開鍵を入れた版を **古い鍵で** 署名して出し、その次の版から新しい鍵で署名する (secret を差し替える)。その間の版を入れなかった利用者は、次の版の検証に失敗する (Latest しか見ないため)
+
+### 4. GitHub Actions (`.github/workflows/release.yml`) の secret・変数
 
 Environment は3つ。どれも deployment branch policy は `main` のみ。値は Environment の secret・変数に登録し、repo secret にはしない (その Environment を指定した job だけが読める)。作成は `.claude/plans/github-setup.md`。
 
 | Environment | 用途 | 承認者 (Required reviewers) | secret | 変数 |
 |---|---|---|---|---|
 | `release-approval` | 承認専用 (`approve` job。Release・Undeploy web の先頭で1回) | あり | なし (置かない) | なし |
-| `production-desktop` | desktop の署名・公証・公開 | なし | `APPLE_CERTIFICATE` `APPLE_CERTIFICATE_PASSWORD` `APPLE_API_KEY` `APPLE_API_ISSUER` `APPLE_API_KEY_P8` `RELEASE_DEPLOY_KEY` | - |
+| `production-desktop` | desktop の署名・公証・公開 | なし | `APPLE_CERTIFICATE` `APPLE_CERTIFICATE_PASSWORD` `APPLE_API_KEY` `APPLE_API_ISSUER` `APPLE_API_KEY_P8` `RELEASE_DEPLOY_KEY` `TAURI_SIGNING_PRIVATE_KEY` `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | - |
 | `production-web` | web のデプロイ・版上げの push・撤去 | なし | `RELEASE_DEPLOY_KEY` | `AWS_DEPLOY_ROLE_ARN` `AWS_REGION` `MUKUCHI_WEB_CERT_ARN` |
 
 - `release-approval` の作り方: Settings > Environments > New environment で `release-approval` を作り、Required reviewers に承認者を入れる (必要なら Prevent self-review)。Deployment branches and tags は Selected branches and tags で `main` のみ。secret・変数は置かない
 - `production-desktop` / `production-web`: Required reviewers は付けない (付けるとその job でもう一度承認待ちになる)。Deployment branches は `main` のみ。secret・変数はここに置く
+- `TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD`: updater の署名鍵 (上の「3. updater の署名鍵」)。publish-desktop の署名の step だけに渡す
 - `RELEASE_DEPLOY_KEY`: 書き込み可の Deploy key の秘密鍵 (両 Environment に同じもの)。main の ruleset の bypass に Deploy key を入れ、版上げコミットとタグを push する
 - AWS の OIDC 用 IAM ロールの信頼ポリシーの `sub` は `repo:minimalcorp@93655726/mukuchi@1396207519:environment:production-web` (手順は `.claude/plans/aws-web-deploy-setup.md`)。このリポジトリは OIDC の immutable subject (所有者・リポジトリの ID 付き) が有効なため、`repo:minimalcorp/mukuchi:...` では一致しない。現在の形式は `gh api repos/minimalcorp/mukuchi/actions/oidc/customization/sub` の `sub_claim_prefix` で確かめる
 
@@ -120,12 +170,14 @@ jobs: `approve` (承認) → `prepare` → `build` → `sign` → `publish-deskt
 1. `Approve` (`release-approval`): 承認を待つだけ。承認後の job は承認を求めない
 2. `Prepare`: main 以外からの実行を止める → 版上げコミットをローカルで作る → 同じタグ・公開済みの Release があれば止める
 3. `Build unsigned .app` (secret なし): Kyoko の有無を確認 → 同じ版上げコミットを作る (ID を確認) → `pnpm install --frozen-lockfile` → `build-macos.sh --build-only`。.app と .dmg テンプレートを artifact で渡す
-4. `Sign and notarize (.dmg)` (`production-desktop`): .app の版を確認 → 証明書を一時キーチェーンに入れて `build-macos.sh --sign-only` → 資格情報を削除 → `verify-macos.sh` → 添付を用意して artifact `mukuchi-dmg-signed` (7日保存) にする。添付は `mukuchi_aarch64.dmg` と `mukuchi_aarch64.dmg.sha256` の2つ (版番号なし。LP の固定 URL 用。版は Release のタイトル・タグで分かる)
+4. `Sign and notarize (.dmg)` (`production-desktop`): .app の版を確認 → 証明書を一時キーチェーンに入れて `build-macos.sh --sign-only` (updater 用の tar.gz も作る) → 資格情報を削除 → `verify-macos.sh` → 添付を用意して artifact `mukuchi-dmg-signed` (7日保存) にする。中身は `mukuchi_aarch64.dmg`・`mukuchi_aarch64.dmg.sha256`・`mukuchi_aarch64.app.tar.gz`・`mukuchi_aarch64.app.tar.gz.sha256` (版番号なし。LP の固定 URL 用。版は Release のタイトル・タグで分かる。tar.gz の .sha256 は publish での確認用で添付しない)
 5. `Publish desktop` (`production-desktop`。Deploy Key で checkout し、第三者のパッケージを入れない):
    1. sha256 を確認 → 同じ版上げコミットを作る (ID を確認) → main が開始時のままでタグがないことを確認
-   2. 下書きの Release `desktop-v<version>` を作って2つを添付する (下書きはタグを作らない。アップロードの失敗はここで起き、main は変わらない)
-   3. 版上げコミットとタグを push (失敗したら下書きを消して止める。公開されない)
-   4. 下書きを公開して Latest にし、`releases/latest` がこのタグであることを確かめる
+   2. `scripts/sign-updater.mjs` で tar.gz に署名して `latest.json` を作る (署名鍵はこの step にだけ渡す。`tauri.conf.json` の公開鍵で検証してから書く)
+   3. 下書きの Release `desktop-v<version>` を作って4つ (.dmg・.dmg.sha256・.app.tar.gz・latest.json) を添付する (下書きはタグを作らない。アップロードの失敗はここで起き、main は変わらない)
+   4. 版上げコミットとタグを push (失敗したら下書きを消して止める。公開されない)
+   5. 下書きを公開して Latest にし、`releases/latest` がこのタグであることを確かめる
+   6. `releases/latest/download/latest.json` (アプリの endpoint) が今回の `latest.json` と同じ中身を返すことを確かめる (10秒おきに最大6回。合わなくても job は失敗にせず警告を出す。LP の更新 (次の job) を止めないため)
 
 公開後の確認: LP は `https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg` を使い、これは公開済み・非プレリリースの Latest の Release の添付を返す ([Linking to releases](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)、[Get the latest release](https://docs.github.com/en/rest/releases/releases#get-the-latest-release))。`curl -sIL <URL> | grep -i '^location'` で新しいタグを指すことを確かめる。
 
@@ -161,7 +213,9 @@ jobs: `approve` (承認) → `prepare` → `deploy-web` → `publish-web`
 |---|---|---|
 | approve (拒否・期限切れ)・prepare・build・sign・deploy-web | main・タグ・Release は変わらない (web の deploy 中の失敗はデプロイが途中の可能性あり) | 原因を直して実行し直す |
 | publish-desktop の push まで (main が進んだ等) | main・タグは変わらない。下書きは消す | 実行し直す |
+| publish-desktop の updater の署名 (鍵・パスワード違い、公開鍵と対でない) | main・タグ・Release は変わらない | secret と `tauri.conf.json` の `pubkey` を確認して実行し直す (公開鍵を替えると既存の利用者に届かない。「3. updater の署名鍵」) |
 | publish-desktop の公開 (push 後) | main・タグは push 済み。下書きの Release が残る (deploy-web-for-desktop は動かない) | 下書き `desktop-v<version>` を確認して手で公開し、Latest にする。LP は web をリリースして合わせる |
+| publish-desktop の Check updater endpoint (警告) | 公開済み (Latest)。job は成功し LP も更新される。アプリが新しい版を見つけない可能性 | `curl -sL https://github.com/minimalcorp/mukuchi/releases/latest/download/latest.json` を確認する。Release に `latest.json` がなければ artifact から手で添付する (下書き・公開の前の artifact `mukuchi-dmg-signed` の tar.gz に対し、手元で `sign-updater.mjs` を実行して作る。鍵が要る) |
 | deploy-web-for-desktop | desktop は公開済み。LP は前の版の表示のまま (配信中の失敗は途中の可能性あり) | 原因を直してこの job を Re-run する (古い web のタグで止まった時は web をリリースする) |
 | publish-web の push (main が進んだ等) | デプロイ済み・main・タグは変わらない | 実行し直す (上の「残るずれ」) |
 
@@ -193,6 +247,7 @@ jobs: `approve` (承認) → `prepare` → `deploy-web` → `publish-web`
 |---|---|
 | .app | `codesign --verify --deep --strict`、Hardened Runtime、secure timestamp、entitlements がマイクのみ、Info.plist (バンドルID・`LSMinimumSystemVersion` 13.0・マイクの説明文)、`/nix/store` へのリンクなし、`mukuchi --print-uv-path` が `Contents/Helpers/uv`、`spctl -a -vv -t exec` が `Notarized Developer ID`、`stapler validate` |
 | 同梱 uv | 開発元の Developer ID 署名 (Team ID 固定)・Hardened Runtime・timestamp。MacOS/・Helpers/ 以外に Mach-O がない |
+| updater の tar.gz | `check-updater-archive.py` (最上位が `mukuchi.app/`・`._*`/xattr なし・中身が .app と同じ)、`--strip-components 1` で展開した .app の `codesign --verify --deep --strict`・CDHash が .app と同じ・`stapler validate` |
 | .dmg | `codesign --verify --strict`、`spctl -a -vv -t open --context context:primary-signature`、`stapler validate`、中の .app が同じ CDHash で staple 済み、見た目 (`apps/desktop/scripts/check-dmg-layout.py`) |
 
 ## 出典
@@ -203,3 +258,6 @@ jobs: `approve` (承認) → `prepare` → `deploy-web` → `publish-web`
 - [Installing an Apple certificate on macOS runners](https://docs.github.com/en/actions/use-cases-and-examples/deploying/installing-an-apple-certificate-on-macos-runners-for-xcode-development)
 - [dmgbuild settings](https://dmgbuild.readthedocs.io/en/latest/settings.html)。HiDPI 背景の扱い・`--no-hidpi`・ボリュームアイコン (`SetFile -a C`) は dmgbuild 1.6.7 のソース (`src/dmgbuild/core.py`, `__main__.py`)
 - Tauri の署名・公証の実装: tauri-cli 2.12.0 (`crates/tauri-bundler/src/bundle/macos/{app,sign}.rs`、`crates/tauri-macos-sign/src/lib.rs`)
+- updater の署名: tauri-cli 2.12.0 `crates/tauri-cli/src/helpers/updater_signature.rs` (`sign_file`・`secret_key`)。minisign crate 0.9.1 (tauri-cli の Cargo.lock の版。`src/{lib,secret_key,helpers,signature_box,constants}.rs`: `sign`・`prehash`・`SecretKey::from_box`・`raw_scrypt_params`)。[minisign の形式](https://jedisct1.github.io/minisign/)
+- updater の検証・展開: tauri-plugin-updater 2.13.1 `src/updater.rs` (`verify_signature`・`verify_signed_version`・`get_urls`・`install_inner`)、minisign-verify 0.2.5。tar.gz の作り方は tauri-bundler `src/bundle/updater_bundle.rs` (`create_tar_from_src`)
+- [Tauri: Updater](https://v2.tauri.app/plugin/updater/)

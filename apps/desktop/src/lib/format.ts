@@ -28,6 +28,14 @@ export function formatEta(seconds: number): string {
   return `残り約 ${Math.round(seconds / 60)} 分`;
 }
 
+/** UNIX 秒を「今日 14:32」「10月1日 14:32」の形にする (アップデートの最終確認) */
+export function formatCheckedAt(unixSeconds: number, now: Date = new Date()): string {
+  const d = new Date(unixSeconds * 1000);
+  const time = `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return sameDay ? `今日 ${time}` : `${d.getMonth() + 1}月${d.getDate()}日 ${time}`;
+}
+
 const MOD_LABEL: Record<Modifier, string> = { cmd: "⌘", shift: "Shift", option: "Option", ctrl: "Control" };
 const MOD_ORDER: Modifier[] = ["ctrl", "option", "shift", "cmd"];
 const KEY_LABEL: Record<KeyCombo["key"], string> = {

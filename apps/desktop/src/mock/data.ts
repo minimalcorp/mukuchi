@@ -9,6 +9,7 @@ import type {
   ProvisioningStatus,
   Settings,
   ShortcutStatus,
+  UpdateStatus,
 } from "@/lib/ipc";
 import type { MockApi } from "./index";
 
@@ -31,6 +32,12 @@ export type MockDb = {
   devices: AudioDevice[];
   /** panel のアンカー (get_panel_anchor の値) */
   anchor: PanelAnchor;
+  /** get_update_status の値 */
+  update: UpdateStatus;
+  /** check_for_update で見つかる新しい版。null なら最新 */
+  updateLatest: string | null;
+  /** install_update で失敗させるメッセージ。Rust と同じく error に遷移してから同じメッセージで reject する */
+  updateInstallError: string | null;
   /** true の時はレベルを揺らす (live 表示用) */
   levelStream: boolean;
   /** set_listening(true) の時に呼ぶ (live シナリオで発話を流す) */
@@ -57,6 +64,7 @@ const DEFAULT_SETTINGS: Settings = {
   setupCompleted: true,
   panelStyle: "full",
   inputMode: "continuous",
+  autoCheckUpdates: true,
   shortcut: "Alt+Space",
 };
 
@@ -168,6 +176,30 @@ export function provisioning(
   };
 }
 
+export const UPDATE_TOTAL = 40_000_000;
+/** スクリーンショットの比較のため固定の時刻 (日付は「今日」にして時刻だけを出す) */
+const CHECKED_AT = (() => {
+  const d = new Date();
+  d.setHours(14, 32, 0, 0);
+  return Math.floor(d.getTime() / 1000);
+})();
+
+/** Rust と同じ形の UpdateStatus を作る */
+export function updateStatus(state: UpdateStatus["state"], opts: Partial<UpdateStatus> = {}): UpdateStatus {
+  const found = state === "downloading" || state === "ready" || state === "installing";
+  return {
+    state,
+    currentVersion: "0.1.0",
+    latestVersion: found ? "0.2.0" : null,
+    notes: null,
+    bytesDone: state === "downloading" ? 0.35 * UPDATE_TOTAL : 0,
+    bytesTotal: found ? UPDATE_TOTAL : null,
+    checkedAt: state === "unavailable" ? null : CHECKED_AT,
+    error: null,
+    ...opts,
+  };
+}
+
 export function createDb(): MockDb {
   return {
     status: { phase: "off", loadingProgress: null, error: null, seq: 0 },
@@ -188,6 +220,9 @@ export function createDb(): MockDb {
       { id: "usb", name: "USB オーディオ", isDefault: false },
     ],
     anchor: { horizontal: "center", vertical: "bottom" },
+    update: updateStatus("idle"),
+    updateLatest: null,
+    updateInstallError: null,
     levelStream: false,
     onListen: null,
   };

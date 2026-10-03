@@ -180,6 +180,8 @@ pub struct Settings {
     pub setup_completed: bool,
     pub panel_style: PanelStyle,
     pub input_mode: InputMode,
+    /// 自動でアップデートを確認・取得する (update.rs)。旧設定 (キーなし) は true
+    pub auto_check_updates: bool,
     /// ON/OFF のグローバルショートカット (`shortcut::parse` の形式)。None は無効
     pub shortcut: Option<String>,
 }
@@ -200,6 +202,7 @@ impl Default for Settings {
             setup_completed: false,
             panel_style: PanelStyle::Full,
             input_mode: InputMode::Continuous,
+            auto_check_updates: true,
             shortcut: Some(DEFAULT_SHORTCUT.to_string()),
         }
     }
@@ -443,6 +446,20 @@ mod tests {
         assert_eq!(serde_json::to_value(&next).unwrap()["inputMode"], "oneShot");
         assert!(s.apply_patch(&json!({ "inputMode": "one_shot" })).is_err());
         assert!(s.apply_patch(&json!({ "inputMode": 1 })).is_err());
+    }
+
+    #[test]
+    fn auto_check_updates_default_and_patch() {
+        let s = Settings::default();
+        assert!(s.auto_check_updates);
+        assert_eq!(serde_json::to_value(&s).unwrap()["autoCheckUpdates"], true);
+        let old: Settings = serde_json::from_value(json!({ "silenceMs": 800 })).unwrap();
+        assert!(old.auto_check_updates);
+        let next = s
+            .apply_patch(&json!({ "autoCheckUpdates": false }))
+            .unwrap();
+        assert!(!next.auto_check_updates);
+        assert!(s.apply_patch(&json!({ "autoCheckUpdates": "no" })).is_err());
     }
 
     #[test]

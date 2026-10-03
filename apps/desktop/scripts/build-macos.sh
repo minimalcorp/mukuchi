@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # 配布用ビルド。make build / make build-local から devShell 内で呼ばれる。
 #
-#   scripts/build-macos.sh               Developer ID 署名 + Hardened Runtime + 公証 + staple の .dmg (make build)。
+#   scripts/build-macos.sh               Developer ID 署名 + Hardened Runtime + 公証 + staple の .dmg と、updater 用の
+#                                        .app.tar.gz (make build)。
 #                                        --build-only と --sign-only を続けて行い、最後に make verify 相当
 #   scripts/build-macos.sh --local       ad-hoc 署名の .app (make build-local。公証しない)
 #   scripts/build-macos.sh --local-dmg   --local に加えて .dmg も作る (make dmg-local。ウィンドウの見た目の確認用。
 #                                        .dmg は署名・公証しない)
 #   scripts/build-macos.sh --build-only  署名なしの .app と .dmg のテンプレートを作るだけ (資格情報を見ない・要らない)
-#   scripts/build-macos.sh --sign-only   既存の .app を署名 → 公証・staple → テンプレートに入れて .dmg 作成・署名 → 公証・staple。
-#                                        Apple のツール (codesign/notarytool/stapler/hdiutil) と標準ライブラリだけの
-#                                        python3 (check-dmg-layout.py) だけを使い、pnpm・cargo・uv の依存・ビルドした本体を
-#                                        実行しない。検証は呼び出し側で行う
+#   scripts/build-macos.sh --sign-only   既存の .app を署名 → 公証・staple → updater 用の tar.gz → テンプレートに入れて
+#                                        .dmg 作成・署名 → 公証・staple。
+#                                        Apple のツール (codesign/notarytool/stapler/hdiutil/tar) と標準ライブラリだけの
+#                                        python3 (check-dmg-layout.py・check-updater-archive.py) だけを使い、
+#                                        pnpm・cargo・uv の依存・ビルドした本体を実行しない。検証は呼び出し側で行う
 #
 # build と sign を分ける理由: pnpm・cargo の依存 (postinstall・build.rs 等の第三者のコード) を資格情報がある場所で
 # 動かさないため。CI (release.yml) では別 job にし、署名 job は依存を入れずに .app だけを受け取る。
@@ -61,6 +63,8 @@ APP="$BUNDLE_DIR/macos/mukuchi.app"
 ENTITLEMENTS="$root/src-tauri/Entitlements.plist"
 # .app を入れる前の .dmg (見た目だけを持つ UDRW)。CI では .app と一緒に build job から sign job へ渡す
 DMG_TEMPLATE="$BUNDLE_DIR/dmg-template/mukuchi.dmg"
+# tauri-plugin-updater 用 (公証・staple 済みの .app の tar.gz。release のみ)
+UPDATER_ARCHIVE="$BUNDLE_DIR/updater/mukuchi_aarch64.app.tar.gz"
 
 die() { echo "error: $*" >&2; exit 1; }
 step() { echo "==> $*"; }
@@ -159,8 +163,8 @@ if [ "$mode" != sign-only ]; then
     pnpm exec tauri build --target "$TARGET" --bundles app --no-sign
 
   [ -d "$APP" ] || die "$APP ができていない"
-  # 前回の .dmg は古い .app を含むため消す (make verify が今回の .app と食い違う dmg を検証しないように)
-  rm -rf "$BUNDLE_DIR/dmg"
+  # 前回の .dmg・updater 用の tar.gz は古い .app を含むため消す (make verify が今回の .app と食い違うものを検証しないように)
+  rm -rf "$BUNDLE_DIR/dmg" "$BUNDLE_DIR/updater"
 fi
 
 # ---- .dmg のテンプレート (ビルド側) ---------------------------------------------------------------
@@ -261,8 +265,8 @@ if [ "$mode" = local ] || [ "$mode" = local-dmg ]; then
   exit 0
 fi
 
-# 別の版の古い .dmg が残っていると verify が取り違えるため消す (--sign-only はビルドを経ない)
-rm -rf "$BUNDLE_DIR/dmg"
+# 別の版の古い .dmg・tar.gz が残っていると verify が取り違えるため消す (--sign-only はビルドを経ない)
+rm -rf "$BUNDLE_DIR/dmg" "$BUNDLE_DIR/updater"
 step "codesign ($identity_name)"
 sign_app "$identity"
 /usr/bin/codesign --verify --deep --strict "$APP"
@@ -308,6 +312,24 @@ app_zip="$work/mukuchi.zip"
 notarize "$app_zip"
 staple "$APP"
 
+# ---- updater 用の .app.tar.gz -----------------------------------------------------------------------
+
+# 公証・staple 済みの .app をそのまま tar.gz にする (署名 (.sig)・latest.json は release.yml の publish-desktop が
+# scripts/sign-updater.mjs で作る。docs/architecture.md「アップデート」)。tauri-plugin-updater 2.13 は各エントリの
+# 先頭のパス要素を1つ捨てて展開するため、最上位を mukuchi.app/ にする (./ 起点にしない)。
+# macOS の tar は既定で xattr・ACL を AppleDouble (._*) や pax ヘッダーとして入れるため、COPYFILE_DISABLE と
+# --no-* で入れない (展開した .app に余計なファイルができると署名の検証が通らない)。
+# 名前に版を入れないのは、Release の添付名を固定にするため (版は署名の trusted comment と latest.json が持つ)
+make_updater_archive() {
+  step "updater archive $(basename "$UPDATER_ARCHIVE")"
+  rm -rf "$(dirname "$UPDATER_ARCHIVE")"
+  mkdir -p "$(dirname "$UPDATER_ARCHIVE")"
+  COPYFILE_DISABLE=1 /usr/bin/tar --no-mac-metadata --no-xattrs --no-acls --no-fflags \
+    -czf "$UPDATER_ARCHIVE" -C "$(dirname "$APP")" "$(basename "$APP")"
+  python3 "$root/scripts/check-updater-archive.py" "$UPDATER_ARCHIVE" --app "$APP"
+}
+make_updater_archive
+
 # ---- .dmg --------------------------------------------------------------------------------------
 
 make_dmg
@@ -319,9 +341,9 @@ notarize "$dmg"
 staple "$dmg"
 
 if [ "$mode" = sign-only ]; then
-  echo "done: $dmg (検証は scripts/verify-macos.sh)"
+  echo "done: $dmg, $UPDATER_ARCHIVE (検証は scripts/verify-macos.sh)"
   exit 0
 fi
 step "verify"
 scripts/verify-macos.sh
-echo "done: $dmg"
+echo "done: $dmg, $UPDATER_ARCHIVE"

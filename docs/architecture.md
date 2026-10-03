@@ -40,6 +40,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 | Dock | 通常は非表示(Accessory)。設定・セットアップウィンドウ表示中のみ表示(Regular) | |
 | 再度の起動 | 起動中に Finder・Spotlight・Launchpad から開くと (macOS の Reopen) 設定を開く (セットアップ未完了ならセットアップ)。2つ目のプロセス (実行ファイルの直接起動・`open -n`) は `tauri-plugin-single-instance` で既存プロセスに知らせて終了し、同じく設定を開く | メニューバーのアイコンがノッチに隠れ Dock にも出ないと、設定・終了に辿れないため。LaunchServices 経由の起動は2つ目を立てず Reopen になるが、直接起動は防げない |
 | 配布 | Developer ID署名 + 公証の .dmg。Mac App Storeは対象外。GitHub Releases で公開 (手動実行の `.github/workflows/release.yml`。版上げ・タグ `desktop-v<X.Y.Z>` の規則は docs/release.md) | サンドボックスではCGEventPost不可、ダウンロードしたPython実行環境の実行はガイドライン2.5.2違反、非公開API (`_setPreventsActivation`) は審査で却下、アプリ内アンインストール不可のため (2026-09-30 再確認) |
+| アップデート | `tauri-plugin-updater` (Rust からのみ使う)。GitHub Releases の Latest に添付した `latest.json` を見て、新しい版があれば裏で `.app.tar.gz` を取得し、メニューバー・設定 > このアプリについて に「再起動してアップデート」を出す。押すと .app を置き換えて再起動する。.dmg は新規インストール用のまま (updater は .dmg を扱えない)。詳細は「アップデート」の節 | 2026-10-02 決定。サーバー不要・DMG の自動マウント等を自作しないため。TCC の許可は署名の要件 (Team ID + バンドルID) で判定されるため更新後も残る (TN3127)。同じチームのアプリの自己更新は App Management の確認対象外 (WWDC22 10096)。Sparkle 2 は framework 同梱と個別署名が要り、Tauri 用の実装が小規模なため見送り |
 | 実行環境の導入 | アプリは軽量に保ち、初回セットアップでuv(同梱)がPython・依存・モデルを導入 | |
 | アンインストール | 設定 > ストレージ の「完全にアンインストール」+ `apps/desktop/scripts/uninstall.sh`。「実行環境とモデルのみ削除」も提供 | |
 | 開発環境 | Nix flakes devShell + Makefile + process-compose。monorepo (`apps/desktop`、LP は `apps/web`。LP は SST (`sst.config.ts`) で AWS に公開) で JS/TS は pnpm workspace、Rust は Cargo (`apps/desktop/src-tauri` 単独)、Python は uv | [monorepo-plan.md](plans/monorepo-plan.md) |
@@ -59,7 +60,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 - `MUKUCHI_DEV_DATA_DIR` は 絶対パス・`..` を含まない・存在しないか空か目印がある・`.git` を含まない・target ディレクトリ / 同梱物 (asr-server・uv。`MUKUCHI_DEV_*` で差し替えたものを含む) / ホームと同じかその祖先でない (シンボリックリンクは解決して比較) ものだけ受け付ける。満たさなければ起動しない (本物のデータディレクトリに切り替えない)
 - asr-server/ のコピーは、コピー元とコピー先が同じか入れ子なら行わない
 - 開発ビルドがバンドルIDが `.dev` で終わらない (本番のID) で動いている場合、アンインストールは dry-run に、「実行環境とモデルのみ削除」はエラーにする
-- 削除の実行中は `start_provisioning` を無視し `restart_asr` はエラー。削除を始める前に導入済みの扱いを外す (削除後は未導入)
+- 削除の実行中は `start_provisioning` を無視し `restart_asr` はエラー。アップデートのインストール中 (「アップデート」) も `start_provisioning` を無視する。削除を始める前に導入済みの扱いを外す (削除後は未導入)
 
 アンインストール対象: 上記データディレクトリ、`~/Library/{Caches,Logs,WebKit,HTTPStorages}/<バンドルID>`、`~/Library/Saved Application State/<バンドルID>.savedState`、`~/Library/Preferences/<バンドルID>.plist` (`defaults delete <バンドルID>` で消す。ファイル削除だけでは cfprefsd のキャッシュから書き戻されうる)、ログイン項目、TCC (`tccutil reset All <バンドルID>`。LaunchServices に登録されたアプリが必要なため本体を消す前に行う)、アプリ本体(ゴミ箱へ)。HTTPStorages・Saved Application State は WebKit・AppKit がバンドルIDで作りうるため含める(存在するものだけ消す)。開発版は `tauri dev` の未バンドル実行で WebKit が作る `~/Library/{Caches,WebKit}/mukuchi` も対象。
 
@@ -129,7 +130,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 
 - **選択**: 選択中のモデルは `provisioned.json` の `selectedModel` に記録する (`Settings` には置かない。「取得済みのものだけ選べる」は導入の記録と一緒に保つ必要があり、「実行環境とモデルのみ削除」で記録ごと既定に戻るため)。`select_model` は取得済み (現在の revision の記録があり `config.json` がある) のモデルだけ受け付け、ASR サーバーを新しいモデルで起動し直す (音声入力は OFF になり phase は loading を経由)。準備完了 (`/health`) まで待ち、**準備完了してから選択を記録して** 返る (切り替えの途中でアプリが終わっても、読み込めるか分からないモデルを選択中に残さない。その間 `ModelInfo.selected` は元のモデルのまま)。切り替えの起動は自動再起動なしで行い、準備完了したら自動再起動を有効にする
 - **切り替えの失敗**: 新しいモデルでサーバーが準備完了にならなければ (異常終了・読み込みの上限10分)、元のモデル (選択は元のまま) で起動し直し (自動再起動あり)、エラーで reject する (「『<新>』を読み込めませんでした。『<元>』に戻しました」)。新しいモデルの異常終了は `asr_stopped` にしない (元のモデルの読み込み中に停止エラーを出さないため)。準備完了後に選択を記録できなかった場合も元のモデルに戻して reject する。元のモデルでも起動できなければ通常の `asr_stopped`
-- **切り替え中**: `select_model`・`delete_model`・`restart_asr`・`delete_runtime_and_model`・`uninstall` はエラー (「モデルを切り替え中です」。失敗時に元のモデルを起動し直す処理と重ねないため)
+- **切り替え中**: `select_model`・`delete_model`・`restart_asr`・`delete_runtime_and_model`・`uninstall` はエラー (「モデルを切り替え中です」。失敗時に元のモデルを起動し直す処理と重ねないため)。アップデートのインストール中 (再起動待ちを含む) も同じ操作と `download_model` はエラー (「アップデートをインストールしています」)
 - **取得**: モデルごとに開始・一時停止・再開・中止。処理はセットアップの model と同じ (`hf.rs`。部分ファイルからの再開・検証・huggingface_hub 互換のレイアウト)。同時に取得するのは1つ (他が取得中なら `download_model` はエラー)。一時停止・失敗で止まったものは複数残ってよい。完了したら `models` に記録する (選択は変えない)。中止 (`cancel_model_download`) は途中のファイルごとそのモデルのディレクトリを消す (削除と同じく、開発ビルドが本番のバンドルIDで動いている時は拒む)
 - **削除**: `delete_model` は選択中・取得中のモデルを拒む。記録を先に消してから `models/hub/models--<org>--<name>/` を消す (データディレクトリの目印を確かめる。開発ビルドが本番のバンドルIDで動いている時は拒む)。ディレクトリの削除中 (中止を含む) はそのモデルの取得・削除を拒む
 - **利用できる時**: モデルの操作 (`select_model`・`download_model`・`delete_model` 等) はセットアップ完了後 (`ProvisioningStatus.stage` が `done`) のみ。それ以外・削除の実行中はエラー。セットアップの取得は `ProvisioningStatus` で表し、`list_models` には手元のファイルの状態だけが出る
@@ -137,7 +138,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 - **revision が変わった時** (アプリの更新): 選択中のモデルは起動時にセットアップの自動やり直しで取り直す (上記)。選択中でないモデルは記録が合わないため取得済みではなくなり、古いファイルが残っていれば `paused` と表示する (`download_model` で新しい revision を取る。同じファイルは取り直さない。完了時に古い版を消す)
 - **ストレージ**: `StorageUsage.modelBytes` は `models/` 全体 (全モデル・取得途中を含む)。モデルごとの量は `ModelInfo.diskBytes`。「実行環境とモデルのみ削除」は取得中のモデルを止めてから全モデルを消し、選択を既定に戻す (記録ごと消えるため)。アンインストールも取得を止めてから消す
 - **開発** (`MUKUCHI_ASR_URL` 使用中): `select_model` は記録の書き換えのみ (外部のサーバーは起動し直さない。使うモデルは process-compose 側で決まる。既定は ja-8bit と同じ版で、`Makefile` の `MUKUCHI_MODEL`・`MUKUCHI_MODEL_REVISION`)。**設定画面の選択・表示は実際に使っているモデルと食い違いうる** (例: 以前に bf16 でセットアップした dev データでは bf16 が選択中のまま)。`make setup` (`apps/desktop/scripts/setup.sh`) は取得したモデルを、アプリのセットアップ済み (`runtime` の記録がある) の dev データに限り `models` に記録する (8bit が「一時停止中」ではなく取得済みに見えるように。選択は変えない。記録が無い・`make reset PROVISION=1` の後はアプリのセットアップが取得・記録する)
-- エラー (reject の文言): 不明な id「不明なモデルです」、セットアップ未完了「セットアップが完了していません」、削除の実行中「削除を実行中です」、他が取得中「他のモデルをダウンロード中です」、未取得を選択「ダウンロードが済んでいないモデルは選べません」、選択中を削除「使用中のモデルは削除できません」、取得中を削除「ダウンロード中のモデルは削除できません。中止してください」、取得済みを中止「ダウンロード済みです」、切り替え中「モデルを切り替え中です」、ディレクトリの削除中「モデルを削除しています」、開発ビルドが本番のバンドルIDで削除・中止「開発ビルドを本番のバンドルIDで実行しているため削除しません」。取得の失敗は reject せず `ModelInfo.error` (文言はセットアップの model と同じ)
+- エラー (reject の文言): 不明な id「不明なモデルです」、セットアップ未完了「セットアップが完了していません」、削除の実行中「削除を実行中です」、他が取得中「他のモデルをダウンロード中です」、未取得を選択「ダウンロードが済んでいないモデルは選べません」、選択中を削除「使用中のモデルは削除できません」、取得中を削除「ダウンロード中のモデルは削除できません。中止してください」、取得済みを中止「ダウンロード済みです」、切り替え中「モデルを切り替え中です」、アップデートのインストール中「アップデートをインストールしています」、ディレクトリの削除中「モデルを削除しています」、開発ビルドが本番のバンドルIDで削除・中止「開発ビルドを本番のバンドルIDで実行しているため削除しません」。取得の失敗は reject せず `ModelInfo.error` (文言はセットアップの model と同じ)
 
 ### アンインストール (アプリ内)
 
@@ -145,6 +146,20 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 
 - `mukuchi.app/Contents/MacOS/mukuchi --unregister-login-item`: ログイン項目 (SMAppService) を解除して終了する (UI は起動しない。終了コード 0=成功 1=失敗)。`apps/desktop/scripts/uninstall.sh` が本体をゴミ箱に入れる前に呼ぶ
 - `mukuchi.app/Contents/MacOS/mukuchi --print-uv-path`: 解決した同梱 uv のパス (正規化済み) を表示して終了する (隠しフラグ。UI は起動しない。終了コード 0=成功 1=見つからない・実行できない)。リリースビルドは `MUKUCHI_DEV_*` を無視するため、ビルドした .app が `Contents/Helpers/uv` を指すかの確認に使う
+
+### アップデート
+
+- 配信: Release `desktop-v<X.Y.Z>` に `mukuchi_aarch64.app.tar.gz` (公証・staple 済みの .app。最上位は `mukuchi.app/`) と `latest.json` を添付する (作り方は docs/release.md)。endpoint は `https://github.com/minimalcorp/mukuchi/releases/latest/download/latest.json` 固定 (web は GitHub Release を作らないため Latest は常に desktop)。`latest.json` の url は版付きの `releases/download/desktop-v<X.Y.Z>/...` (Latest が途中で変わっても版と中身がずれない)
+- 署名: minisign (tauri の updater 鍵)。公開鍵は `tauri.conf.json` の `plugins.updater.pubkey`、秘密鍵は Environment `production-desktop` の secret のみ。`requireSignedVersion: true` (署名の trusted comment の版と `latest.json` の版が一致しなければ拒否。古い署名済みファイルへの巻き戻し防止)。**鍵を失うと既存の利用者に更新を届けられない**
+- 対象: 本番ビルドのみ。開発ビルドは確認・取得・インストールをしない (`UpdateStatus.state` = `unavailable`)。ただしデバッグビルドで `MUKUCHI_DEV_UPDATE_ENDPOINT=<url>` があれば確認・取得まで行う (http 可。インストールは常にしない。UI の確認用)
+- 場所の確認: 実行中の .app のパスに `/AppTranslocation/` を含む、または `/Volumes/` 配下 (dmg から直接起動) なら確認・取得をせず `unavailable` (理由「アプリケーションフォルダに移動すると自動でアップデートできます」)。書き込めない場所 (他の管理者が入れた等) は updater が管理者のパスワードを求める
+- 確認の時期: セットアップ完了後、`Settings.autoCheckUpdates` が true なら起動30秒後と、前回の確認から6時間ごと (10分ごとに経過を見る。スリープ明けにも追いつく)。`check_for_update` (手動) は設定によらずいつでも。同時に1つだけ (確認・取得中の再要求は何もしない)
+- 取得: 新しい版が見つかれば続けて取得する (約40MB。取得したものはメモリに保持し、アプリを終了すると捨てる。次の起動で取り直す)。署名の検証は取得時に updater が必ず行う。取得済み (`ready`) の後の確認で、取得済みより新しい版 (semver で比較) があれば取り直す。同じか古い版 (Latest の取り下げ等) なら取得済みを残す
+- インストール (`install_update`): `ready` の時のみ。`ready` のまま裏で確認・取り直しをしている間はそれが終わるのを待ち、終わった時点で `ready` なら進める (そうでなければ「インストールできるアップデートがありません」)。`ready` でない確認・取得中はエラー (「アップデートを確認しています。しばらくしてからもう一度お試しください」)。セットアップ・モデルの取得・切り替え・削除・アンインストールの実行中はエラー (「ダウンロード・削除の実行中は更新できません」)。インストール中 (`installing`、置き換え後の再起動待ちを含む) は `start_provisioning` を無視し、`download_model`・`select_model`・`delete_model`・`restart_asr`・`delete_runtime_and_model`・`uninstall` をエラーにする (「アップデートをインストールしています」)。音声入力を OFF にしてから updater の install (.app を一時領域に退避して置き換える) → `AppHandle::request_restart` (`RunEvent::Exit` で ASR を止めてから起動し直す)。install に失敗したら `error` にして再起動しない
+- 表示: `ready` の間、メニューバー (とパネルの右クリックメニュー) の「設定…」の上に「再起動してアップデート (v<X.Y.Z>)」を出す (`install_update` と同じ処理。失敗はメニューの通知と同じくログと設定の表示のみ)。設定 > このアプリについて に状態・「アップデートを確認」・「再起動してアップデート」・自動確認の切り替え (`autoCheckUpdates`) を置く。macOS の通知 (通知の許可) は使わない
+- 更新後の起動: 同梱物の版が変わっていれば既存の仕組み (「セットアップ手順」の版の判定) が実行環境を入れ直す
+- 失敗 (確認・取得・インストール) はログに出し `error` (表示用の文言は日本語)。自動の確認での失敗はメニューバーに出さない (設定の「このアプリについて」にだけ出す)
+- 既知の制約 (tauri-plugin-updater 2.13): インストールにロールバックはなく、最後の置き換えに失敗すると .app が残らないことがある (plugins-workspace#3505)。更新後の .app の権限が 0700 になり他のユーザーが起動できないことがある (#3506)
 
 ## インターフェース
 
@@ -216,6 +231,7 @@ type Settings = {
   setupCompleted: boolean;
   panelStyle: "full" | "compact";         // 既定 "full"。compact はマイクの円形ボタンのみ (プレビュー・文言なし)
   inputMode: "continuous" | "oneShot";    // 既定 "continuous" (「決定事項」の入力モード)。未知の値は既定として読む
+  autoCheckUpdates: boolean;              // 既定 true。自動でアップデートを確認・取得する (「アップデート」)。false でも手動の確認はできる
   shortcut: string | null;                // 既定 "Alt+Space"。null=無効。形式は「修飾+…+キー」: 修飾は Ctrl・Alt・Shift・Cmd をこの順で1つ以上、キーは KeyboardEvent.code (例 "Space" "KeyM" "Digit1" "F5")。登録できなければ (形式の誤り・OS が拒否) update_settings は保存せずエラー。他アプリが同じキーを使っていても登録は成功しうる (global-hotkey 0.8 は非排他で `RegisterEventHotKey` するため衝突を検出できない。どちらに届くかは未確認)
 };
 type ShortcutStatus = { shortcut: string | null; registered: boolean; error: string | null }; // error: 起動時などに登録できなかった時の表示用 (日本語)
@@ -257,6 +273,17 @@ type ModelInfo = {
 };
 type AudioDevice = { id: string; name: string; isDefault: boolean };
 type AppInfo = { version: string; build: string };
+type UpdateStatus = {
+  // unavailable: 開発ビルド・dmg から起動・App Translocation (「アップデート」)。idle: 未確認か最新
+  state: "unavailable" | "idle" | "checking" | "downloading" | "ready" | "installing" | "error";
+  currentVersion: string;
+  latestVersion: string | null;   // 見つかった新しい版 (downloading・ready・installing、取得・インストールの失敗時)。最新なら null
+  notes: string | null;           // latest.json の notes (無ければ null)
+  bytesDone: number;              // downloading のみ意味がある
+  bytesTotal: number | null;      // 大きさが分からなければ null
+  checkedAt: number | null;       // 最後に確認が成功した時刻 (UNIX 秒。このプロセスでの値。永続化しない)
+  error: string | null;           // error・unavailable の時の表示用 (日本語)
+};
 type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "permissions" | "storage" | "about";
 ```
 
@@ -277,7 +304,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `open_system_settings` | `{ pane: "microphone" \| "accessibility" \| "login_items" }` → `()` | システム設定を開く。`login_items` はログイン項目 (`SMAppService.openSystemSettingsLoginItems`。launchAtLogin を ON にできなかった時の案内用) |
 | `restart_asr` | → `()` | エラーからの復旧 (選択中のモデルで起動し直す。モデルの切り替え中はエラー) |
 | `get_provisioning_status` | → `ProvisioningStatus` | |
-| `start_provisioning` / `pause_provisioning` | → `()` | ダウンロード開始・再開・失敗後の再試行 (実行中・完了済みなら何もしない) / 一時停止 (止まるまで待って返る) |
+| `start_provisioning` / `pause_provisioning` | → `()` | ダウンロード開始・再開・失敗後の再試行 (実行中・完了済み・削除やアップデートのインストールの実行中なら何もしない) / 一時停止 (止まるまで待って返る) |
 | `get_storage_usage` | → `StorageUsage` | runtime = python・venv・uv・cache・asr-server、model = models (全モデル)、other = settings.json・provisioned.json・ログ (ディスク上の使用量) |
 | `delete_runtime_and_model` | → `()` | 実行環境とモデルのみ削除 (セットアップ一時停止・モデルの取得の停止・ASR停止の後。全モデルを消す。設定・ログは残す)。以後 provisioning は idle、status は `runtime_missing`、モデルの選択は既定 (`models-changed` を送る) |
 | `list_models` | → `ModelInfo[]` | モデルの一覧 (カタログ順。旧候補は手元にある時だけ。「モデルの管理」の旧候補) |
@@ -291,6 +318,9 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `list_running_apps` | → `{ bundleId: string; name: string }[]` | 入力しないアプリの追加候補 |
 | `open_logs_folder` | → `()` | Finderで開く |
 | `get_app_info` | → `AppInfo` | |
+| `get_update_status` | → `UpdateStatus` | 設定の「このアプリについて」の初期表示 |
+| `check_for_update` | → `UpdateStatus` | 手動の確認。確認が終わった時点の状態を返す (新しい版があれば取得を始めて `downloading`)。`unavailable` ならそのまま返す。確認・取得・インストール中なら何もせず今の状態を返す |
+| `install_update` | → `()` | `ready` の時にインストールして再起動する (成功すると返らずに再起動)。`ready` でなければエラー「インストールできるアップデートがありません」(確認・取得中は「アップデートを確認しています…」。`ready` のまま裏で確認中なら終わるまで待つ)。ダウンロード・削除の実行中はエラー (「アップデート」) |
 | `open_settings` | `{ category?: SettingsCategory }` → `()` | 設定ウィンドウを開く(開いていれば前面に出し `settings-navigate` を送る)。エラー復旧から該当カテゴリを開く |
 | `set_panel_size` | `{ width: number; height: number }` → `()` | panelの描画内容(影の余白込み。余白は左右24・上16・下32pt固定)の大きさ。Rustはpanelウィンドウをこの大きさにし(透明部分がクリックを奪わないようにするため)、アンカー (`panel-anchor`) の辺・角を固定して広げる/縮める。ピル・カード(余白を除いた部分)が visibleFrame (メニューバー・Dockを除く) からはみ出す分だけずらし(余白ははみ出してよい)、小さく戻れば利用者の位置に戻る |
 | `get_panel_anchor` | → `{ horizontal: "left" \| "center" \| "right"; vertical: "top" \| "bottom" }` | 現在のアンカー (`panel-anchor` と同じ形)。panel の読み込み直後に呼ぶ (作成直後のイベントは購読前に送られるため)。位置が決まる前は center/bottom |
@@ -315,4 +345,5 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `shortcut-status-changed` | `ShortcutStatus` | ショートカットの登録状態が変わった時 (起動時の登録・変更・一時解除からの復帰) |
 | `input-devices-changed` | `AudioDevice[]` | マイクの接続・取り外し・既定の変更を検知した時 (2秒ごとのポーリング。settings/setup を開いている間か ON の間のみ) |
 | `provisioning-progress` | `ProvisioningStatus` | 実行中は変化があれば約4Hz。段階の変化 (開始・完了・一時停止・失敗) は即時 |
+| `update-status-changed` | `UpdateStatus` | 状態が変わった時は即時。取得中は約4Hz |
 | `models-changed` | `ModelInfo[]` | モデルの状態・選択が変わった時は即時 (取得の開始・完了・一時停止・失敗・中止・削除・選択、セットアップの完了、実行環境とモデルのみ削除)。取得中は変化があれば約4Hz |

@@ -15,6 +15,7 @@ use crate::settings::Settings;
 use crate::shortcut::ShortcutStatus;
 use crate::state::AppStatus;
 use crate::storage::{StorageUsage, UninstallTarget};
+use crate::update::UpdateStatus;
 use crate::windows::{self, SettingsCategory};
 
 type CmdResult<T> = Result<T, String>;
@@ -117,6 +118,24 @@ pub fn get_app_info(app: tauri::AppHandle) -> AppInfo {
     }
 }
 
+// ---- アップデート ---------------------------------------------------------------
+
+#[tauri::command]
+pub fn get_update_status(core: State<'_, Arc<Core>>) -> UpdateStatus {
+    core.updates.status()
+}
+
+#[tauri::command]
+pub async fn check_for_update(core: State<'_, Arc<Core>>) -> CmdResult<UpdateStatus> {
+    Ok(core.updates.check().await)
+}
+
+/// async (メインスレッド以外) で実行する: 再起動の request_restart をメインスレッドから呼ばないため (update.rs)
+#[tauri::command]
+pub async fn install_update(core: State<'_, Arc<Core>>) -> CmdResult<()> {
+    core.inner().install_update().await.map_err(err)
+}
+
 // ---- セットアップ・ストレージ ------------------------------------------------
 
 #[tauri::command]
@@ -126,7 +145,7 @@ pub fn get_provisioning_status(core: State<'_, Arc<Core>>) -> ProvisioningStatus
 
 #[tauri::command]
 pub fn start_provisioning(core: State<'_, Arc<Core>>) {
-    core.provisioning.start();
+    core.start_provisioning();
 }
 
 #[tauri::command]

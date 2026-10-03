@@ -4,7 +4,8 @@
 //!   エラー時だけ右上に赤い点 (非テンプレート)
 //! - メニュー: 状態の行 / 音声入力をオン・オフ / 設定を開く… / mukuchi を終了。
 //!   エラー時は最上部に原因の行と復旧の項目を1つずつ出す。
-//!   セットアップ完了前は「セットアップを開く…」を出す (セットアップ画面を閉じた人が再開できるように)
+//!   セットアップ完了前は「セットアップを開く…」を出す (セットアップ画面を閉じた人が再開できるように)。
+//!   アップデートを取得済み (`ready`) の間は「設定を開く…」の上に「再起動してアップデート (vX.Y.Z)」を出す
 //!
 //! パネルからもほぼ同じメニューを出せる (`popup_panel_menu`。ノッチに隠れた時の代わり)。
 //! パネルのメニューでは オン・オフ を出さず (パネルのボタンで切り替えられるため)、
@@ -36,6 +37,7 @@ const ID_SETTINGS: &str = "settings";
 const ID_SETUP: &str = "setup";
 const ID_QUIT: &str = "quit";
 const ID_COMPACT: &str = "compact";
+const ID_UPDATE: &str = "update";
 
 macro_rules! icon {
     ($name:literal) => {
@@ -104,10 +106,12 @@ struct MenuModel {
     toggle_enabled: bool,
     /// 「セットアップを開く…」を出すか
     setup_item: bool,
+    /// 取得済みのアップデートの版 (「再起動してアップデート」を出す)
+    update: Option<String>,
 }
 
 impl MenuModel {
-    fn of(s: &AppStatus, listening: bool, setup_completed: bool) -> Self {
+    fn of(s: &AppStatus, listening: bool, setup_completed: bool, update: Option<String>) -> Self {
         let recover = s.error.as_ref().and_then(|e| e.action);
         Self {
             // 復旧の項目が同じ操作なら重ねて出さない
@@ -117,6 +121,7 @@ impl MenuModel {
             listening,
             // 読み込み中はONにできない。エラー中にONを選ぶとエラーを消して再試行する
             toggle_enabled: s.phase != Phase::Loading,
+            update,
         }
     }
 }
@@ -265,6 +270,7 @@ fn current_model(core: &Core, status: &AppStatus) -> MenuModel {
         status,
         core.state.is_listening(),
         core.settings.get().setup_completed,
+        core.updates.ready_version(),
     )
 }
 
@@ -356,6 +362,12 @@ fn menu_entries(m: &MenuModel, variant: MenuVariant) -> Vec<Entry> {
     if m.setup_item {
         v.push(item(ID_SETUP, "セットアップを開く…"));
     }
+    if let Some(version) = &m.update {
+        v.push(item(
+            ID_UPDATE,
+            format!("再起動してアップデート (v{version})"),
+        ));
+    }
     v.push(Entry::Item {
         id: ID_SETTINGS,
         text: "設定を開く…".into(),
@@ -418,6 +430,14 @@ fn on_menu(app: &AppHandle, id: &str) {
             }
         }
         ID_RECOVER => recover(app, &core),
+        ID_UPDATE => {
+            // 失敗は設定の「このアプリについて」(update-status-changed) とログにだけ出す
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = core.install_update().await {
+                    log::error!("アップデートをインストールできません: {e:#}");
+                }
+            });
+        }
         ID_COMPACT => {
             // メニューは開く度に作るため、チェックの状態ではなく今の設定から反転する
             tauri::async_runtime::spawn(async move {
@@ -468,24 +488,24 @@ mod tests {
     #[test]
     fn menu_model_per_state() {
         let s = StateManager::new();
-        let m = MenuModel::of(&s.status(), false, true);
+        let m = MenuModel::of(&s.status(), false, true, None);
         assert_eq!(m.status, "モデルを読み込んでいます…");
         assert!(!m.toggle_enabled);
 
         s.set_asr_ready(true);
-        let m = MenuModel::of(&s.status(), false, true);
+        let m = MenuModel::of(&s.status(), false, true, None);
         assert_eq!(m.status, "オフ・モデル読み込み済み");
         assert!(m.toggle_enabled);
         assert_eq!(m.recover, None);
 
         s.set_listening(true);
         assert_eq!(
-            MenuModel::of(&s.status(), true, true).status,
+            MenuModel::of(&s.status(), true, true, None).status,
             "聞いています"
         );
 
         s.set_error(AppError::asr_stopped("x"));
-        let m = MenuModel::of(&s.status(), false, true);
+        let m = MenuModel::of(&s.status(), false, true, None);
         assert_eq!(m.recover, Some(ErrorAction::RestartAsr));
         assert_eq!(m.status, "文字起こしサーバーが停止しました");
         assert_eq!(IconKind::of(s.status().phase), IconKind::Error);
@@ -495,11 +515,11 @@ mod tests {
     fn setup_item_until_completed() {
         let s = StateManager::new();
         s.set_asr_ready(true);
-        assert!(MenuModel::of(&s.status(), false, false).setup_item);
-        assert!(!MenuModel::of(&s.status(), false, true).setup_item);
+        assert!(MenuModel::of(&s.status(), false, false, None).setup_item);
+        assert!(!MenuModel::of(&s.status(), false, true, None).setup_item);
         // 復旧の「セットアップを開く…」と重ねない
         s.set_error(AppError::runtime_missing());
-        let m = MenuModel::of(&s.status(), false, false);
+        let m = MenuModel::of(&s.status(), false, false, None);
         assert_eq!(m.recover, Some(ErrorAction::StartSetup));
         assert!(!m.setup_item);
     }
@@ -508,7 +528,7 @@ mod tests {
     fn panel_menu_has_compact_instead_of_toggle() {
         let s = StateManager::new();
         s.set_asr_ready(true);
-        let m = MenuModel::of(&s.status(), false, true);
+        let m = MenuModel::of(&s.status(), false, true, None);
         let ids = |v: &[Entry]| -> Vec<&'static str> {
             v.iter()
                 .filter_map(|e| match e {
@@ -528,6 +548,50 @@ mod tests {
                 checked: compact,
             }));
         }
+    }
+
+    #[test]
+    fn update_item_above_settings_only_when_ready() {
+        let s = StateManager::new();
+        s.set_asr_ready(true);
+        let m = MenuModel::of(&s.status(), false, true, Some("0.1.5".into()));
+        let ids = |v: &[Entry]| -> Vec<&'static str> {
+            v.iter()
+                .filter_map(|e| match e {
+                    Entry::Item { id, .. } | Entry::Check { id, .. } => Some(*id),
+                    Entry::Separator => None,
+                })
+                .collect()
+        };
+        let tray = menu_entries(&m, MenuVariant::Tray);
+        assert_eq!(
+            ids(&tray),
+            [ID_STATUS, ID_TOGGLE, ID_UPDATE, ID_SETTINGS, ID_QUIT]
+        );
+        assert!(tray.contains(&item(ID_UPDATE, "再起動してアップデート (v0.1.5)")));
+        let panel = menu_entries(&m, MenuVariant::Panel { compact: false });
+        assert_eq!(
+            ids(&panel),
+            [ID_STATUS, ID_COMPACT, ID_UPDATE, ID_SETTINGS, ID_QUIT]
+        );
+        // セットアップ未完了でも出す (セットアップの項目の下)
+        let m = MenuModel::of(&s.status(), false, false, Some("0.1.5".into()));
+        assert_eq!(
+            ids(&menu_entries(&m, MenuVariant::Tray)),
+            [
+                ID_STATUS,
+                ID_TOGGLE,
+                ID_SETUP,
+                ID_UPDATE,
+                ID_SETTINGS,
+                ID_QUIT
+            ]
+        );
+        // 版が変わればメニューを作り直す (MenuModel の比較)
+        assert_ne!(
+            m,
+            MenuModel::of(&s.status(), false, false, Some("0.1.6".into()))
+        );
     }
 
     #[test]

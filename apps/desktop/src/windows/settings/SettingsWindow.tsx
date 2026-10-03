@@ -98,7 +98,7 @@ export function SettingsWindow() {
                 <PermissionsSection permissions={permissions} onChange={setPermissions} />
               )}
               {category === "storage" && <StorageSection status={status} />}
-              {category === "about" && <AboutSection />}
+              {category === "about" && <AboutSection settings={settings} update={updateSettings} errors={settingsErrors} />}
             </>
           ) : null}
         </div>

@@ -4,7 +4,7 @@
  */
 import type { AppError, AppStatus } from "@/lib/ipc";
 import type { MockApi } from "./index";
-import { GB, model, provisioning, type MockDb } from "./data";
+import { GB, UPDATE_TOTAL, model, provisioning, updateStatus, type MockDb } from "./data";
 
 export type Scenario = {
   name: string;
@@ -537,6 +537,55 @@ const SETTINGS: Scenario[] = [
     setup: (db) => {
       db.provisioning = provisioning("paused");
       db.models = [model("ja-8bit", "paused", { selected: true })];
+    },
+  },
+  // ---- アップデート (このアプリについて) ----
+  {
+    name: "update-unchecked",
+    description: "アップデート: 未確認 (確認すると最新)",
+    setup: (db) => {
+      db.update = updateStatus("idle", { checkedAt: null });
+    },
+  },
+  {
+    name: "update-available",
+    description: "アップデート: 未確認 (確認すると v0.2.0 を取得して ready)",
+    setup: (db) => {
+      db.update = updateStatus("idle", { checkedAt: null });
+      db.updateLatest = "0.2.0";
+    },
+  },
+  {
+    name: "update-unavailable",
+    description: "アップデート: dmg から起動 (確認できない)",
+    setup: (db) => {
+      db.update = updateStatus("unavailable", { error: "アプリケーションフォルダに移動すると自動でアップデートできます" });
+    },
+  },
+  { name: "update-checking", description: "アップデート: 確認中", setup: (db) => { db.update = updateStatus("checking"); } },
+  {
+    name: "update-downloading",
+    description: "アップデート: v0.2.0 を取得中 (進捗は止まったまま)",
+    setup: (db) => {
+      db.update = updateStatus("downloading", { bytesDone: 0.35 * UPDATE_TOTAL });
+    },
+  },
+  {
+    name: "update-ready",
+    description: "アップデート: v0.2.0 の準備完了 (notes あり)",
+    setup: (db) => {
+      db.update = updateStatus("ready", {
+        bytesDone: UPDATE_TOTAL,
+        notes: "- 自動アップデートに対応しました\n- 入力モードの切り替えを改善しました",
+      });
+    },
+  },
+  { name: "update-installing", description: "アップデート: インストール中", setup: (db) => { db.update = updateStatus("installing"); } },
+  {
+    name: "update-error",
+    description: "アップデート: 確認に失敗",
+    setup: (db) => {
+      db.update = updateStatus("error", { error: "サーバーに接続できませんでした。ネットワーク接続を確認してください" });
     },
   },
 ];

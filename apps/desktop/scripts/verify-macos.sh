@@ -4,7 +4,8 @@
 # .app の署名を見てモードを決める:
 #   Developer ID … 全項目を検証する (spctl・staple を含む)。.dmg も必須
 #   ad-hoc       … Gatekeeper (spctl)・公証 (stapler) は通らないのが正しいため SKIP と表示する。.dmg は無ければ SKIP、
-#                  あれば (make dmg-local。署名しない) 署名・公証以外 (中身・見た目) を検証する
+#                  あれば (make dmg-local。署名しない) 署名・公証以外 (中身・見た目) を検証する。
+#                  updater 用の tar.gz (Developer ID では必須) も同様
 # 1つでも FAIL があれば終了コード 1。
 # pass は常に成功するため `条件 && pass || fail` で fail が誤って走ることはない
 # shellcheck disable=SC2015
@@ -170,6 +171,33 @@ else
     fail "dmg: hdiutil attach できない"
   fi
   rmdir "$mnt" 2>/dev/null || true
+fi
+
+# ---- updater 用の .app.tar.gz -------------------------------------------------------------------------
+
+updater="$BUNDLE_DIR/updater/mukuchi_aarch64.app.tar.gz"
+if [ ! -f "$updater" ]; then
+  if [ "$mode" = devid ]; then fail "updater: $updater がない"; else skip "updater の tar.gz (make build-local は作らない)"; fi
+else
+  echo "verify: $updater"
+  # 最上位が mukuchi.app/・AppleDouble や xattr がない・中身が今回の .app と同じ
+  check "updater: 中身 (scripts/check-updater-archive.py)" python3 "$root/scripts/check-updater-archive.py" "$updater" --app "$APP"
+  # updater と同じく先頭のパス要素を捨てて展開し、展開した .app の署名・staple を確かめる
+  ex="$(mktemp -d)"
+  mkdir "$ex/mukuchi.app"
+  if /usr/bin/tar -xzf "$updater" -C "$ex/mukuchi.app" --strip-components 1; then
+    check "updater: 展開した .app の codesign --verify --deep --strict" /usr/bin/codesign --verify --deep --strict "$ex/mukuchi.app"
+    a="$(/usr/bin/codesign -dvvv "$APP" 2>&1 | grep '^CDHash=')"; b="$(/usr/bin/codesign -dvvv "$ex/mukuchi.app" 2>&1 | grep '^CDHash=')"
+    [ -n "$a" ] && [ "$a" = "$b" ] && pass "updater: 展開した .app = $APP ($a)" || fail "updater: 展開した .app が $APP と違う ($b / $a)"
+    if [ "$mode" = devid ]; then
+      check "updater: 展開した .app の stapler validate" hostxcrun stapler validate "$ex/mukuchi.app"
+    else
+      skip "updater: 展開した .app の stapler validate (ad-hoc は公証しない)"
+    fi
+  else
+    fail "updater: 展開できない"
+  fi
+  rm -rf "$ex"
 fi
 
 echo "verify: PASS $npass / FAIL $nfail / SKIP $nskip ($mode)"

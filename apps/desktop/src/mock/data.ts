@@ -55,7 +55,10 @@ const DEFAULT_SETTINGS: Settings = {
     { id: "newline", phrases: ["改行"], key: { key: "enter", modifiers: ["shift"] } },
     { id: "send", phrases: ["送信"], key: { key: "enter", modifiers: ["cmd"] } },
   ],
-  vocabulary: ["mukuchi", "Qwen3-ASR", "Tauri", "Apple Silicon", "株式会社Minimal", "Kubernetes"],
+  asrContext: [
+    "macOS アプリの開発についての話です。",
+    "以下の用語は英字で表記する: mukuchi (読み: むくち), Qwen3-ASR (読み: クウェン、クエン), Tauri (読み: タウリ), Claude Code (読み: クロードコード), pnpm",
+  ].join("\n"),
   excludedApps: [
     { bundleId: "com.1password.1password", name: "1Password" },
     { bundleId: "com.apple.Terminal", name: "ターミナル" },

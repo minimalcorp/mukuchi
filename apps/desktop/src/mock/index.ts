@@ -25,6 +25,7 @@ import type {
   Utterance,
   UtteranceResult,
 } from "@/lib/ipc";
+import { ASR_CONTEXT_MAX } from "@/lib/ipc";
 import { devOverrides } from "@/lib/env";
 import { formatShortcut } from "@/lib/shortcut";
 import { findScenario } from "./scenarios";
@@ -283,6 +284,10 @@ export function installMock(params: URLSearchParams) {
           // Rust は登録できないショートカット (形式の誤り・OS が拒否) では保存せずに reject する
           if (patch.shortcut != null && db.shortcutRejected.includes(patch.shortcut)) {
             throw `ショートカット「${formatShortcut(patch.shortcut)}」を登録できませんでした。別のキーに変更してください`;
+          }
+          // Rust は前後の空白を除いた認識のヒントが上限 (Unicode スカラー値で数える) を超えると保存せずに reject する
+          if (patch.asrContext != null && [...patch.asrContext.trim()].length > ASR_CONTEXT_MAX) {
+            throw `認識のヒントは${ASR_CONTEXT_MAX}文字以内にしてください`;
           }
           db.settings = { ...db.settings, ...patch };
           fire("settings-changed", db.settings);

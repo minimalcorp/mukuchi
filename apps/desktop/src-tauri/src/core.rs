@@ -1212,7 +1212,7 @@ impl Core {
     /// - vadSensitivity / silenceMs: 処理スレッドが約0.5秒ごとに読み直す (`Sink::vad_params`)。
     ///   audio-level の threshold も同じ値から求める
     /// - voiceCommandsEnabled / voiceCommands / excludedApps: 入力キューが発話ごとに読む
-    /// - vocabulary: 途中表示・確定のリクエストごとに読む
+    /// - asrContext: 途中表示・確定のリクエストごとに読む
     /// - panelPosition: パネルを動かす (ここ)
     /// - launchAtLogin: ログイン項目を登録・解除する (ここ。`login_item_change`)。登録・解除できなければ保存しない。
     ///   セットアップ完了前は値を保存するだけで、セットアップ完了時に反映する
@@ -1377,7 +1377,7 @@ impl Core {
             audio: samples,
             commit,
         } = req;
-        let context = asr::vocabulary_context(&self.settings.get().vocabulary);
+        let context = asr::asr_context(&self.settings.get().asr_context);
         let core = self.clone();
         // 取り消しても応答までは待つ (推論時間を学習するため。close_partial)
         tauri::async_runtime::spawn(async move {
@@ -1519,7 +1519,7 @@ impl Core {
             return;
         }
         let client = self.asr_client();
-        let context = asr::vocabulary_context(&self.settings.get().vocabulary);
+        let context = asr::asr_context(&self.settings.get().asr_context);
         let secs = samples.len() as f64 / crate::vad::SAMPLE_RATE as f64;
         log::info!("発話 {id} を確定: {secs:.2}秒 (途中表示の取り消し: {aborted_partial})");
         self.finals_in_flight.fetch_add(1, Ordering::SeqCst);

@@ -53,7 +53,7 @@ def create_app(worker: InferenceWorker, model_id: str) -> FastAPI:
                 text = ""
                 dropped = True
         elapsed_ms = round((time.perf_counter() - t0) * 1000)
-        # 認識テキスト・音声・context(ユーザー語彙)は個人情報になり得るためログに出さない。メタデータのみ
+        # 認識テキスト・音声・context(認識のヒント)は個人情報になり得るためログに出さない。メタデータのみ
         logger.info(
             "transcribed %.2fs audio in %dms: %d chars%s",
             audio.size / SAMPLE_RATE,

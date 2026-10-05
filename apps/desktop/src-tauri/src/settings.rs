@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 pub const VAD_SENSITIVITY_MAX: u32 = 100;
 pub const SILENCE_MS_MIN: u32 = 300;
 pub const SILENCE_MS_MAX: u32 = 3000;
+/// 認識のヒントの上限 (Unicode スカラー値の数)。context は URL のクエリで送るため、uvicorn (h11) の
+/// リクエスト行+ヘッダーの上限 16KiB に日本語の URL エンコード (1文字9バイト) で収まるようにする。
+/// 長いほど毎回の推論も遅くなる
+pub const ASR_CONTEXT_MAX_CHARS: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -174,7 +178,8 @@ pub struct Settings {
     pub silence_ms: u32,
     pub voice_commands_enabled: bool,
     pub voice_commands: Vec<VoiceCommand>,
-    pub vocabulary: Vec<String>,
+    /// 認識のヒント (自由記述)。ASR の context にそのまま渡す (asr::asr_context)
+    pub asr_context: String,
     pub excluded_apps: Vec<ExcludedApp>,
     pub panel_position: Option<PanelPosition>,
     pub setup_completed: bool,
@@ -196,7 +201,7 @@ impl Default for Settings {
             silence_ms: 1300,
             voice_commands_enabled: true,
             voice_commands: default_voice_commands(),
-            vocabulary: Vec::new(),
+            asr_context: String::new(),
             excluded_apps: Vec::new(),
             panel_position: None,
             setup_completed: false,
@@ -227,12 +232,8 @@ impl Settings {
         self.vad_sensitivity = self.vad_sensitivity.min(VAD_SENSITIVITY_MAX);
         self.silence_ms = self.silence_ms.clamp(SILENCE_MS_MIN, SILENCE_MS_MAX);
         self.input_device_id = self.input_device_id.filter(|s| !s.is_empty());
-        self.vocabulary = self
-            .vocabulary
-            .into_iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        // 文章として扱うため、中の改行・空白は残して前後だけ除く
+        self.asr_context = self.asr_context.trim().to_string();
         for c in &mut self.voice_commands {
             c.phrases = c
                 .phrases
@@ -272,6 +273,11 @@ impl Settings {
         if patch.contains_key("voiceCommands") {
             crate::voice_command::validate(&next.voice_commands)?;
         }
+        if patch.contains_key("asrContext")
+            && next.asr_context.chars().count() > ASR_CONTEXT_MAX_CHARS
+        {
+            anyhow::bail!("認識のヒントは{ASR_CONTEXT_MAX_CHARS}文字以内にしてください");
+        }
         if patch.contains_key("shortcut") {
             if let Some(sc) = &next.shortcut {
                 crate::shortcut::parse(sc)?;
@@ -279,6 +285,54 @@ impl Settings {
         }
         Ok(next)
     }
+}
+
+impl Settings {
+    /// 保存済みの settings.json を読む。旧形式の移行と、範囲外の値の丸めを行う。
+    fn from_saved(bytes: &[u8]) -> Result<Settings> {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(bytes).context("JSON として読めません")?;
+        migrate_vocabulary(&mut value);
+        let mut s: Settings =
+            serde_json::from_value(value).context("設定の値の型が正しくありません")?;
+        s = s.normalized();
+        // 手で編集する等で上限を超えていても起動は止めず、上限で切って使う (normalized と同じく
+        // 近い有効値で動かす)。変更時は apply_patch がエラーにして保存させない。
+        // 切るのは読み込み時だけ (apply_patch の前に切ると上限超過を検出できないため normalized には置かない)
+        if let Some((i, _)) = s.asr_context.char_indices().nth(ASR_CONTEXT_MAX_CHARS) {
+            log::warn!("認識のヒントが{ASR_CONTEXT_MAX_CHARS}文字を超えているため切り詰める");
+            s.asr_context.truncate(i);
+            s = s.normalized();
+        }
+        Ok(s)
+    }
+}
+
+/// 旧形式の `vocabulary: string[]` を `asrContext` に移す。それまで ASR に渡していた context と
+/// 同じになるよう、前後の空白を除いた空でない語を空白区切りでつなぐ。
+/// `asrContext` がある場合はそちらを使う。旧キーは Settings のフィールドにないため保存時に消える
+fn migrate_vocabulary(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let Some(legacy) = obj.remove("vocabulary") else {
+        return;
+    };
+    if obj.contains_key("asrContext") {
+        return;
+    }
+    // 型の違う旧値は移さない (旧形式の不正値で設定全体を捨てないため)
+    let Some(words) = legacy.as_array() else {
+        return;
+    };
+    let joined = words
+        .iter()
+        .filter_map(|w| w.as_str())
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    obj.insert("asrContext".into(), serde_json::Value::String(joined));
 }
 
 /// 設定の保持と永続化。
@@ -294,8 +348,8 @@ impl SettingsStore {
     /// 読めない・壊れている場合は既定値で起動する (壊れたファイルは退避して残す)。
     pub fn load(path: PathBuf) -> Self {
         let settings = match std::fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<Settings>(&bytes) {
-                Ok(s) => s.normalized(),
+            Ok(bytes) => match Settings::from_saved(&bytes) {
+                Ok(s) => s,
                 Err(e) => {
                     log::warn!("settings.json を読めないため既定値を使う: {e}");
                     let backup = path.with_extension("json.broken");
@@ -534,10 +588,10 @@ mod tests {
         let store = SettingsStore::load(path.clone());
         assert_eq!(store.get(), Settings::default());
         store
-            .update(&json!({ "vocabulary": [" mukuchi ", ""], "inputDeviceId": "" }))
+            .update(&json!({ "asrContext": " mukuchi の話\n固有名詞 \n", "inputDeviceId": "" }))
             .unwrap();
         let reloaded = SettingsStore::load(path.clone());
-        assert_eq!(reloaded.get().vocabulary, vec!["mukuchi".to_string()]);
+        assert_eq!(reloaded.get().asr_context, "mukuchi の話\n固有名詞");
         assert_eq!(reloaded.get().input_device_id, None);
 
         std::fs::write(&path, b"{broken").unwrap();
@@ -592,6 +646,79 @@ mod tests {
         assert!(r.is_err());
         assert_eq!(rolled_back, Some((true, false)));
         assert!(store.get().launch_at_login);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn asr_context_default_and_limit() {
+        let s = Settings::default();
+        assert_eq!(s.asr_context, "");
+        assert_eq!(serde_json::to_value(&s).unwrap()["asrContext"], "");
+        // 日本語も1文字として数える。前後の空白は数えない
+        let ok = "あ".repeat(ASR_CONTEXT_MAX_CHARS);
+        let next = s
+            .apply_patch(&json!({ "asrContext": format!("  {ok}\n") }))
+            .unwrap();
+        assert_eq!(next.asr_context, ok);
+        let e = s
+            .apply_patch(&json!({ "asrContext": "a".repeat(ASR_CONTEXT_MAX_CHARS + 1) }))
+            .unwrap_err();
+        assert_eq!(format!("{e:#}"), "認識のヒントは1000文字以内にしてください");
+        assert!(s
+            .apply_patch(&json!({ "asrContext": "😀".repeat(ASR_CONTEXT_MAX_CHARS + 1) }))
+            .is_err());
+        // 旧キーは受け付けない
+        assert!(s.apply_patch(&json!({ "vocabulary": ["x"] })).is_err());
+    }
+
+    #[test]
+    fn load_truncates_too_long_asr_context() {
+        let long = format!("{}い", "あ".repeat(ASR_CONTEXT_MAX_CHARS));
+        let s = Settings::from_saved(json!({ "asrContext": long }).to_string().as_bytes()).unwrap();
+        assert_eq!(s.asr_context, "あ".repeat(ASR_CONTEXT_MAX_CHARS));
+    }
+
+    #[test]
+    fn legacy_vocabulary_is_migrated() {
+        let load = |v: serde_json::Value| Settings::from_saved(v.to_string().as_bytes()).unwrap();
+        let s = load(json!({ "vocabulary": [" Tauri ", "", "  ", "mukuchi"], "silenceMs": 800 }));
+        assert_eq!(
+            (s.asr_context.as_str(), s.silence_ms),
+            ("Tauri mukuchi", 800)
+        );
+        // 旧キーは書き戻さない
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("vocabulary").is_none());
+        // 両方あれば asrContext を使う
+        let s = load(json!({ "vocabulary": ["Tauri"], "asrContext": "ヒント" }));
+        assert_eq!(s.asr_context, "ヒント");
+        // 空の旧値、型の違う旧値でも設定全体は捨てない
+        assert_eq!(load(json!({ "vocabulary": [] })).asr_context, "");
+        let s = load(json!({ "vocabulary": "x", "silenceMs": 800 }));
+        assert_eq!((s.asr_context.as_str(), s.silence_ms), ("", 800));
+    }
+
+    #[test]
+    fn store_migrates_legacy_vocabulary_and_drops_it_on_save() {
+        let dir = std::env::temp_dir().join(format!(
+            "mukuchi-settings-test-vocab-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(
+            &path,
+            json!({ "vocabulary": ["Tauri", "mukuchi"] }).to_string(),
+        )
+        .unwrap();
+        let store = SettingsStore::load(path.clone());
+        assert_eq!(store.get().asr_context, "Tauri mukuchi");
+        store.update(&json!({ "silenceMs": 800 })).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(saved.get("vocabulary").is_none());
+        assert_eq!(saved["asrContext"], "Tauri mukuchi");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -82,7 +82,7 @@ def main() -> None:
     worker.load()
 
     app = create_app(worker, args.model)
-    # access logはクエリ文字列(context=ユーザー語彙)を含むため無効化する
+    # access logはクエリ文字列(context=認識のヒント)を含むため無効化する
     uvicorn.run(app, host=HOST, port=args.port, log_config=None, access_log=False)
 
 

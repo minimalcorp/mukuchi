@@ -21,7 +21,7 @@
 | 標準モデル | Qwen3-ASR 1.7B（日本語・約 2.2 GB） | 同左 | モデル名・容量は `site.ts` の定数から組み立てる |
 | バージョン | v0.1.x | desktop の最新の版 | ビルド時に `apps/desktop/src-tauri/tauri.conf.json` から読む。desktop のリリースで LP も配信し直す (docs/release.md) |
 | 価格 | 無料 | 無料 | |
-| 通信 | 「音声認識モデルのダウンロード以外に通信しません」 | 同左 | 自動アップデートは未実装のため「アップデート」は書かない |
+| 通信 | 「音声認識モデルのダウンロード以外に通信しません」 | 「音声認識モデルのダウンロードと、アップデートの確認・ダウンロード以外に通信しません。アップデートの自動確認は設定で止められます。」 | desktop v0.3.0 で自動アップデート (GitHub Releases の確認・取得) を入れたため。自動確認は `Settings.autoCheckUpdates` で止められる (docs/architecture.md「アップデート」) |
 | ショートカット | ⌥Space | ⌥Space | desktop の `Settings.shortcut` の既定 (`Alt+Space`) |
 | 入力モード節の lead | 「モードは初回セットアップで選びます。」 | 「モードは初回セットアップで選び、あとから設定で変更できます。」 | 設定 > 音声入力 でも変更できる (docs/architecture.md「入力モード」) |
 

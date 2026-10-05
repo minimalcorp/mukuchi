@@ -1,6 +1,6 @@
 /*
  * P3 (設定の読み書き・復旧) の確認: open_setup、設定の即時保存・スライダーの間引き・他ウィンドウからの反映・
- * 保存エラーの表示、音声コマンドの検証、語彙ヒント、マイク一覧の再取得、AppStatus.seq。
+ * 保存エラーの表示、音声コマンドの検証、認識のヒント、マイク一覧の再取得、AppStatus.seq。
  */
 import { expect, test, type Page } from "@playwright/test";
 
@@ -385,25 +385,76 @@ test("settings: 編集中に他ウィンドウで追加された言い方とも�
   await expect(dialog.getByRole("alert")).toContainText("他のコマンド（⌘ + Backspace）の「やり直し」と重複しています");
 });
 
-// ---------- 語彙ヒント ----------
+// ---------- 認識のヒント ----------
 
-test("settings: 語彙ヒントは前後の空白を除き、重複を追加しない", async ({ page }) => {
+type AsrContextPatch = { patch: { asrContext?: string } };
+async function asrContextPatches(page: Page): Promise<string[]> {
+  return (await calls(page, "update_settings"))
+    .map((c) => (c.args as AsrContextPatch).patch.asrContext)
+    .filter((v): v is string => v != null);
+}
+
+test("settings: 認識のヒントは入力が止まるかフォーカスが外れた時に、書いたまま保存する", async ({ page }) => {
   await open(page, "window=settings&mock=default&category=recognition", SETTINGS);
-  const input = page.getByLabel("語彙ヒントに追加する語");
-  await input.fill(" 無口 、Tauri、無口、Visual Studio Code ");
-  await page.keyboard.press("Enter");
-  await expect(page.getByText("8 語")).toBeVisible();
-  await expect(page.getByRole("alert")).toHaveText("「Tauri」「無口」は登録済みです");
-  const last = (await calls(page, "update_settings")).at(-1)?.args as { patch: { vocabulary: string[] } };
-  expect(last.patch.vocabulary.slice(-2)).toEqual(["無口", "Visual Studio Code"]);
-  // 全角・半角の違いだけの語も同じとみなす
-  await input.fill("ｍｕｋｕｃｈｉ");
-  await page.keyboard.press("Enter");
-  await expect(page.getByRole("alert")).toHaveText("「ｍｕｋｕｃｈｉ」は登録済みです");
-  await expect(page.getByText("8 語")).toBeVisible();
-  // 削除
-  await page.getByRole("button", { name: "無口 を削除" }).click();
-  await expect(page.getByText("7 語")).toBeVisible();
+  const field = page.getByLabel("認識のヒント");
+  const text = "  開発の話です。\n以下の用語は英字で表記する: Qwen (読み: クウェン、クエン), pnpm  ";
+  await field.fill(text);
+  // 入力のたびには送らない
+  expect(await asrContextPatches(page)).toEqual([]);
+  await field.blur();
+  // 前後の空白の除去は Rust が行うため、フロントエンドはそのまま送る
+  await expect.poll(() => asrContextPatches(page)).toEqual([text]);
+  // 入力が止まれば、フォーカスがあるままでも保存する
+  await field.focus();
+  await field.press("End");
+  await field.pressSequentially("、Tauri");
+  await expect.poll(() => asrContextPatches(page)).toEqual([text, `${text}、Tauri`]);
+  await expect(field).toBeFocused();
+});
+
+test("settings: 認識のヒントの文字数は Unicode スカラー値で数え、上限を超えると知らせる", async ({ page }) => {
+  await open(page, "window=settings&mock=default&category=recognition", SETTINGS);
+  const field = page.getByLabel("認識のヒント");
+  // UTF-16 でサロゲートペアになる文字 (𩸽) も 1 文字と数える
+  await field.fill("𩸽".repeat(1000));
+  await expect(page.getByText("1000 / 1000")).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  // Rust と同じく前後の空白を除いて数える (末尾の改行だけで超過にしない)
+  await field.fill("𩸽".repeat(1000) + "\n");
+  await expect(page.getByText("1000 / 1000")).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await field.blur();
+  await expect.poll(async () => (await asrContextPatches(page)).at(-1)).toBe("𩸽".repeat(1000) + "\n");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await field.fill("𩸽".repeat(1000) + "あ");
+  await expect(page.getByText("1001 / 1000")).toBeVisible();
+  await expect(page.getByRole("alert")).toBeVisible();
+  // 保存できない値でも、フォーカスが外れて入力が消えない。Rust の拒否を表示する
+  await field.blur();
+  await expect(page.getByRole("alert")).toHaveText("認識のヒントは1000文字以内にしてください");
+  await expect(field).toHaveValue("𩸽".repeat(1000) + "あ");
+  // 上限内に戻すと保存でき、エラーは消える
+  await field.fill("短いヒント");
+  await field.blur();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect.poll(async () => (await asrContextPatches(page)).at(-1)).toBe("短いヒント");
+});
+
+test("settings: 認識のヒントは待ち時間内にページが隠れても保存し、変換中の値は送らない", async ({ page }) => {
+  await open(page, "window=settings&mock=default&category=recognition", SETTINGS);
+  const field = page.getByLabel("認識のヒント");
+  await field.fill("閉じる直前の入力");
+  // 変換中の入力 (確定前) を再現する。React の onChange に届くよう、ネイティブの setter で値を変えてから input を送る
+  await field.evaluate((el: HTMLTextAreaElement) => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, "閉じる直前の入力へんかん");
+    el.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+  });
+  await expect(field).toHaveValue("閉じる直前の入力へんかん");
+  expect(await asrContextPatches(page)).toEqual([]);
+  // フォーカスを外さず、待ち時間 (800ms) 内にウィンドウを閉じた時に相当する
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide")));
+  await expect.poll(() => asrContextPatches(page)).toEqual(["閉じる直前の入力"]);
+  await expect(field).toBeFocused();
 });
 
 // ---------- AppStatus.seq ----------

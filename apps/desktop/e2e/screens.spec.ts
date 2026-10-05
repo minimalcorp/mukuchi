@@ -68,7 +68,7 @@ const cases: Case[] = [
   { name: "settings-voice", query: "window=settings&mock=default&category=voice", texts: ["入力モード", "常に聞き取る", "1回ずつ聞き取る", "ショートカット", "マイク", "入力レベル", "発話検出の感度", "1.3 秒", "入力しないアプリ", "1Password", "アプリを追加"], viewport: SETTINGS },
   { name: "settings-voice-shortcut-conflict", query: "window=settings&mock=shortcut-conflict&category=voice", texts: ["ショートカット「⌥ Space」を登録できませんでした。別のキーに変更してください"], viewport: SETTINGS },
   { name: "settings-commands", query: "window=settings&mock=default&category=commands", texts: ["音声コマンドを使う", "エンター", "Shift + Enter", "⌘ + Enter", "コマンドを追加"], viewport: SETTINGS },
-  { name: "settings-recognition", query: "window=settings&mock=default&category=recognition", texts: ["Qwen3-ASR（日本語追加学習）", "読み込み済み", "語彙ヒント", "6 語", "Kubernetes"], viewport: SETTINGS },
+  { name: "settings-recognition", query: "window=settings&mock=default&category=recognition", texts: ["Qwen3-ASR（日本語追加学習）", "読み込み済み", "認識のヒント", "/ 1000"], viewport: SETTINGS },
   { name: "settings-recognition-stopped", query: "window=settings&mock=asr-stopped&category=recognition", texts: ["停止中", "再起動"], viewport: SETTINGS },
   { name: "settings-permissions", query: "window=settings&mock=perm-denied&category=permissions", texts: ["アクセシビリティ", "未許可", "システム設定を開く"], viewport: SETTINGS },
   { name: "settings-storage", query: "window=settings&mock=default&category=storage", texts: ["3.4 GB", "使用中", "モデル", "12 MB", "完全にアンインストール"], viewport: SETTINGS },
@@ -163,12 +163,14 @@ test("settings: 入力しないアプリを追加・削除する", async ({ page
   await expect(page.getByText("Slack", { exact: true })).toHaveCount(0);
 });
 
-test("settings: 語彙ヒントを追加する", async ({ page }) => {
+test("settings: 認識のヒントを編集する", async ({ page }) => {
   await open(page, { name: "", query: "window=settings&mock=default&category=recognition", texts: [], viewport: SETTINGS });
-  await page.getByLabel("語彙ヒントに追加する語").fill("無口");
-  await page.keyboard.press("Enter");
-  await expect(page.getByText("7 語")).toBeVisible();
-  await expect(page.getByText("無口", { exact: true })).toBeVisible();
+  const field = page.getByLabel("認識のヒント");
+  await expect(field).toHaveValue(/Claude Code/);
+  await field.fill("会議の話です");
+  await expect(page.getByText("6 / 1000")).toBeVisible();
+  await field.blur();
+  await expect(field).toHaveValue("会議の話です");
 });
 
 test("setup: 権限が揃うまで次へは押せず、許可すると進める", async ({ page }) => {

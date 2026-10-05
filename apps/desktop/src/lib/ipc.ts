@@ -72,7 +72,8 @@ export type Settings = {
   silenceMs: number;
   voiceCommandsEnabled: boolean;
   voiceCommands: VoiceCommand[];
-  vocabulary: string[];
+  /** 認識のヒント (自由記述)。ASR にそのまま渡す。最大 ASR_CONTEXT_MAX 文字 (Unicode スカラー値) */
+  asrContext: string;
   excludedApps: ExcludedApp[];
   /**
    * Rust (ドラッグ) だけが書く。フロントエンドは null (既定位置に戻す) にする時だけ送る。
@@ -93,6 +94,9 @@ export type Settings = {
    */
   shortcut: string | null;
 };
+
+/** Settings.asrContext の上限 (Rust の検証と同じ値。表示用で、検証の正は Rust) */
+export const ASR_CONTEXT_MAX = 1000;
 
 export type PanelStyle = "full" | "compact";
 /** continuous: ON の間ずっと発話ごとに入力 (常に聞き取る)。oneShot: 1発話を確定したら自動で OFF (1回ずつ聞き取る) */

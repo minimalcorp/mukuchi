@@ -172,7 +172,7 @@ def test_transcribe_before_load_fails():
 
 @pytest.mark.parametrize("text", ["秘密の認識結果テキスト", "ご視聴ありがとうございました。"])
 def test_logs_contain_no_text_or_context(client, fake, wav_bytes, caplog, text):
-    # 認識テキスト・context(ユーザー語彙)はログに出さない。ハルシネーション除外経路も確認する
+    # 認識テキスト・context(認識のヒント)はログに出さない。ハルシネーション除外経路も確認する
     fake.text = text
     context = "社外秘プロジェクト名"
     with caplog.at_level(logging.DEBUG):

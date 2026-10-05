@@ -184,7 +184,11 @@ test.describe("PC", () => {
     await expect(reqs).toContainText("動作確認M1 Max・M3 Pro");
     await expect(reqs).toContainText("Qwen3-ASR 1.7B（日本語・約 2.2 GB）");
     await expect(page.getByText("Qwen3-ASR 1.7B（約 2.2 GB）をダウンロードします。")).toBeVisible();
-    await expect(page.getByText("音声認識モデルのダウンロード以外に通信しません。")).toBeVisible();
+    await expect(
+      page.getByText(
+        "音声認識モデルのダウンロードと、アップデートの確認・ダウンロード以外に通信しません。アップデートの自動確認は設定で止められます。",
+      ),
+    ).toBeVisible();
     await expect(heroPc(page)).toContainText("36 MB");
     await expect(page.getByTestId("cta-note").first()).toHaveText(/検出しました/);
     await expectCompanyLink(page);

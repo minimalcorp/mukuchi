@@ -169,7 +169,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 
 - 待受: `127.0.0.1:<port>`。本番はRustが空きポートを選び `--port` で渡し、`--exit-on-stdin-eof` 付きで起動する。開発は `18765` 固定でprocess-composeが起動し、アプリは環境変数 `MUKUCHI_ASR_URL` があればそれに接続する(自分では起動しない)
 - `GET /health` → `200 {"status":"ok","model":"<id>"}`。モデル読み込み完了まで応答しない
-- `POST /transcribe` — body: 16kHz/mono/16bit PCMのWAV (`Content-Type: audio/wav`)。query: `language` (既定 `Japanese`)、`context` (語彙ヒント、任意) → `200 {"text":"...","elapsed_ms":123}`
+- `POST /transcribe` — body: 16kHz/mono/16bit PCMのWAV (`Content-Type: audio/wav`)。query: `language` (既定 `Japanese`)、`context` (認識のヒント = `Settings.asrContext` をそのまま。任意。Qwen3-ASR のシステムメッセージにそのまま入る) → `200 {"text":"...","elapsed_ms":123}`
   - `elapsed_ms`: サーバーがbodyを受信し終えてから応答するまでの時間 (WAVデコード + 推論待ち + 推論)。ネットワーク転送は含まない
   - エラー: 不正なWAV/形式違い → `400`、body が 5MiB (約120秒分+余裕) を超える → `413`
 - 開発用 (デバッグビルドのみ): `MUKUCHI_DEV_AUDIO_FILE=<wav>` でマイクの代わりにWAVを実時間で流す (その後は無音)。`MUKUCHI_DEV_AUTO_LISTEN=1` でASR準備完了後に自動でONにする (セットアップ画面は開かない)。`MUKUCHI_ASR_URL` 使用中はセットアップ不要とみなし、起動時にセットアップを開かずpanelを表示する (トレイの「セットアップを開く…」からは開ける)。`MUKUCHI_DEV_SHOW_SETUP=1` でそれをやめ本番と同じ判定にする (セットアップ画面の確認用)。`MUKUCHI_DEV_TARGET_BUNDLE=<bundle id>` でそのアプリが前面の時だけ入力する (自動テストで他のアプリに入力しないため)。`MUKUCHI_DEV_NO_PARTIAL=1` で途中表示を送らない (遅延の比較用)。`MUKUCHI_ASR_URL` もデバッグビルドのみ有効で、ループバックの http のみ受け付ける。`MUKUCHI_DEV_DATA_DIR=<dir>` でデータディレクトリを差し替える (本物のデータ・モデルに触れずに検証するため。受け付ける条件は「識別子・パス」の削除の安全策)。`MUKUCHI_DEV_UV` `MUKUCHI_DEV_ASR_SERVER_DIR` `MUKUCHI_DEV_VERIFY_WAV` で同梱物 (uv・asr-server/・verify.wav) を個別に差し替える。`MUKUCHI_DEV_UNINSTALL_DRY_RUN=1` でアンインストールは何も消さず対象と操作をログに出すだけ (アプリも終了しない)
@@ -225,7 +225,7 @@ type Settings = {
   silenceMs: number;                      // 300..3000 既定 1300 (話の途中の間で分割しないため長め)
   voiceCommandsEnabled: boolean;          // 既定 true
   voiceCommands: { id: string; phrases: string[]; key: KeyCombo }[]; // 言い方のないコマンド・正規化(NFKC・記号空白除去・小文字化)後に空/重複する言い方は update_settings がエラーにする
-  vocabulary: string[];                   // ASR の context に空白区切りで渡す
+  asrContext: string;                     // 既定 ""。認識のヒント (自由記述)。前後の空白を除いて ASR の context にそのまま渡す (空なら渡さない)。最大 1000 文字 (Unicode スカラー値で数える。超えたら update_settings は保存せずエラー。context は URL のクエリで送り、uvicorn (h11) のリクエスト行+ヘッダーの上限 16KiB に日本語の URL エンコード (1文字9バイト) で収めるため。長いほど毎回の推論も遅くなる)。旧形式の vocabulary: string[] だけがある設定は、読み込み時に空白区切りでつないで asrContext に移す (それまでと同じ context になる)
   excludedApps: { bundleId: string; name: string }[];
   panelPosition: { x: number; y: number; displayId: string; version: 2 } | null; // null=既定位置。Rust (ドラッグ) だけが書く (フロントエンドは null にするだけ)。x,y はピル (影の余白を除いた描画内容) のアンカー点の、ディスプレイ左下からの位置 (整数pt、y上向き)。アンカー点はアンカー (panel-anchor) に当たるピルの辺・角 (例: 右上なら右上の角、中央下なら下辺の中央) で、アンカーはこの点の visibleFrame 内の位置 (左右3等分・上下2等分) から決まる。displayId は CGDirectDisplayID (ピルの中心があるディスプレイ)。version なし (旧形式: ウィンドウの下端中央) は起動時に Rust が見た目の位置を変えずに移行して保存し直す。大きさの変更で画面に収めるための自動のずれは保存しない
   setupCompleted: boolean;

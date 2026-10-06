@@ -104,6 +104,9 @@ test("setup: 一時停止は止まるまで押せず、止まった項目は act
 });
 
 test("setup: 失敗したら表示用の文言を出し、再試行は start_provisioning", async ({ page, m, ui }) => {
+  // 再試行後の取得中の表示を確かめる間に導入が終わらないよう時計を止める
+  await page.clock.install({ time: 0 });
+  await page.clock.pauseAt(1000);
   await open(page, "window=setup&mock=download-error", SETUP);
   await expect(page.getByRole("alert")).toContainText(ui.modelDownloadFailed);
   await expect(item(page, "model")).toHaveAttribute("data-state", "active");
@@ -255,7 +258,10 @@ test("settings: 使用量を取得できなければエラーを出す", async (
 });
 
 test("settings: アンインストール中は取り消せず、終わるまで操作できない", async ({ page, m }) => {
+  // モックのアンインストールは 800ms で終わる。実時間だと遅い CI (並列実行) では確かめる前に終わるため時計を止める
+  await page.clock.install();
   await open(page, "window=settings&mock=default&category=storage", SETTINGS);
+  await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1000);
   await page.getByRole("button", { name: m.settings.storage.uninstallEllipsis }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText(m.settings.storage.uninstallTotal("3.7 GB"))).toBeVisible();
@@ -265,6 +271,7 @@ test("settings: アンインストール中は取り消せず、終わるまで�
   await expect(dialog.getByRole("button", { name: m.settings.storage.uninstallButton, exact: true })).toBeDisabled();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toBeVisible();
+  await page.clock.runFor(800);
   // モックは dry run と同じく終了せずに返る
   await expect(dialog.getByText(m.settings.storage.uninstallDone)).toBeVisible();
   expect(await calls(page, "uninstall")).toHaveLength(1);

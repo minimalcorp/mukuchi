@@ -108,6 +108,9 @@ for (const dark of [false, true]) {
 }
 
 test("失敗: 理由を表示し、再試行で取得を再開する", { tag: SCREENSHOT }, async ({ page, m, ui, snap }) => {
+  // 取得中 (0.1 GB / 250ms) の表示を確かめる間に取得が終わらないよう時計を止める
+  await page.clock.install({ time: 0 });
+  await page.clock.pauseAt(1000);
   await open(page, "models-error");
   const rb = row(page, "ja-bf16");
   await expect(rb).toContainText(`${m.settings.models.failed}${m.common.separator}1.5 / 4.1 GB`);
@@ -334,6 +337,9 @@ test("話す言語: 変えると一覧が並び替わり、推奨と注記が移
 });
 
 test("推奨の案内: 推奨が未取得ならダウンロードを始め、取得中は終わるまで待つよう示す", { tag: I18N }, async ({ page, m, ui, appLocale }) => {
+  // 取得中の案内を確かめる間に取得が終わらないよう時計を止める
+  await page.clock.install({ time: 0 });
+  await page.clock.pauseAt(1000);
   await open(page, "models-not-recommended");
   const rec = RECOMMENDED[appLocale];
   const notice = page.getByTestId("model-recommendation");

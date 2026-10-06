@@ -27,10 +27,14 @@ function calls(page: Page, cmd: string): Promise<Call[]> {
 
 // 時刻は Intl の書式 (表示言語で違う)
 test("about: 確認して最新なら最終確認の時刻を出す", { tag: I18N }, async ({ page, m }) => {
+  // 確認 (約 0.6 秒) の途中を確かめるため時計を止める (実時間だと遅い CI では確かめる前に終わる)
+  await page.clock.install();
   await open(page, "update-unchecked");
+  await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1000);
   await expect(page.getByText(m.settings.about.notChecked)).toBeVisible();
   await page.getByRole("button", { name: m.settings.about.check }).click();
   await expect(page.getByTestId("update-status")).toHaveAttribute("data-state", "checking");
+  await page.clock.runFor(600);
   await expect(page.getByText(m.settings.about.upToDate)).toBeVisible();
   // 時刻は表示言語の書式 (Intl) のため、「最終確認 今日」の部分までを確かめる
   await expect(page.getByText(m.settings.about.lastChecked(m.format.today("")).trim())).toBeVisible();

@@ -420,7 +420,10 @@ async function asrContextPatches(page: Page): Promise<string[]> {
 }
 
 test("settings: 認識のヒントは入力が止まるかフォーカスが外れた時に、書いたまま保存する", async ({ page, m }) => {
+  // 入力が止まってからの待ち時間 (800ms) を clock で進める。実時間だと遅い CI では入力の途中で保存されてしまう
+  await page.clock.install();
   await open(page, "window=settings&mock=default&category=recognition", SETTINGS);
+  await pauseClock(page);
   const field = page.getByLabel(m.settings.recognition.context);
   const text = "  開発の話です。\n以下の用語は英字で表記する: Qwen (読み: クウェン、クエン), pnpm  ";
   await field.fill(text);
@@ -433,6 +436,9 @@ test("settings: 認識のヒントは入力が止まるかフォーカスが外�
   await field.focus();
   await field.press("End");
   await field.pressSequentially("、Tauri");
+  await page.clock.runFor(799);
+  expect(await asrContextPatches(page)).toEqual([text]);
+  await page.clock.runFor(1);
   await expect.poll(() => asrContextPatches(page)).toEqual([text, `${text}、Tauri`]);
   await expect(field).toBeFocused();
 });

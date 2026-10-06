@@ -15,7 +15,7 @@ from mlx_qwen3_asr.convert import quantize_model
 from mlx_qwen3_asr.load_models import load_model
 from mlx_qwen3_asr.model import Qwen3ASRModel
 
-from mukuchi_asr.convert import convert
+from mukuchi_asr.convert import check_bits, convert, quantize
 
 TINY_CONFIG = {
     "thinker_config": {
@@ -60,7 +60,7 @@ def _bits(module) -> int | None:
     return module.bits if isinstance(module, (nn.QuantizedLinear, nn.QuantizedEmbedding)) else None
 
 
-@pytest.mark.parametrize(("bits", "encoder_bits"), [(8, 8), (4, 8), (8, 16)])
+@pytest.mark.parametrize(("bits", "encoder_bits"), [(8, 8), (4, 8), (8, 16), (5, 5), (5, 8), (5, 16)])
 def test_converted_checkpoint_loads_with_same_weights(source_dir, tmp_path, bits, encoder_bits):
     out = tmp_path / "out"
     convert(source_dir, out, bits=bits, encoder_bits=encoder_bits)
@@ -81,9 +81,21 @@ def test_converted_checkpoint_loads_with_same_weights(source_dir, tmp_path, bits
     expected.load_weights(str(source_dir / "model.safetensors"), strict=False)
     expected.lm_head.weight = expected.model.embed_tokens.weight
     expected.update(mlx_utils.tree_map(lambda x: x.astype(mx.float16), expected.parameters()))
-    quantize_model(expected, bits=bits, encoder_bits=encoder_bits)
+    if 5 in (bits, encoder_bits):
+        # upstream の quantize_model は5bitを受け付けないため、自前の同等手順で作る
+        quantize(expected, bits, 64, encoder_bits)
+    else:
+        quantize_model(expected, bits=bits, encoder_bits=encoder_bits)
     want = dict(mlx_utils.tree_flatten(expected.parameters()))
     got = dict(mlx_utils.tree_flatten(loaded.parameters()))
     assert want.keys() == got.keys()
     for k, v in want.items():
         assert mx.array_equal(got[k], v).item(), k
+
+
+def test_encoder_only_5bit_is_rejected():
+    # 読み込み側は5bitの層を判定できず、デコーダのbit数で読み直してしまうため
+    with pytest.raises(ValueError):
+        check_bits(8, 5)
+    check_bits(5, 5)
+    check_bits(5, 8)

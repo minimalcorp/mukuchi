@@ -4,8 +4,14 @@
 # ///
 """results/*.json を corpus.tsv の正解と突き合わせ、Markdownの比較表を出力する。
 
-使い方: [RESULTS_DIR=...] uv run scripts/compare.py [--baseline <label>] > results/report.md
+使い方: [RESULTS_DIR=...] uv run scripts/compare.py [--baseline <label>] [--corpus <tsv>] [--metric cer|wer]
+        > results/report.md
 - CER: 正解テキストに対する文字誤り率(NFKC正規化・句読点/空白除去後)
+- WER: 単語誤り率 (英語用)。NFKC・小文字化、数字の桁区切り・ピリオド・アポストロフィを削除、その他の記号は空白。
+  数字の表記の揺れ (3 / three、10 AM / ten a.m.、30 / 30th) は正規化しないため誤りとして数える
+  (「数字除くWER」は正解に数字を含む発話を除いた WER)
+- コマンド: id が cmd で始まる発話のうち、正規化後に正解と完全一致した数 (アプリの音声コマンドの判定と同じ。
+  正規化は src-tauri/src/voice_command.rs の normalize 相当: 空白・句読点除去・小文字化)
 - vsBase: ベースライン実装の出力に対する文字誤り率(実装間の一致度)
 - メモリ: run_all.sh が /usr/bin/time -l で記録した peak memory footprint
 """
@@ -28,7 +34,16 @@ def normalize(text: str) -> str:
     return _PUNCT_RE.sub("", unicodedata.normalize("NFKC", text).lower())
 
 
-def edit_distance(a: str, b: str) -> int:
+_WORD_DELETE_RE = re.compile(r"(?<=\d)[,.](?=\d)|[.'’]")
+_WORD_SPLIT_RE = re.compile(r"[^\w]+")
+
+
+def words(text: str) -> list[str]:
+    t = _WORD_DELETE_RE.sub("", unicodedata.normalize("NFKC", text).lower())
+    return [w for w in _WORD_SPLIT_RE.split(t) if w and w != "_"]
+
+
+def edit_distance(a, b) -> int:
     prev = list(range(len(b) + 1))
     for i, ca in enumerate(a, 1):
         cur = [i]
@@ -41,6 +56,12 @@ def edit_distance(a: str, b: str) -> int:
 def cer(refs: list[str], hyps: list[str]) -> float:
     errors = sum(edit_distance(normalize(r), normalize(h)) for r, h in zip(refs, hyps))
     total = sum(len(normalize(r)) for r in refs)
+    return errors / total if total else 0.0
+
+
+def wer(refs: list[str], hyps: list[str]) -> float:
+    errors = sum(edit_distance(words(r), words(h)) for r, h in zip(refs, hyps))
+    total = sum(len(words(r)) for r in refs)
     return errors / total if total else 0.0
 
 
@@ -60,9 +81,13 @@ def peak_memory_gb(label: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline", default="python-fp16")
+    parser.add_argument("--corpus", type=Path, default=ROOT / "corpus.tsv", help="正解のTSV (id<TAB>text)")
+    parser.add_argument("--metric", choices=["cer", "wer"], default="cer", help="主の誤り率 (en は wer)")
     args = parser.parse_args()
+    err = wer if args.metric == "wer" else cer
+    metric = args.metric.upper()
 
-    with open(ROOT / "corpus.tsv", encoding="utf-8") as f:
+    with open(args.corpus, encoding="utf-8") as f:
         corpus = {r["id"]: r["text"] for r in csv.DictReader(f, delimiter="\t")}
     runs = {p.stem: json.loads(p.read_text()) for p in sorted(RESULTS.glob("*.json"))}
     if not runs:
@@ -70,8 +95,11 @@ def main() -> None:
     base = {r["id"]: r["text"] for r in runs[args.baseline]["results"]} if args.baseline in runs else {}
 
     print("## サマリ\n")
-    print("| label | 実装 | CER | vsBase | Base一致 | 短発話CER | レイテンシ中央値 | p90 | RTF | ロード | メモリ(GB) |")
-    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    # WER では数字の表記の揺れ (3 PM / three p.m.) が大半を占めるため、正解に数字を含む発話を除いた値も出す
+    extra = " 数字除くWER | CER |" if args.metric == "wer" else ""
+    print(f"| label | 実装 | {metric} |{extra} vsBase | Base一致 | 短発話{metric} | コマンド | "
+          "レイテンシ中央値 | p90 | RTF | ロード | メモリ(GB) |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|" + ("---|---|" if extra else ""))
     for label, run in runs.items():
         rs = [r for r in run["results"] if corpus_id(r["id"]) in corpus]
         ids = [r["id"] for r in rs]
@@ -80,12 +108,15 @@ def main() -> None:
         short = [(corpus[corpus_id(r["id"])], r["text"]) for r in rs if r["id"].startswith("cmd")]
         lat = [r["latency_ms"] for r in rs]
         rtf = sum(r["latency_ms"] / 1000 for r in rs) / sum(r["audio_sec"] for r in rs)
-        vs = f"{cer([base[i] for i in ids if i in base], [h for i, h in zip(ids, hyps) if i in base]):.1%}" if base else "-"
+        vs = f"{err([base[i] for i in ids if i in base], [h for i, h in zip(ids, hyps) if i in base]):.1%}" if base else "-"
         same = (f"{sum(normalize(base[i]) == normalize(h) for i, h in zip(ids, hyps) if i in base)}/{len(ids)}"
                 if base else "-")
-        short_cer = f"{cer(*zip(*short)):.1%}" if short else "-"
+        short_err = f"{err(*zip(*short)):.1%}" if short else "-"
+        cmd_ok = f"{sum(normalize(r) == normalize(h) for r, h in short)}/{len(short)}" if short else "-"
+        no_num = [(r, h) for r, h in zip(refs, hyps) if not re.search(r"\d", r)]
+        extra_cell = f" {wer(*zip(*no_num)):.1%} | {cer(refs, hyps):.1%} |" if extra else ""
         p90 = statistics.quantiles(lat, n=10)[-1] if len(lat) >= 2 else lat[0]
-        print(f"| {label} | {run['impl']} | {cer(refs, hyps):.1%} | {vs} | {same} | {short_cer} | "
+        print(f"| {label} | {run['impl']} | {err(refs, hyps):.1%} |{extra_cell} {vs} | {same} | {short_err} | {cmd_ok} | "
               f"{statistics.median(lat):.0f}ms | {p90:.0f}ms | {rtf:.3f} | {run['load_ms'] / 1000:.1f}s | {peak_memory_gb(label)} |")
 
     print("\n## 発話ごとの出力\n")

@@ -104,6 +104,20 @@ async function settleDevCss(page: Page) {
 }
 
 /**
+ * 時計を止めないテストでクリックする前に、開発サーバー特有の後からの変化を待つ。ハイドレーション後に
+ * critical CSS が外れてフォントが読み直されると後続の位置がずれ、ページ下部のリンクのクリックが空振りする
+ * (CI でフッターの言語の切り替えから移動しなかった)。読み込み中の依存の最適化による読み直しも待つ
+ */
+async function settleBeforeClick(page: Page) {
+  await page.waitForLoadState("networkidle");
+  await expect(page.locator("[data-react-router-critical-css]")).toHaveCount(0);
+  await page.evaluate(() => {
+    void document.body.offsetHeight;
+    return document.fonts.ready;
+  });
+}
+
+/**
  * デモを 2 巡分 (両方のモードを 2 回ずつ) 動かしながら、デモの高さと直後のセクションの位置が変わらないこと、
  * 固定した各部から中身がはみ出さないことを確かめる (時計を止めて決まった間隔で進める)
  */
@@ -530,6 +544,7 @@ test.describe("言語 PC", () => {
   }) => {
     await fakeNavigator(page, ENVS.macArm);
     await page.goto("/");
+    await settleBeforeClick(page);
     const header = page.locator("header").getByTestId("language-switch");
     await expect(header.locator('[aria-current="page"]')).toHaveText("日本語");
     await header.getByRole("link", { name: "English" }).click();
@@ -538,6 +553,7 @@ test.describe("言語 PC", () => {
     await expect(page).toHaveURL((u) => u.pathname === "/en/", { timeout: 15_000 });
     await expect(page.locator("html")).toHaveAttribute("lang", "en");
 
+    await settleBeforeClick(page);
     const footer = page.locator("footer").getByTestId("language-switch");
     await expect(footer.locator('[aria-current="page"]')).toHaveText("English");
     await footer.getByRole("link", { name: "日本語" }).click();

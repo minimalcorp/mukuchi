@@ -48,6 +48,7 @@ monorepo。JS/TS の依存はルートの pnpm workspace (`pnpm-workspace.yaml`�
 | `make web-deploy` | web を本番へ `sst deploy --stage production` (手元から。版・タグは変えない。AWS の認証情報と `MUKUCHI_WEB_CERT_ARN` が必要。通常は下の Release で行う) |
 | Actions > Release (`.github/workflows/release.yml`、main で手動実行) | リリース・デプロイの唯一の経路。入力 `target` (`desktop`\|`web`)・`bump` (`patch`\|`minor`\|`major`)。承認 (Environment `release-approval`、先頭で1回) → ビルド・署名・公証 or `sst deploy` → 成功時のみ版上げコミットとタグ (`desktop-v<ver>` / `web-v<ver>`) を Deploy Key で main へ push (main が進んでいたら止まる)。desktop は GitHub Release を公開 ([docs/release.md](docs/release.md)) |
 | `node scripts/bump-version.mjs <desktop\|web> <patch\|minor\|major> [--dry-run]` | 版の書き換え (release.yml が使う。desktop は tauri.conf.json・Cargo.toml・Cargo.lock・package.json をそろえる)。テストは `node --test scripts/*.test.mjs` (`make test` に含む) |
+| `node scripts/check-release-blockers.mjs desktop` | 配布してはいけない仮の値 (HF 未公開のモデルの revision のプレースホルダ `TODO-i18n-pin-commit*`) が残っていれば理由を出して失敗。release.yml の prepare と `make build` (build-macos.sh の既定・`--build-only`) で実行。`build-local`・`dmg-local` では実行しない |
 | `make help` | ターゲット一覧 |
 | `pnpm lint` / `pnpm build` / `pnpm test` (`apps/desktop` で実行) | desktop のフロントエンドの lint / 型チェック+ビルド / Playwright (スクリーンショットは `apps/desktop/e2e/screenshots/`) |
 | `pnpm lint` / `pnpm typecheck` / `pnpm build` / `pnpm test` (`apps/web` で実行) | web の lint+prettier / 型検査 / 静的ビルド / Playwright (chromium) |

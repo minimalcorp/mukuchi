@@ -136,6 +136,12 @@ resolve_notary() {
   fi
 }
 
+# 仮の値 (HF 未公開のモデルの revision 等) のまま配布しないよう、長いビルドの前に止める。
+# 手元で試す --local・--local-dmg は止めない。--sign-only は build-only で確かめた .app を受け取るだけなので見ない
+if [ "$mode" = release ] || [ "$mode" = build-only ]; then
+  node "$repo/scripts/check-release-blockers.mjs" desktop || die "リリースできない値が残っている (上の理由を参照)。手元で試すだけなら make build-local"
+fi
+
 # node_modules が無いと tauri build が分かりにくいエラーで止まるため先に確かめる
 if [ "$mode" != sign-only ] && [ ! -x node_modules/.bin/tauri ]; then
   die "node_modules/.bin/tauri がない。先に pnpm install --frozen-lockfile (CI) か make setup (手元) を実行する"

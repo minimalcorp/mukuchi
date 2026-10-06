@@ -159,6 +159,7 @@ Apple の secret の登録:
 
 - 版は `X.Y.Z` のみ (プレリリースは Latest にならず LP の固定 URL が指さないため扱わない)。手で上げない。main にある版が「最後に出した版」になる
 - `scripts/bump-version.mjs <desktop|web> <patch|minor|major> [--dry-run]` が版の行だけを書き換える (Node の標準ライブラリのみ。テストは `node --test scripts/*.test.mjs`、`make test` と CI に含む)
+- `scripts/check-release-blockers.mjs desktop` が仮の値 (HF 未公開のモデルの revision のプレースホルダ等) の残りを検査する。release.yml の prepare と `build-macos.sh` (`make build`・`--build-only`) で止め、`make build-local`・`make dmg-local`・`make test` では止めない
 - `scripts/release-commit.sh` がその版上げをコミットする。作者・日時を固定するため、同じ開始コミットからなら別の job で作っても同じコミット ID になる。これで「ビルド・デプロイしたソース = push するコミット」を ID の一致で確かめる (desktop は .app に埋め込むコミットの短縮ハッシュもこのコミット)
 - `scripts/release-push.sh` が版上げコミットと注釈付きタグを main へ `git push --atomic` する。main が run の開始時 (`github.sha`) から進んでいたら **rebase せずに止める** (ビルドしたソースと main・タグがずれないように)。その場合は Release を最初から実行し直す (版は同じ番号がもう一度選ばれる)
 - ビルド・署名・公証・検証・デプロイのどれかが失敗したら、コミット・タグは push されない
@@ -168,7 +169,7 @@ Apple の secret の登録:
 jobs: `approve` (承認) → `prepare` → `build` → `sign` → `publish-desktop` → `deploy-web-for-desktop`
 
 1. `Approve` (`release-approval`): 承認を待つだけ。承認後の job は承認を求めない
-2. `Prepare`: main 以外からの実行を止める → 版上げコミットをローカルで作る → 同じタグ・公開済みの Release があれば止める
+2. `Prepare`: main 以外からの実行を止める → `scripts/check-release-blockers.mjs desktop` (配布してはいけない仮の値。今は HF 未公開のモデルの revision のプレースホルダ `TODO-i18n-pin-commit*`) が残っていれば止める → 版上げコミットをローカルで作る → 同じタグ・公開済みの Release があれば止める
 3. `Build unsigned .app` (secret なし): Kyoko の有無を確認 → 同じ版上げコミットを作る (ID を確認) → `pnpm install --frozen-lockfile` → `build-macos.sh --build-only`。.app と .dmg テンプレートを artifact で渡す
 4. `Sign and notarize (.dmg)` (`production-desktop`): .app の版を確認 → 証明書を一時キーチェーンに入れて `build-macos.sh --sign-only` (updater 用の tar.gz も作る) → 資格情報を削除 → `verify-macos.sh` → 添付を用意して artifact `mukuchi-dmg-signed` (7日保存) にする。中身は `mukuchi_aarch64.dmg`・`mukuchi_aarch64.dmg.sha256`・`mukuchi_aarch64.app.tar.gz`・`mukuchi_aarch64.app.tar.gz.sha256` (版番号なし。LP の固定 URL 用。版は Release のタイトル・タグで分かる。tar.gz の .sha256 は publish での確認用で添付しない)
 5. `Publish desktop` (`production-desktop`。Deploy Key で checkout し、第三者のパッケージを入れない):

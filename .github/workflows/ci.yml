@@ -99,6 +99,8 @@ jobs:
             # scripts/bump-version.test.mjs が実ファイルを複製してテストする
             '^apps/desktop/src-tauri/(tauri\.conf\.json|Cargo\.toml|Cargo\.lock)$'
             '^apps/desktop/package\.json$'
+            # scripts/check-release-blockers.test.mjs が実ファイルを読む
+            '^apps/desktop/src-tauri/src/provisioning/models\.rs$'
           )
           # どの job の検査にも影響しない (ビルド・テストが読む .md は無い)。各 job の対象より優先する
           # (apps/web/README.md 等、job の対象のディレクトリにある文書だけの変更で job を動かさないため)
@@ -261,7 +263,7 @@ jobs:
         run: pnpm run typecheck
       - name: build
         run: pnpm run web:build
-      # リリース用の版上げスクリプト (scripts/bump-version.mjs。release.yml が使う)
+      # リリース用スクリプト (scripts/bump-version.mjs・check-release-blockers.mjs 等。release.yml が使う)
       - name: Release scripts (node --test)
         run: node --test scripts/*.test.mjs
       - name: Playwright (chromium)

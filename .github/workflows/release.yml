@@ -120,8 +120,13 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-      - name: Test bump script
+      - name: Test release scripts
         run: node --test scripts/*.test.mjs
+      # 仮の値 (HF 未公開のモデルの revision 等) のまま配布しないよう、長いビルドの前に止める (scripts/check-release-blockers.mjs)。
+      # 手元の make build でも build-macos.sh が同じ検査をする
+      - name: Check release blockers
+        if: inputs.target == 'desktop'
+        run: node scripts/check-release-blockers.mjs desktop
       # 入力は式展開せず環境変数で渡す (スクリプトへの差し込みを避ける)
       - name: Bump version (local commit only)
         id: bump

@@ -66,7 +66,7 @@ export const en = {
     },
     shortcutHint: {
       continuous: "Turns voice input on or off each time you press it",
-      oneShot: "Listens once when pressed, and turns off automatically when you finish speaking",
+      oneShot: "Listens once per press and turns off when you finish speaking",
     },
   },
 

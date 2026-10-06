@@ -3,7 +3,7 @@
  * 入力レベルのバーの平滑化 (上がる時は速く、下がる時はゆっくり)。
  */
 import type { Page } from "@playwright/test";
-import { expect, test, type Messages } from "./fixtures";
+import { expect, SCREENSHOT, test, TIMING, type Messages } from "./fixtures";
 
 const PANEL = { width: 560, height: 360 };
 // 1 行あたり約 27 文字。5 行以上になる長さ
@@ -41,7 +41,7 @@ function lastCharVisible(page: Page) {
   });
 }
 
-test("panel: 3 行を超える発話も途中表示・確定のたびに最新の文字が見える", async ({ page, m, shot }) => {
+test("panel: 3 行を超える発話も途中表示・確定のたびに最新の文字が見える", { tag: SCREENSHOT }, async ({ page, m, snap }) => {
   await open(page, m, "window=panel&mock=idle");
   const preview = page.getByTestId("preview");
   for (const id of [1, 2]) {
@@ -65,10 +65,11 @@ test("panel: 3 行を超える発話も途中表示・確定のたびに最新�
     const height = await preview.evaluate((el) => el.getBoundingClientRect().height);
     expect(height).toBeLessThanOrEqual(14 * 1.6 * 3 + 0.5);
   }
-  await page.screenshot({ path: shot("panel-preview-long") });
+  await snap("panel-preview-long");
 });
 
-test("panel: 入力レベルのバーは上がる時は速く、下がる時はゆっくり追従する", async ({ page, m }) => {
+// 減衰の途中の値を実時間で捉えるため TIMING
+test("panel: 入力レベルのバーは上がる時は速く、下がる時はゆっくり追従する", { tag: TIMING }, async ({ page, m }) => {
   await open(page, m, "window=panel&mock=idle");
   const bar = page.getByTestId("level-meter-bar");
   const ratio = () =>

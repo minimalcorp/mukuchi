@@ -1,10 +1,18 @@
 /*
- * 表示言語ごとにテストを回すための fixture。
+ * 表示言語ごとにテストを回すための fixture と、テストの分類 (タグ)。
  * appLocale (project の設定) をモックの OS の言語として読み込み前に渡し (src/mock/index.ts)、
  * 文言は辞書 (src/i18n) とモックの文言 (src/mock/texts.ts) から引く。
  * 新規の設定では話す言語も表示言語と同じになるため、発話のデータ (sp) も appLocale のもの
+ *
+ * タグ (playwright.config.ts の projects が grep で振り分ける):
+ * - I18N: en でも回す。UI は言語で共通で辞書の文言を差し替えているだけなので、en は「英語で表示されること」と
+ *   「はみ出さないこと」、言語で分岐する所 (推奨モデルの並び・区切り文字・Intl の書式・OFF のピルの幅) だけを確かめる
+ * - TIMING: 実時間 (毎フレームの採取・アニメーションの経過) を測る。並列の負荷で揺れないよう最後に 1 worker で回す
+ * - SCREENSHOT: pnpm screenshots で撮影する (通常の pnpm test でも確認は行い、撮影だけを省く)
+ * - SCREENSHOT_ONLY: 撮影のためだけのテスト。pnpm screenshots でだけ回す
  */
-import { test as base } from "@playwright/test";
+import { test as base, type Page } from "@playwright/test";
+import process from "node:process";
 import type { Locale } from "../src/lib/ipc";
 import { ja, type Messages } from "../src/i18n/ja";
 import { en } from "../src/i18n/en";
@@ -13,7 +21,20 @@ import { MOCK_SPEECH_TEXTS, MOCK_UI_TEXTS, type MockSpeechTexts, type MockUiText
 export { expect } from "@playwright/test";
 export type { Locale, Messages };
 
+export const I18N = "@i18n";
+export const TIMING = "@timing";
+export const SCREENSHOT = "@screenshot";
+export const SCREENSHOT_ONLY = "@screenshot-only";
+
+/** pnpm screenshots (SCREENSHOTS=1) の時だけ撮影する */
+export const SCREENSHOTS = Boolean(process.env.SCREENSHOTS);
+
 export type AppLocaleOptions = { appLocale: Locale };
+
+type SnapOptions = {
+  /** 撮影の前に待つ ms (入力レベルの表示・スイッチのつまみの移動など、確認には要らず見た目のためだけの待ち) */
+  settleMs?: number;
+};
 
 type Fixtures = {
   /** 表示言語の辞書 */
@@ -22,11 +43,23 @@ type Fixtures = {
   ui: MockUiTexts;
   /** モックの発話・アプリ名 (話す言語) */
   sp: MockSpeechTexts;
-  /** スクリーンショットの保存先 (言語ごとのディレクトリ) */
-  shot: (name: string) => string;
+  /** スクリーンショットを e2e/screenshots/<言語>/<name>.png に撮る (pnpm screenshots の時だけ。それ以外は何もしない) */
+  snap: (name: string, opts?: SnapOptions) => Promise<void>;
 };
 
 export const MESSAGES: Record<Locale, Messages> = { ja, en };
+
+/** 有限の (無限に繰り返さない) アニメーション・トランジションが終わるのを待つ */
+export async function settleAnimations(page: Page) {
+  await page.evaluate(() =>
+    Promise.all(
+      document
+        .getAnimations()
+        .filter((a) => a.effect?.getComputedTiming().endTime !== Infinity)
+        .map((a) => a.finished.catch(() => {})),
+    ),
+  );
+}
 
 export const test = base.extend<AppLocaleOptions & Fixtures>({
   appLocale: ["ja", { option: true }],
@@ -39,5 +72,11 @@ export const test = base.extend<AppLocaleOptions & Fixtures>({
   m: async ({ appLocale }, provide) => provide(MESSAGES[appLocale]),
   ui: async ({ appLocale }, provide) => provide(MOCK_UI_TEXTS[appLocale]),
   sp: async ({ appLocale }, provide) => provide(MOCK_SPEECH_TEXTS[appLocale]),
-  shot: async ({ appLocale }, provide) => provide((name: string) => `e2e/screenshots/${appLocale}/${name}.png`),
+  snap: async ({ page, appLocale }, provide) =>
+    provide(async (name, opts = {}) => {
+      if (!SCREENSHOTS) return;
+      // 撮影のためだけの待ち (通常のテストでは行わない)
+      if (opts.settleMs) await page.waitForTimeout(opts.settleMs);
+      await page.screenshot({ path: `e2e/screenshots/${appLocale}/${name}.png` });
+    }),
 });

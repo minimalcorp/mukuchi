@@ -1,8 +1,8 @@
 /*
- * P2 (実データ接続) で増えたやり取りの確認: set_panel_size、settings-navigate、
+ * P2 (実データ接続) で増えたやり取りの確認: set_panel_size (展開・収縮の時は panel-collapse.spec.ts)、settings-navigate、
  * 購読と初期値取得の順序、ダークモードの切り替え。
  */
-import { expect, test } from "./fixtures";
+import { expect, I18N, test } from "./fixtures";
 import type { Page } from "@playwright/test";
 
 const PANEL = { width: 560, height: 260 };
@@ -43,7 +43,8 @@ async function mock(page: Page, fn: string) {
 
 // ---------- set_panel_size ----------
 
-test("panel: 描画内容 (影の余白込み) の大きさを set_panel_size で送る", async ({ page, m }) => {
+// OFF のピルの幅は文言の長さで変わる (en は ja より広い)
+test("panel: 描画内容 (影の余白込み) の大きさを set_panel_size で送る", { tag: I18N }, async ({ page, m }) => {
   await open(page, "window=panel&mock=off", PANEL);
   await expect(page.getByRole("button", { name: m.panel.turnOn })).toBeVisible();
   const size = await frameSize(page);
@@ -52,38 +53,6 @@ test("panel: 描画内容 (影の余白込み) の大きさを set_panel_size �
   const pill = await page.getByRole("button", { name: m.panel.turnOn }).locator("..").boundingBox();
   expect(size.width).toBeGreaterThanOrEqual(Math.ceil(pill!.width) + 48);
   expect(size.height).toBeGreaterThanOrEqual(Math.ceil(pill!.height) + 48);
-});
-
-test("panel: 展開は開始時点で、収縮は終わってから最終の大きさを送る", async ({ page, m }) => {
-  await open(page, "window=panel&mock=idle", PANEL);
-  await expect(page.getByText(m.panel.idle)).toBeVisible();
-  const pill = await frameSize(page);
-  await expect.poll(async () => (await panelSizes(page)).at(-1)).toEqual(pill);
-  const before = (await panelSizes(page)).length;
-
-  // 発話が始まって展開する
-  await mock(page, `api.started(1); api.partial({ id: 1, text: "明日の打ち合わせは十時からに変更して", stableLength: 13 });`);
-  await expect(page.getByText(m.panel.speaking)).toBeVisible();
-  // 180ms のアニメーションが終わるのを待つ
-  await expect(page.getByTestId("panel-card")).toHaveCSS("width", "360px");
-  await page.waitForTimeout(300);
-  const expanded = await frameSize(page);
-  const expandCalls = (await panelSizes(page)).slice(before);
-  // 途中の大きさを経由せず、最初の 1 回で最終の大きさを送る (ウィンドウがアニメーションを切らない)
-  expect(expandCalls[0]).toEqual(expanded);
-  expect(expandCalls.every((s) => s.width === expanded.width && s.height === expanded.height)).toBe(true);
-  expect(expanded.width).toBeGreaterThan(pill.width);
-  expect(expanded.height).toBeGreaterThan(pill.height);
-
-  // 誤検出で表示が消えてピルへ戻る
-  const beforeCollapse = (await panelSizes(page)).length;
-  await mock(page, `api.result({ kind: "discarded", id: 1 });`);
-  await expect(page.getByTestId("panel-card")).toHaveCSS("width", "240px");
-  await page.waitForTimeout(300);
-  const collapsed = await frameSize(page);
-  expect(collapsed).toEqual(pill);
-  // 縮み終わってから最終の大きさを 1 回だけ送る (途中の大きさでウィンドウを縮めない。詳細は panel-collapse.spec.ts)
-  expect((await panelSizes(page)).slice(beforeCollapse)).toEqual([pill]);
 });
 
 // ---------- エラーからの復旧 ----------

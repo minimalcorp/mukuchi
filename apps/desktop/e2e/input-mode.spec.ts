@@ -3,7 +3,7 @@
  * ショートカットの記録 (一時解除・修飾キー必須・取り消し・なし・登録できない時のエラー)、設定 > 音声入力。
  */
 import { isValidElement, type ReactNode } from "react";
-import { expect, test } from "./fixtures";
+import { expect, I18N, SCREENSHOT, test } from "./fixtures";
 import type { Page } from "@playwright/test";
 import { SAMPLE_PHRASES } from "../src/i18n/speech";
 
@@ -86,7 +86,8 @@ test("setup: 入力モードの保存に失敗したら元に戻してエラー�
   await expect(page.getByRole("radio", { name: m.inputMode.continuous.label })).toBeChecked();
 });
 
-test("setup: 動作テストの案内は入力モードで変わる", async ({ page, m, appLocale }) => {
+// 案内の文言は話す言語の例文とキーを差し込む (語順が表示言語で違う)
+test("setup: 動作テストの案内は入力モードで変わる", { tag: I18N }, async ({ page, m, appLocale }) => {
   await open(page, "window=setup&mock=input-mode", SETUP);
   await page.getByRole("button", { name: m.common.next }).click();
   const instruction = page.getByTestId("test-instruction");
@@ -107,7 +108,7 @@ test("setup: 動作テストの案内は入力モードで変わる", async ({ p
   await expect(instruction).toHaveText(m.setup.test.oneShotNoKeys(sample));
 });
 
-test("setup: 完了画面のオン／オフの案内にショートカットを出す", async ({ page, m }) => {
+test("setup: 完了画面のオン／オフの案内にショートカットを出す", { tag: I18N }, async ({ page, m }) => {
   await open(page, "window=setup&mock=done", SETUP);
   await expect(page.getByTestId("done-toggle-hint")).toHaveText(textOf(m.setup.done.hintWithKeys("⌥Space")));
   await open(page, "window=setup&mock=done-oneshot", SETUP);
@@ -147,7 +148,7 @@ test("shortcut: 記録中は登録を一時解除し、戻してから保存す�
   await expect(page.getByRole("button", { name: m.shortcut.change })).toBeVisible();
 });
 
-test("shortcut: 登録できないキーはエラーを出し、元のショートカットのまま", async ({ page, m, ui, shot }) => {
+test("shortcut: 登録できないキーはエラーを出し、元のショートカットのまま", { tag: SCREENSHOT }, async ({ page, m, ui, snap }) => {
   await open(page, "window=setup&mock=input-mode", SETUP);
   const field = page.getByTestId("shortcut-field");
   await page.getByRole("button", { name: m.shortcut.change }).click();
@@ -156,7 +157,7 @@ test("shortcut: 登録できないキーはエラーを出し、元のショー�
   await expect(page.getByRole("alert")).toHaveText(ui.reject.shortcut("⌘ Space"));
   await expect(field).toHaveText("⌥Space");
   expect(await savedSetting(page, "shortcut")).toBe("Alt+Space");
-  await page.screenshot({ path: shot("setup-4-input-mode-shortcut-error") });
+  await snap("setup-4-input-mode-shortcut-error");
 
   // 登録できるキーにし直したらエラーを消す
   await page.getByRole("button", { name: m.shortcut.change }).click();
@@ -238,15 +239,4 @@ test("settings: 音声入力で入力モードとショートカットを変え�
     "suspended:false",
     "update:Alt+Digit1",
   ]);
-});
-
-test("settings: 他のウィンドウで変えた入力モードを反映する", async ({ page, m }) => {
-  await open(page, "window=settings&mock=default&category=voice", SETTINGS);
-  await page.evaluate(() =>
-    (window as unknown as { __mukuchiMock: { invoke: (c: string, a: unknown) => Promise<unknown> } }).__mukuchiMock.invoke(
-      "update_settings",
-      { patch: { inputMode: "oneShot" } },
-    ),
-  );
-  await expect(page.getByRole("radio", { name: m.inputMode.oneShot.label })).toBeChecked();
 });

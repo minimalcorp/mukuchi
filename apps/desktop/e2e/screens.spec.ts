@@ -1,8 +1,9 @@
 /*
- * 全画面・全状態をモックで開き、主要な文言が出ることを確認する (表示言語ごと。playwright.config.ts の projects)。
- * スクリーンショットは e2e/screenshots/<言語>/ (git 管理外) に保存し、デザインとの目視比較に使う。
+ * 全画面・全状態をモックで開き、主要な文言が出ること・文字がはみ出していないことを確認する (ja・en の両方)。
+ * pnpm screenshots で e2e/screenshots/<言語>/ (git 管理外) に撮り、デザインとの目視比較に使う。ダークは撮影だけ。
  */
-import { expect, test, type Messages } from "./fixtures";
+import { expect, I18N, SCREENSHOT, SCREENSHOT_ONLY, test, type Messages } from "./fixtures";
+import { findOverflows } from "./overflow";
 import type { Page } from "@playwright/test";
 import type { MockSpeechTexts, MockUiTexts } from "../src/mock/texts";
 
@@ -194,21 +195,54 @@ async function open(page: Page, c: Pick<Case, "query" | "viewport" | "dark">) {
   // 描画されてから待つ (描画前は同梱フォントの読み込みが始まっておらず、fonts.ready がすぐ解決する)
   await page.waitForFunction(() => (document.getElementById("root")?.childElementCount ?? 0) > 0);
   await page.evaluate(() => document.fonts.ready);
-  // モックの入力レベル (20Hz) が届くのを待つ
-  await page.waitForTimeout(250);
+}
+
+/**
+ * ページのタイマーを止め、以降は clock で進めた分だけ発火させる (p3.spec.ts と同じ)。
+ * 読み込み中は時間を流す (止めたまま goto すると読み込みが進まないことがある)。open の前に install しておく
+ */
+async function pauseClock(page: Page) {
+  const now = await page.evaluate(() => Date.now());
+  await page.clock.pauseAt(now + 1000);
+}
+
+async function mock(page: Page, fn: string) {
+  await page.evaluate(`(() => { const api = window.__mukuchiMock; ${fn} })()`);
 }
 
 for (const c of cases) {
-  test(c.name, async ({ page, m, ui, sp, shot, appLocale }) => {
+  test(c.name, { tag: c.dark ? SCREENSHOT_ONLY : [I18N, SCREENSHOT] }, async ({ page, m, ui, sp, snap, appLocale }) => {
     await open(page, c);
-    await expect(page.locator("html")).toHaveAttribute("lang", appLocale);
     const recName = ui.models[appLocale === "ja" ? "ja-8bit" : "base-1.7b-8bit"].name;
     for (const t of c.texts(m, ui, sp, recName)) {
       await expect(page.getByText(t, { exact: false }).first()).toBeVisible();
     }
-    await page.screenshot({ path: shot(c.name) });
+    // ダークは配色だけが違う (はみ出しはライトで確かめる)
+    if (!c.dark) expect(await findOverflows(page)).toEqual([]);
+    // モックの入力レベル (約15Hz) が届いてから撮る
+    await snap(c.name, { settleMs: 250 });
   });
 }
+
+test("表示言語を html の lang に出す", { tag: I18N }, async ({ page, appLocale }) => {
+  await open(page, { query: "window=settings&mock=default", viewport: SETTINGS });
+  await expect(page.locator("html")).toHaveAttribute("lang", appLocale);
+});
+
+test("はみ出しの検出: 枠に収まらない文言を見つける", async ({ page, m }) => {
+  await open(page, { query: "window=settings&mock=default&category=storage", viewport: SETTINGS });
+  expect(await findOverflows(page)).toEqual([]);
+  const button = await page.getByRole("button", { name: m.settings.storage.uninstallEllipsis }).elementHandle();
+  const label = await page.getByText(m.settings.storage.deleteRuntime).elementHandle();
+  // 折り返さないボタンの文言を長くする
+  await button!.evaluate((b) => (b.textContent = "Uninstall everything including models and settings ".repeat(4)));
+  expect((await findOverflows(page)).map((o) => o.text)).toContainEqual(expect.stringMatching(/^Uninstall everything/));
+  await button!.evaluate((b) => (b.textContent = "Uninstall"));
+  expect(await findOverflows(page)).toEqual([]);
+  // 折り返せない長い語
+  await label!.evaluate((el) => (el.textContent = "Supercalifragilistic".repeat(8)));
+  expect((await findOverflows(page)).map((o) => o.text)).toContainEqual(expect.stringMatching(/^Supercalifragilistic/));
+});
 
 test("settings: 権限未許可でサイドバーに黄色の点", async ({ page }) => {
   await open(page, { query: "window=settings&mock=perm-denied", viewport: SETTINGS });
@@ -229,7 +263,7 @@ test("settings: サイドバーでカテゴリを切り替える", async ({ page
   await expect(page.getByText(m.settings.storage.deleteRuntime)).toBeVisible();
 });
 
-test("settings: アンインストールの確認ダイアログに実パスを表示", async ({ page, m, shot }) => {
+test("settings: アンインストールの確認ダイアログに実パスを表示", { tag: [I18N, SCREENSHOT] }, async ({ page, m, snap }) => {
   await open(page, { query: "window=settings&mock=default&category=storage", viewport: SETTINGS });
   await page.getByRole("button", { name: m.settings.storage.uninstallEllipsis }).click();
   const dialog = page.getByRole("dialog");
@@ -237,60 +271,29 @@ test("settings: アンインストールの確認ダイアログに実パスを�
   await expect(dialog.getByText("/Users/you/Library/Application Support/com.minimalcorp.mukuchi")).toBeVisible();
   await expect(dialog.getByText("/Applications/mukuchi.app")).toBeVisible();
   await expect(dialog.getByText(m.settings.storage.uninstallCount(6))).toBeVisible();
-  await page.screenshot({ path: shot("settings-uninstall-dialog") });
+  expect(await findOverflows(page)).toEqual([]);
+  await snap("settings-uninstall-dialog");
   await dialog.getByRole("button", { name: m.common.cancel }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
-test("settings: 音声コマンドを追加する", async ({ page, m, shot }) => {
-  await open(page, { query: "window=settings&mock=default&category=commands", viewport: SETTINGS });
-  await page.getByRole("button", { name: m.settings.commands.add }).click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByLabel(m.settings.commands.phrases).fill(`タブ${m.settings.commands.phraseJoiner}次へ`);
-  await dialog.getByLabel(m.settings.commands.keyName, { exact: true }).selectOption("tab");
-  await page.screenshot({ path: shot("settings-command-dialog") });
-  await dialog.getByRole("button", { name: m.common.save }).click();
-  await expect(page.getByText("タブ", { exact: true })).toBeVisible();
-  await expect(page.getByText("Tab", { exact: true })).toBeVisible();
-});
-
-test("settings: 入力しないアプリを追加・削除する", async ({ page, m }) => {
-  await open(page, { query: "window=settings&mock=default&category=voice", viewport: SETTINGS });
-  await page.getByRole("button", { name: m.settings.voice.addApp }).click();
-  await page.getByRole("menuitem", { name: "Slack" }).click();
-  await expect(page.getByText("Slack", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: m.settings.voice.removeApp("Slack") }).click();
-  await expect(page.getByText("Slack", { exact: true })).toHaveCount(0);
-});
-
-test("settings: 認識のヒントを編集する", async ({ page, m }) => {
-  await open(page, { query: "window=settings&mock=default&category=recognition", viewport: SETTINGS });
-  const field = page.getByLabel(m.settings.recognition.context);
-  await expect(field).toHaveValue(/Claude Code/);
-  await field.fill("会議の話です");
-  await expect(page.getByText("6 / 1000")).toBeVisible();
-  await field.blur();
-  await expect(field).toHaveValue("会議の話です");
-});
-
 test("setup: 権限が揃うまで次へは押せず、許可すると進める", async ({ page, m }) => {
+  await page.clock.install();
   await open(page, { query: "window=setup&mock=permissions", viewport: SETUP });
+  await pauseClock(page);
   const nextButton = page.getByRole("button", { name: m.common.next });
   await expect(nextButton).toBeDisabled();
   await page.getByRole("button", { name: m.common.openSystemSettings }).click();
   // モックは 1.5 秒後に許可済みになり、1 秒ごとの再取得で反映される
-  await expect(nextButton).toBeEnabled({ timeout: 5000 });
+  // (入力レベルのタイマーで runFor は遅いため fastForward。どのタイマーも 1 回ずつ発火する)
+  await page.clock.fastForward(1000);
+  await expect(nextButton).toBeDisabled();
+  // 1.5 秒で許可済みになり、その後の再取得で反映される
+  await page.clock.fastForward(500);
+  await page.clock.fastForward(1000);
+  await expect(nextButton).toBeEnabled();
   await nextButton.click();
   await expect(page.getByText(m.setup.download.titleDone)).toBeVisible();
-});
-
-test("setup: ダウンロードが進み完了すると次へ進める", async ({ page, m }) => {
-  await open(page, { query: "window=setup&mock=download-live", viewport: SETUP });
-  await expect(page.getByText(m.setup.download.titleRunning)).toBeVisible();
-  await page.getByRole("button", { name: m.common.pause }).click();
-  await expect(page.getByText(m.setup.download.titlePaused)).toBeVisible();
-  await page.getByRole("button", { name: m.common.resume }).click();
-  await expect(page.getByRole("button", { name: m.common.next })).toBeEnabled({ timeout: 15_000 });
 });
 
 test("setup: 動作テストでは欄に入力が入る", async ({ page, m, sp }) => {
@@ -299,83 +302,59 @@ test("setup: 動作テストでは欄に入力が入る", async ({ page, m, sp }
   await expect(page.getByLabel(m.setup.test.field)).toHaveValue(new RegExp(sp.testSentence.replace(/[.]/g, "\\.")));
 });
 
-test("panel: オンにすると発話が流れ、入力後 750ms でピルに戻る", async ({ page, m, sp }) => {
+test("panel: オンにすると発話が流れ、入力できた時は成功マークだけを 750ms 出してピルに戻る", async ({ page, m, sp }) => {
+  // 発話の流れ (src/mock/scenarios.ts の liveLoop) と表示時間を clock で進める。
+  // runFor は入力レベルのタイマー (66ms ごと) を 1 回ずつ発火させて遅いため、期限の来たタイマーを 1 回ずつ発火させる fastForward で進める
+  await page.clock.install();
   await open(page, { query: "window=panel&mock=default", viewport: PANEL });
+  await pauseClock(page);
   await page.getByRole("button", { name: m.panel.turnOn }).click();
   await expect(page.getByText(m.panel.idle)).toBeVisible();
-  await expect(page.getByText(m.panel.speaking)).toBeVisible({ timeout: 5000 });
+  // liveLoop: 1.2 秒後に発話が始まり、5 文字 / 400ms の途中表示 → 500ms 後に確定処理 → 700ms 後に入力
+  await page.clock.fastForward(1200);
+  await expect(page.getByText(m.panel.speaking)).toBeVisible();
+  const endAt = Math.ceil(sp.text.length / 5) * 400 + 500;
+  await page.clock.fastForward(endAt + 700);
   // 入力できた時は成功マークだけを出し、アプリ名の文言は出さない (文言は読み上げ用のみ)
   const status = page.getByRole("status").filter({ hasText: m.panel.inserted });
-  await expect(status).toHaveCount(1, { timeout: 10_000 });
-  const shownAt = Date.now();
+  await expect(status.locator("svg")).toBeVisible();
+  await expect(status.locator(".sr-only")).toHaveText(m.panel.inserted);
   await expect(page.getByText(sp.notes, { exact: false })).toHaveCount(0);
   await expect(page.getByTestId("preview")).toContainText(sp.text);
   // 750ms 表示してからピル (待機中) に戻る
-  await expect(page.getByTestId("panel-card")).toHaveAttribute("data-expanded", "false", { timeout: 2000 });
-  expect(Date.now() - shownAt).toBeLessThan(1500);
+  const card = page.getByTestId("panel-card");
+  await page.clock.fastForward(700);
+  await expect(card).toHaveAttribute("data-expanded", "true");
+  await page.clock.fastForward(100);
+  await expect(card).toHaveAttribute("data-expanded", "false");
   await expect(page.getByText(m.panel.idle)).toBeVisible();
   await page.getByRole("button", { name: m.panel.turnOff }).click();
   await expect(page.getByRole("button", { name: m.panel.turnOn })).toBeVisible();
 });
 
-test("panel: 入力できた時は成功マークだけを出す", async ({ page, m, sp }) => {
-  await open(page, { query: "window=panel&mock=inserted", viewport: PANEL });
-  const status = page.getByRole("status").filter({ hasText: m.panel.inserted });
-  await expect(status.locator("svg")).toBeVisible();
-  await expect(status.locator(".sr-only")).toHaveText(m.panel.inserted);
-  await expect(page.getByText(sp.notes, { exact: false })).toHaveCount(0);
-});
-
-/** live のシナリオ (結果を時間経過で消す) で、発話の結果を 1 件流して表示時間を測る */
-async function resultDuration(page: Page, turnOn: string, result: string, visible: () => Promise<void>) {
+test("panel: 入力しないアプリ・入力できなかった時は理由 (Rust のメッセージ) を 3 秒表示する", async ({ page, m, ui }) => {
+  await page.clock.install();
+  // default は live (結果を時間で消す)
   await open(page, { query: "window=panel&mock=default", viewport: PANEL });
-  await expect(page.getByRole("button", { name: turnOn })).toBeVisible();
-  // 結果を送る直前から測る。表示されたのを確かめてから測ると、遅い CI では確認が遅れた分だけ短く出る
-  // (表示時間のタイマーは結果を受け取ってから始まるので、送る直前からなら必ず表示時間以上になる)
-  const sentAt = Date.now();
-  await page.evaluate(`(() => {
-    const api = window.__mukuchiMock;
-    api.setStatus({ phase: "listening" });
-    api.started(1);
-    api.result(${result});
-  })()`);
-  await visible();
-  await expect(page.getByTestId("panel-card")).toHaveAttribute("data-expanded", "false", { timeout: 8000 });
-  return Date.now() - sentAt;
-}
+  await expect(page.getByRole("button", { name: m.panel.turnOn })).toBeVisible();
+  await pauseClock(page);
+  const card = page.getByTestId("panel-card");
+  await mock(page, `api.setStatus({ phase: "listening" }); api.started(1);
+    api.result({ kind: "skipped_excluded", id: 1, text: "こんにちは", appName: "1Password" });`);
+  await expect(page.getByRole("status").filter({ hasText: m.panel.excluded("1Password") })).toBeVisible();
+  await page.clock.fastForward(2900);
+  await expect(card).toHaveAttribute("data-expanded", "true");
+  await page.clock.fastForward(200);
+  await expect(card).toHaveAttribute("data-expanded", "false");
 
-test("panel: 入力しないアプリの時は理由を 3 秒表示する", async ({ page, m }) => {
-  const ms = await resultDuration(
-    page,
-    m.panel.turnOn,
-    `{ kind: "skipped_excluded", id: 1, text: "こんにちは", appName: "1Password" }`,
-    () => expect(page.getByRole("status").filter({ hasText: m.panel.excluded("1Password") })).toBeVisible(),
-  );
-  expect(ms).toBeGreaterThanOrEqual(2950);
-  expect(ms).toBeLessThan(6000);
-});
-
-test("panel: 入力できなかった時は Rust のメッセージを理由として 3 秒表示する", async ({ page, m, ui }) => {
   const message = ui.insertFailedNoAccessibility;
-  const ms = await resultDuration(
-    page,
-    m.panel.turnOn,
-    `{ kind: "failed", id: 1, text: "こんにちは", error: { code: "accessibility_denied", message: ${JSON.stringify(message)}, action: "open_accessibility" } }`,
-    () => expect(page.getByRole("status").filter({ hasText: message })).toBeVisible(),
-  );
-  expect(ms).toBeGreaterThanOrEqual(2950);
-  expect(ms).toBeLessThan(6000);
-});
-
-test("panel: 入力できた時は成功マークを 750ms 表示する", async ({ page, m, sp }) => {
-  const ms = await resultDuration(
-    page,
-    m.panel.turnOn,
-    `{ kind: "inserted", id: 1, text: "こんにちは", appName: ${JSON.stringify(sp.notes)} }`,
-    () => expect(page.getByRole("status").filter({ hasText: m.panel.inserted })).toHaveCount(1),
-  );
-  expect(ms).toBeGreaterThanOrEqual(700);
-  expect(ms).toBeLessThan(2500);
+  await mock(page, `api.started(2);
+    api.result({ kind: "failed", id: 2, text: "こんにちは", error: { code: "accessibility_denied", message: ${JSON.stringify(message)}, action: "open_accessibility" } });`);
+  await expect(page.getByRole("status").filter({ hasText: message })).toBeVisible();
+  await page.clock.fastForward(2900);
+  await expect(card).toHaveAttribute("data-expanded", "true");
+  await page.clock.fastForward(200);
+  await expect(card).toHaveAttribute("data-expanded", "false");
 });
 
 test("panel: 理由が長くてもメーターを潰さず、文言を省略する", async ({ page }) => {

@@ -4,7 +4,7 @@
  * set_panel_size は広げる時は最初に最終の大きさ、縮む時は終わってから 1 回だけ送ることを確認する。
  */
 import type { Page } from "@playwright/test";
-import { expect, test } from "./fixtures";
+import { expect, I18N, test, TIMING } from "./fixtures";
 
 const PANEL = { width: 560, height: 260 };
 // 影の余白 (PanelFrame の px-6 pt-4 pb-8) + 待機中のピル (240 x 36)
@@ -59,7 +59,8 @@ function recordToggle(page: Page, name: string): Promise<Frame[]> {
   }, name);
 }
 
-test("panel: OFF → ON は面がピルの大きさへ広がってから待機中を出し、最初に最終の大きさを送る", async ({ page, m }) => {
+// 毎フレームの面の大きさを実時間で採取するため TIMING
+test("panel: OFF → ON は面がピルの大きさへ広がってから待機中を出し、最初に最終の大きさを送る", { tag: TIMING }, async ({ page, m }) => {
   await open(page, "off");
   await expect(page.getByText(m.panel.turnOn)).toBeVisible();
   const from = await pillSize(page);
@@ -83,7 +84,8 @@ test("panel: OFF → ON は面がピルの大きさへ広がってから待機�
   await expect.poll(async () => (await panelSizes(page)).slice(before)).toEqual([PILL_SIZE]);
 });
 
-test("panel: ON → OFF は面が OFF のピルの大きさへ縮んでから出し、終わってから 1 回だけ送る", async ({ page, m }) => {
+// OFF のピルの幅は文言の長さで変わる (en は縮む量が ja と違う) ため en でも回す
+test("panel: ON → OFF は面が OFF のピルの大きさへ縮んでから出し、終わってから 1 回だけ送る", { tag: [TIMING, I18N] }, async ({ page, m }) => {
   await open(page, "idle");
   await expect(page.getByText(m.panel.idle)).toBeVisible();
   await expect.poll(async () => (await panelSizes(page)).at(-1)).toEqual(PILL_SIZE);

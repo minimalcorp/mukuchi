@@ -1,16 +1,15 @@
 /*
- * panel のアンカー (get_panel_anchor / panel-anchor)。描画内容をアンカーの辺・角に寄せ、
- * 展開・収縮がその辺・角から始まること、set_panel_size の値はアンカーによらず同じことを確認する。
+ * panel のアンカー (get_panel_anchor / panel-anchor)。描画内容をアンカーの辺・角に寄せ、展開がアンカー側から広がることを確認する。
+ * 展開・収縮の途中でアンカーの辺が動かないこと・set_panel_size の値は panel-collapse.spec.ts で確かめる。
  */
 import type { Page } from "@playwright/test";
-import { expect, test, type Messages } from "./fixtures";
+import { expect, SCREENSHOT_ONLY, settleAnimations, test } from "./fixtures";
 
 const PANEL = { width: 560, height: 260 };
 // 影の余白 (PanelFrame の px-6 pt-4 pb-8)
 const MARGIN = { left: 24, right: 24, top: 16, bottom: 32 };
 
 type Call = { cmd: string; args: Record<string, unknown> };
-type Size = { width: number; height: number };
 type Rect = { left: number; right: number; top: number; bottom: number };
 type Horizontal = "left" | "center" | "right";
 type Vertical = "top" | "bottom";
@@ -34,105 +33,52 @@ async function mock(page: Page, fn: string) {
   await page.evaluate(`(() => { const api = window.__mukuchiMock; ${fn} })()`);
 }
 
-async function panelSizes(page: Page): Promise<Size[]> {
-  const calls = await page.evaluate(() => (window as unknown as { __mukuchiMock: { calls: Call[] } }).__mukuchiMock.calls);
-  return calls.filter((c) => c.cmd === "set_panel_size").map((c) => c.args as Size);
-}
-
 async function rect(page: Page, testId: string): Promise<Rect> {
   const box = await page.getByTestId(testId).boundingBox();
   if (!box) throw new Error(`${testId} がありません`);
   return { left: box.x, right: box.x + box.width, top: box.y, bottom: box.y + box.height };
 }
 
-/** アンカーの辺に当たる座標 (カードの位置として固定されるべき値) */
-function anchoredEdges(r: Rect, vertical: Vertical, horizontal: Horizontal) {
-  return {
-    x: horizontal === "left" ? r.left : horizontal === "right" ? r.right : (r.left + r.right) / 2,
-    y: vertical === "top" ? r.top : r.bottom,
-  };
-}
-
-/** ピル → 展開までの set_panel_size の最終値 (ピル・展開) */
-async function pillAndExpandedSizes(page: Page, m: Messages): Promise<[Size | undefined, Size | undefined]> {
-  await expect(page.getByText(m.panel.idle)).toBeVisible();
-  await expect.poll(async () => (await panelSizes(page)).length).toBeGreaterThan(0);
-  const pill = (await panelSizes(page)).at(-1);
-  await mock(page, SPEAK);
-  await expect(page.getByTestId("panel-card")).toHaveCSS("width", "360px");
-  await page.waitForTimeout(300);
-  return [pill, (await panelSizes(page)).at(-1)];
-}
-
-for (const { vertical, horizontal } of ANCHORS) {
-  const name = `${vertical}-${horizontal}`;
-
-  test(`panel anchor ${name}: 描画内容をアンカーに寄せ、展開はアンカーの辺・角から広がる`, async ({ page, m }) => {
+test("panel anchor: 描画内容をアンカーの辺・角に寄せ、展開はアンカー側から反対へ広がる", async ({ page }) => {
+  for (const { vertical, horizontal } of ANCHORS) {
+    const name = `${vertical}-${horizontal}`;
     await open(page, `window=panel&mock=idle&anchor=${name}`);
     await expect(page.locator("[data-anchor]")).toHaveAttribute("data-anchor", name);
-    await expect(page.getByText(m.panel.idle)).toBeVisible();
+    await expect(page.getByTestId("panel-card")).toHaveCSS("width", "240px");
 
     const check = async () => {
       const frame = await rect(page, "panel-frame");
       const card = await rect(page, "panel-card");
       // 余白は一定 (set_panel_size の意味を保つ)。アンカー側の辺で確認する
-      if (vertical === "top") expect(card.top - frame.top).toBeCloseTo(MARGIN.top, 0);
-      else expect(frame.bottom - card.bottom).toBeCloseTo(MARGIN.bottom, 0);
-      if (horizontal === "left") expect(card.left - frame.left).toBeCloseTo(MARGIN.left, 0);
-      else if (horizontal === "right") expect(frame.right - card.right).toBeCloseTo(MARGIN.right, 0);
-      else expect((card.left + card.right) / 2).toBeCloseTo((frame.left + frame.right) / 2, 0);
+      if (vertical === "top") expect(card.top - frame.top, name).toBeCloseTo(MARGIN.top, 0);
+      else expect(frame.bottom - card.bottom, name).toBeCloseTo(MARGIN.bottom, 0);
+      if (horizontal === "left") expect(card.left - frame.left, name).toBeCloseTo(MARGIN.left, 0);
+      else if (horizontal === "right") expect(frame.right - card.right, name).toBeCloseTo(MARGIN.right, 0);
+      else expect((card.left + card.right) / 2, name).toBeCloseTo((frame.left + frame.right) / 2, 0);
       // ブラウザ表示ではウィンドウ (viewport) 内でも同じ向きに寄せる
-      if (vertical === "top") expect(frame.top).toBeCloseTo(0, 0);
-      else expect(frame.bottom).toBeCloseTo(PANEL.height, 0);
-      if (horizontal === "left") expect(frame.left).toBeCloseTo(0, 0);
-      else if (horizontal === "right") expect(frame.right).toBeCloseTo(PANEL.width, 0);
-      else expect((frame.left + frame.right) / 2).toBeCloseTo(PANEL.width / 2, 0);
+      if (vertical === "top") expect(frame.top, name).toBeCloseTo(0, 0);
+      else expect(frame.bottom, name).toBeCloseTo(PANEL.height, 0);
+      if (horizontal === "left") expect(frame.left, name).toBeCloseTo(0, 0);
+      else if (horizontal === "right") expect(frame.right, name).toBeCloseTo(PANEL.width, 0);
+      else expect((frame.left + frame.right) / 2, name).toBeCloseTo(PANEL.width / 2, 0);
       return card;
     };
 
     const pill = await check();
-    const start = anchoredEdges(pill, vertical, horizontal);
-
-    // 展開中 (180ms) のカードの位置を毎フレーム取る。アンカーの辺・角は動かない
-    const samples = await page.evaluate(async (speak) => {
-      new Function(`const api = window.__mukuchiMock; ${speak}`)();
-      const card = document.querySelector('[data-testid="panel-card"]')!;
-      const out: { left: number; right: number; top: number; bottom: number }[] = [];
-      const t0 = performance.now();
-      while (performance.now() - t0 < 350) {
-        await new Promise((r) => requestAnimationFrame(r));
-        const b = card.getBoundingClientRect();
-        out.push({ left: b.left, right: b.right, top: b.top, bottom: b.bottom });
-      }
-      return out;
-    }, SPEAK);
-    const widths = samples.map((s) => s.right - s.left);
-    // 途中の幅が取れている (アニメーションしている) こと
-    expect(widths.some((w) => w > 240.5 && w < 359.5)).toBe(true);
-    for (const s of samples) {
-      const e = anchoredEdges(s, vertical, horizontal);
-      expect(e.x).toBeCloseTo(start.x, 0);
-      expect(e.y).toBeCloseTo(start.y, 0);
-    }
-
+    // 展開中のアンカーの辺・角の動き (毎フレーム) は panel-collapse.spec.ts で確かめる。ここは展開後の配置
+    await mock(page, SPEAK);
     await expect(page.getByTestId("panel-card")).toHaveCSS("width", "360px");
+    await settleAnimations(page);
     const expanded = await check();
     // top は上端から下へ、bottom は下端から上へ広がる
-    if (vertical === "top") expect(expanded.bottom).toBeGreaterThan(pill.bottom);
-    else expect(expanded.top).toBeLessThan(pill.top);
+    if (vertical === "top") expect(expanded.bottom, name).toBeGreaterThan(pill.bottom);
+    else expect(expanded.top, name).toBeLessThan(pill.top);
     // 内部の順序はデザインどおり (プレビューがメーター行の上)
     const preview = await rect(page, "preview");
     const meter = await rect(page, "level-meter");
-    expect(preview.bottom).toBeLessThanOrEqual(meter.top);
-  });
-
-  test(`panel anchor ${name}: set_panel_size の値はアンカーによらない`, async ({ page, m }) => {
-    await open(page, "window=panel&mock=idle");
-    const base = await pillAndExpandedSizes(page, m);
-    await open(page, `window=panel&mock=idle&anchor=${name}`);
-    expect(await pillAndExpandedSizes(page, m)).toEqual(base);
-  });
-}
+    expect(preview.bottom, name).toBeLessThanOrEqual(meter.top);
+  }
+});
 
 test("panel anchor: panel-anchor で配置を切り替える", async ({ page }) => {
   await open(page, "window=panel&mock=speaking");
@@ -167,11 +113,11 @@ test("panel anchor: 購読後に届いた panel-anchor を遅れて届く get_pa
 });
 
 for (const name of ["top-left", "bottom-right"]) {
-  test(`panel anchor ${name}: 展開表示のスクリーンショット`, async ({ page, m, shot }) => {
+  test(`panel anchor ${name}: 展開表示のスクリーンショット`, { tag: SCREENSHOT_ONLY }, async ({ page, m, snap }) => {
     await open(page, `window=panel&mock=speaking&anchor=${name}`);
     await expect(page.getByText(m.panel.speaking)).toBeVisible();
     await expect(page.getByTestId("panel-card")).toHaveCSS("width", "360px");
-    await page.waitForTimeout(300);
-    await page.screenshot({ path: shot(`panel-anchor-${name}`) });
+    await settleAnimations(page);
+    await snap(`panel-anchor-${name}`);
   });
 }

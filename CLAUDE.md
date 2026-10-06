@@ -50,7 +50,7 @@ monorepo。JS/TS の依存はルートの pnpm workspace (`pnpm-workspace.yaml`�
 | `node scripts/bump-version.mjs <desktop\|web> <patch\|minor\|major> [--dry-run]` | 版の書き換え (release.yml が使う。desktop は tauri.conf.json・Cargo.toml・Cargo.lock・package.json をそろえる)。テストは `node --test scripts/*.test.mjs` (`make test` に含む) |
 | `node scripts/check-release-blockers.mjs desktop` | 配布してはいけない仮の値 (HF 未公開のモデルの revision のプレースホルダ `TODO-i18n-pin-commit*`) が残っていれば理由を出して失敗。release.yml の prepare と `make build` (build-macos.sh の既定・`--build-only`) で実行。`build-local`・`dmg-local` では実行しない |
 | `make help` | ターゲット一覧 |
-| `pnpm lint` / `pnpm build` / `pnpm test` (`apps/desktop` で実行) | desktop のフロントエンドの lint / 型チェック+ビルド / Playwright (スクリーンショットは `apps/desktop/e2e/screenshots/`) |
+| `pnpm lint` / `pnpm build` / `pnpm test` / `pnpm screenshots` (`apps/desktop` で実行) | desktop のフロントエンドの lint / 型チェック+ビルド / Playwright (撮影なし。ja は全件、en は表示とはみ出し・言語で分岐する所だけ、実時間を測るものは最後に 1 worker。分け方は `playwright.config.ts`) / ライト・ダークの主要画面を ja・en で撮影 (`apps/desktop/e2e/screenshots/{ja,en}/`) |
 | `pnpm lint` / `pnpm typecheck` / `pnpm build` / `pnpm test` (`apps/web` で実行) | web の lint+prettier / 型検査 / 静的ビルド / Playwright (chromium) |
 
 `make` はnix devShell外で実行された場合 `nix develop -c` 経由で実行される。flake はgit管理下のファイルしか見ないため、`flake.nix` 等の新規ファイルは `git add` してから使う。

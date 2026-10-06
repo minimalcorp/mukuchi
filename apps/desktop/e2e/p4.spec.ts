@@ -2,7 +2,7 @@
  * P4 (セットアップ・ストレージ) の確認: provisioning の状態表示・一時停止/再開/再試行・開き直した時の再開、
  * complete_setup の条件、実行環境とモデルの削除、アンインストール。
  */
-import { expect, MESSAGES, test, type Locale } from "./fixtures";
+import { expect, I18N, MESSAGES, test, type Locale } from "./fixtures";
 import type { Page } from "@playwright/test";
 
 const SETUP = { width: 640, height: 520 };
@@ -75,13 +75,21 @@ test("setup: runtime → model → verify と進み、done になってから次
 });
 
 test("setup: 一時停止は止まるまで押せず、止まった項目は active のまま。再開で続きから進む", async ({ page, m }) => {
+  // モックの進行 (250ms ごと) と一時停止の応答 (300ms) を clock で進める
+  await page.clock.install({ time: 0 });
+  await page.clock.pauseAt(1000);
   await open(page, "window=setup&mock=download-live", SETUP);
-  await expect(item(page, "model")).toHaveAttribute("data-state", "active", { timeout: 5000 });
+  await expect.poll(async () => (await calls(page, "start_provisioning")).length).toBe(1);
+  // runtime (約 1 秒) の後に model へ進み、取得が進む
+  await page.clock.runFor(1500);
+  await expect(item(page, "model")).toHaveAttribute("data-state", "active");
   await expect.poll(() => modelBytes(page)).toBeGreaterThan(0);
   const pause = page.getByRole("button", { name: m.common.pause });
   await pause.click();
   // pause_provisioning が返るまで (止まるまで) は押せない
   await expect(pause).toBeDisabled();
+  await expect(page.getByText(m.setup.download.titleRunning)).toBeVisible();
+  await page.clock.runFor(300);
   await expect(page.getByText(m.setup.download.titlePaused)).toBeVisible();
   await expect(item(page, "model")).toHaveAttribute("data-state", "active");
   await expect(page.getByText(m.setup.download.paused, { exact: false }).first()).toBeVisible();
@@ -89,8 +97,10 @@ test("setup: 一時停止は止まるまで押せず、止まった項目は act
   await page.getByRole("button", { name: m.common.resume }).click();
   await expect.poll(async () => (await calls(page, "start_provisioning")).length).toBe(2);
   await expect(page.getByText(m.setup.download.titleRunning)).toBeVisible();
-  // 続きから (取得済みの量から減らない)
+  // 続きから (取得済みの量から減らずに進む)
   expect(await modelBytes(page)).toBeGreaterThanOrEqual(before);
+  await page.clock.runFor(250);
+  expect(await modelBytes(page)).toBeGreaterThan(before);
 });
 
 test("setup: 失敗したら表示用の文言を出し、再試行は start_provisioning", async ({ page, m, ui }) => {
@@ -115,11 +125,6 @@ test("setup: 導入の途中で開き直したらダウンロードのステッ�
   await expect(page.getByText(`0.9 GB / 2.4 GB${m.common.separator}${m.setup.download.paused}`)).toBeVisible();
   // 一時停止中は自動で開始しない
   expect(await calls(page, "start_provisioning")).toHaveLength(0);
-});
-
-test("setup: 未導入で開いたらようこそから始める", async ({ page, m }) => {
-  await open(page, "window=setup&mock=default", SETUP);
-  await expect(page.getByText(m.setup.welcome.title)).toBeVisible();
 });
 
 test("setup: 導入が済むまで complete_setup を呼ばない", async ({ page, m }) => {
@@ -154,7 +159,7 @@ function selectedModelId(page: Page): Promise<string | undefined> {
   );
 }
 
-test("setup: 表示言語を選ぶとすぐにその言語に切り替わり、uiLanguage を保存する", async ({ page, m, appLocale }) => {
+test("setup: 表示言語を選ぶとすぐにその言語に切り替わり、uiLanguage を保存する", { tag: I18N }, async ({ page, m, appLocale }) => {
   await open(page, "window=setup&mock=default", SETUP);
   await expect(page.getByText(m.setup.welcome.title)).toBeVisible();
   const other = OTHER[appLocale];
@@ -165,11 +170,14 @@ test("setup: 表示言語を選ぶとすぐにその言語に切り替わり、u
   expect((await calls(page, "update_settings")).map((c) => c.args.patch)).toContainEqual({ uiLanguage: other });
 });
 
-test("setup: 取得前に話す言語を変えると、取得するモデルがその言語の推奨になる", async ({ page, m, appLocale }) => {
+// 推奨モデルは話す言語で違う
+test("setup: 取得前に話す言語を変えると、取得するモデルがその言語の推奨になる", { tag: I18N }, async ({ page, m, appLocale }) => {
   await open(page, "window=setup&mock=default", SETUP);
   const speech = page.getByTestId("speech-language");
   await expect(speech).toHaveValue(appLocale);
+  // 取得前は変えられ、理由は出さない
   await expect(speech).toBeEnabled();
+  await expect(page.getByTestId("speech-language-locked")).toHaveCount(0);
   expect(await selectedModelId(page)).toBe(RECOMMENDED[appLocale]);
   const other = OTHER[appLocale];
   await speech.selectOption(other);
@@ -182,23 +190,20 @@ test("setup: 取得前に話す言語を変えると、取得するモデルが�
   await expect(page.getByText(m.setup.welcome.title)).toBeVisible();
 });
 
-test("setup: モデルの取得を始めた後は話す言語を変えられず、理由を出す", async ({ page, m }) => {
-  await open(page, "window=setup&mock=welcome-locked", SETUP);
-  await expect(page.getByText(m.setup.welcome.title)).toBeVisible();
-  await expect(page.getByTestId("speech-language")).toBeDisabled();
-  await expect(page.getByTestId("speech-language-locked")).toHaveText(m.setup.welcome.speechLanguageLocked);
-  // 表示言語は変えられる
-  await expect(page.getByTestId("ui-language")).toBeEnabled();
-});
-
-test("setup: 実行環境の準備中に開き直した時は話す言語を変えられず、実行中の理由を出す", async ({ page, m }) => {
-  await open(page, "window=setup&mock=welcome-running", SETUP);
-  await expect(page.getByText(m.setup.welcome.title)).toBeVisible();
-  await expect(page.getByTestId("speech-language")).toBeDisabled();
-  const reason = page.getByTestId("speech-language-locked");
-  await expect(reason).toHaveText(m.setup.welcome.speechLanguageLockedRunning);
-  await expect(reason).toHaveAttribute("data-reason", "running");
-  await expect(page.getByTestId("ui-language")).toBeEnabled();
+test("setup: 取得を始めた後・準備の実行中は話す言語を変えられず、それぞれの理由を出す", async ({ page, m }) => {
+  for (const [mock, reason, text] of [
+    ["welcome-locked", "started", m.setup.welcome.speechLanguageLocked],
+    ["welcome-running", "running", m.setup.welcome.speechLanguageLockedRunning],
+  ] as const) {
+    await open(page, `window=setup&mock=${mock}`, SETUP);
+    await expect(page.getByText(m.setup.welcome.title)).toBeVisible();
+    await expect(page.getByTestId("speech-language")).toBeDisabled();
+    const locked = page.getByTestId("speech-language-locked");
+    await expect(locked).toHaveText(text);
+    await expect(locked).toHaveAttribute("data-reason", reason);
+    // 表示言語は変えられる
+    await expect(page.getByTestId("ui-language")).toBeEnabled();
+  }
 });
 
 test("setup: 準備の実行中に話す言語が変わってもモデルの選択は変えない (Rust と同じ条件)", async ({ page }) => {
@@ -210,12 +215,6 @@ test("setup: 準備の実行中に話す言語が変わってもモデルの選�
     return api.invoke("update_settings", { patch: { speechLanguage: next } });
   })()`);
   expect(await page.evaluate(`window.__mukuchiMock.db.models.find((m) => m.selected).id`)).toBe(selectedBefore);
-});
-
-test("setup: 取得前は話す言語を変えられ、理由は出さない", async ({ page }) => {
-  await open(page, "window=setup&mock=default", SETUP);
-  await expect(page.getByTestId("speech-language")).toBeEnabled();
-  await expect(page.getByTestId("speech-language-locked")).toHaveCount(0);
 });
 
 // ---------- 設定: ストレージ ----------

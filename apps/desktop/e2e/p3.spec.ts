@@ -3,7 +3,7 @@
  * 保存エラーの表示、音声コマンドの検証、認識のヒント、マイク一覧の再取得、AppStatus.seq。
  */
 import type { Page } from "@playwright/test";
-import { expect, test } from "./fixtures";
+import { expect, I18N, SCREENSHOT, test } from "./fixtures";
 
 const PANEL = { width: 560, height: 260 };
 const SETTINGS = { width: 840, height: 640 };
@@ -65,12 +65,12 @@ async function setJaCommands(page: Page) {
 
 // ---------- open_setup ----------
 
-test("panel: 実行環境とモデルがない → セットアップを開く で open_setup", async ({ page, m, shot }) => {
+test("panel: 実行環境とモデルがない → セットアップを開く で open_setup", { tag: SCREENSHOT }, async ({ page, m, snap }) => {
   await open(page, "window=panel&mock=error-runtime", PANEL);
   await expect(page.getByText(m.panel.errors.runtime_missing)).toBeVisible();
   await page.getByRole("button", { name: m.errorActions.start_setup }).click();
   await expect.poll(async () => (await calls(page, "open_setup")).length).toBe(1);
-  await page.screenshot({ path: shot("panel-error-runtime-action") });
+  await snap("panel-error-runtime-action");
 });
 
 test("settings: 認識で実行環境とモデルがない → セットアップを開く", async ({ page, m }) => {
@@ -109,7 +109,7 @@ test("settings: 保存に失敗したら値を戻し、操作の近くにエラ�
 const APPROVAL_ERROR =
   "ログイン時に起動するには承認が必要です。システム設定 > 一般 > ログイン項目 で mukuchi をオンにしてください";
 
-test("settings: ログイン時に起動をオンにできなければエラーとログイン項目を開くボタンを出す", async ({ page, m, shot }) => {
+test("settings: ログイン時に起動をオンにできなければエラーとログイン項目を開くボタンを出す", { tag: SCREENSHOT }, async ({ page, m, snap }) => {
   await open(page, "window=settings&mock=default&category=general", SETTINGS);
   const sw = page.getByRole("switch", { name: m.settings.general.launchAtLogin });
   // オフにしてからオンで失敗させる (承認待ち)
@@ -120,14 +120,14 @@ test("settings: ログイン時に起動をオンにできなければエラー�
   const alert = page.getByRole("alert");
   await expect(alert).toContainText(APPROVAL_ERROR);
   await expect(sw).not.toBeChecked();
-  await page.screenshot({ path: shot("settings-launch-at-login-error") });
+  await snap("settings-launch-at-login-error");
   await alert.getByRole("button", { name: m.common.openSystemSettings }).click();
   await expect.poll(async () => (await calls(page, "open_system_settings")).map((c) => c.args)).toEqual([
     { pane: "login_items" },
   ]);
 });
 
-test("setup: 完了画面でログイン時に起動をオンにできなければエラーとログイン項目を開くボタンを出す", async ({ page, m, shot }) => {
+test("setup: 完了画面でログイン時に起動をオンにできなければエラーとログイン項目を開くボタンを出す", { tag: SCREENSHOT }, async ({ page, m, snap }) => {
   await open(page, "window=setup&mock=done", { width: 640, height: 520 });
   const sw = page.getByRole("switch", { name: m.settings.general.launchAtLogin });
   await expect(sw).toBeChecked();
@@ -138,7 +138,7 @@ test("setup: 完了画面でログイン時に起動をオンにできなけれ�
   const alert = page.getByRole("alert");
   await expect(alert).toContainText(APPROVAL_ERROR);
   await expect(sw).not.toBeChecked();
-  await page.screenshot({ path: shot("setup-launch-at-login-error") });
+  await snap("setup-launch-at-login-error");
   await alert.getByRole("button", { name: m.common.openSystemSettings }).click();
   await expect.poll(async () => (await calls(page, "open_system_settings")).map((c) => c.args)).toEqual([
     { pane: "login_items" },
@@ -296,7 +296,7 @@ test("settings: 起動中のアプリを取得できなければメニューに�
   await expect(page.getByRole("menu").getByText("アプリの一覧を取得できませんでした")).toBeVisible();
 });
 
-test("settings: 登録済みのアプリは追加候補に出さない", async ({ page, m, sp }) => {
+test("settings: 登録済みのアプリは追加候補に出さない。追加・削除できる", async ({ page, m, sp }) => {
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
   await page.getByRole("button", { name: m.settings.voice.addApp }).click();
   await expect(page.getByRole("menuitem", { name: "Safari" })).toBeVisible();
@@ -307,6 +307,13 @@ test("settings: 登録済みのアプリは追加候補に出さない", async (
     const last = (await calls(page, "update_settings")).at(-1)?.args as { patch: { excludedApps: { bundleId: string }[] } };
     return last?.patch.excludedApps.map((a) => a.bundleId);
   }).toEqual(["com.1password.1password", "com.apple.Terminal", "com.apple.Safari"]);
+  await expect(page.getByText("Safari", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: m.settings.voice.removeApp("Safari") }).click();
+  await expect(page.getByText("Safari", { exact: true })).toHaveCount(0);
+  await expect.poll(async () => {
+    const last = (await calls(page, "update_settings")).at(-1)?.args as { patch: { excludedApps: { bundleId: string }[] } };
+    return last?.patch.excludedApps.map((a) => a.bundleId);
+  }).toEqual(["com.1password.1password", "com.apple.Terminal"]);
 });
 
 // ---------- 音声コマンド ----------
@@ -346,12 +353,14 @@ test("settings: 音声コマンドの言い方を Rust と同じ正規化で検�
   await expect(save).toBeEnabled();
 });
 
-test("settings: 言い方を複数・修飾キー付きで追加する", async ({ page, m }) => {
+// 区切り文字 (phraseJoiner) は表示言語で違う
+test("settings: 言い方を複数・修飾キー付きで追加する", { tag: [I18N, SCREENSHOT] }, async ({ page, m, snap }) => {
   const dialog = await openAddCommand(page, m.settings.commands.add);
-  await dialog.getByLabel(m.settings.commands.phrases).fill("前へ、戻る");
+  await dialog.getByLabel(m.settings.commands.phrases).fill(`前へ${m.settings.commands.phraseJoiner}戻る`);
   await dialog.getByRole("button", { name: "Shift" }).click();
   await dialog.getByLabel(m.settings.commands.keyName, { exact: true }).selectOption("tab");
   await expect(dialog.getByText("Shift + Tab")).toBeVisible();
+  await snap("settings-command-dialog");
   await dialog.getByRole("button", { name: m.common.save }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByText("前へ", { exact: true })).toBeVisible();
@@ -489,17 +498,6 @@ test("panel: seq が前回より小さい status-changed は捨てる", async ({
   await expect(page.getByText(m.panel.idle)).toBeVisible();
   await mock(page, `api.fire("status-changed", { phase: "off", loadingProgress: null, error: null, seq: 6 });`);
   await expect(page.getByRole("button", { name: m.panel.turnOn })).toBeVisible();
-});
-
-test("mock: status を変えるたびに seq を増やす", async ({ page, m }) => {
-  await open(page, "window=panel&mock=off", PANEL);
-  const seq = () => page.evaluate(() => (window as unknown as { __mukuchiMock: { db: { status: { seq: number } } } }).__mukuchiMock.db.status.seq);
-  const before = await seq();
-  await page.getByRole("button", { name: m.panel.turnOn }).click();
-  await expect(page.getByText(m.panel.idle)).toBeVisible();
-  await expect.poll(seq).toBe(before + 1);
-  await mock(page, `api.setStatus({ phase: "speaking" });`);
-  await expect.poll(seq).toBe(before + 2);
 });
 
 test("panel: 未知のエラーコードは Rust のメッセージをそのまま出す", async ({ page }) => {

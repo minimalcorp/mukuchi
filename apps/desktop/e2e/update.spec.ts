@@ -3,7 +3,7 @@
  * unavailable での無効化、自動確認の切り替え、command の失敗の表示。
  */
 import type { Page } from "@playwright/test";
-import { expect, test } from "./fixtures";
+import { expect, I18N, test } from "./fixtures";
 
 const SETTINGS = { width: 840, height: 640 };
 
@@ -25,7 +25,8 @@ function calls(page: Page, cmd: string): Promise<Call[]> {
   return page.evaluate((c) => (window as unknown as { __mukuchiMock: Mock }).__mukuchiMock.calls.filter((x) => x.cmd === c), cmd);
 }
 
-test("about: 確認して最新なら最終確認の時刻を出す", async ({ page, m }) => {
+// 時刻は Intl の書式 (表示言語で違う)
+test("about: 確認して最新なら最終確認の時刻を出す", { tag: I18N }, async ({ page, m }) => {
   await open(page, "update-unchecked");
   await expect(page.getByText(m.settings.about.notChecked)).toBeVisible();
   await page.getByRole("button", { name: m.settings.about.check }).click();
@@ -37,13 +38,19 @@ test("about: 確認して最新なら最終確認の時刻を出す", async ({ p
 });
 
 test("about: 新しい版を取得して ready になり、再起動してアップデートを押すと install_update", async ({ page, m }) => {
+  // 確認 (約 0.6 秒) と取得 (4 MB / 250ms、40 MB) を clock で進める
+  await page.clock.install({ time: 0 });
+  await page.clock.pauseAt(1000);
   await open(page, "update-available");
   await page.getByRole("button", { name: m.settings.about.check }).click();
+  await expect(page.getByTestId("update-status")).toHaveAttribute("data-state", "checking");
+  await page.clock.runFor(600);
   await expect(page.getByText(m.settings.about.downloading("v0.2.0"))).toBeVisible();
   await expect(page.getByRole("progressbar", { name: m.settings.about.downloadProgress })).toBeVisible();
   // 取得中は確認を押させない (Rust も何もしない)
   await expect(page.getByRole("button", { name: m.settings.about.check })).toBeDisabled();
-  await expect(page.getByText(m.settings.about.ready("v0.2.0"))).toBeVisible({ timeout: 5000 });
+  await page.clock.runFor(2500);
+  await expect(page.getByText(m.settings.about.ready("v0.2.0"))).toBeVisible();
   await page.getByRole("button", { name: m.settings.about.install }).click();
   await expect(page.getByText(m.settings.about.installing("v0.2.0"))).toBeVisible();
   expect(await calls(page, "install_update")).toHaveLength(1);

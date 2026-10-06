@@ -4,7 +4,7 @@
  * メーターの長さはカードの幅に合わせて伸びるので比べない。
  */
 import type { Page } from "@playwright/test";
-import { expect, test } from "./fixtures";
+import { expect, settleAnimations, test } from "./fixtures";
 
 const PANEL = { width: 560, height: 360 };
 
@@ -14,9 +14,9 @@ async function metrics(page: Page, scenario: string) {
   await page.waitForFunction(() => (document.getElementById("root")?.childElementCount ?? 0) > 0);
   await page.evaluate(() => document.fonts.ready);
   const card = page.getByTestId("panel-card");
-  await expect(card).toBeVisible();
-  // 展開・収縮のアニメーション (180ms) が終わってから測る
-  await page.waitForTimeout(400);
+  // 展開・収縮のアニメーション (180ms) が終わってから測る (幅は途中の値を返すので、最終の幅になるまで待つ)
+  await expect(card).toHaveCSS("width", scenario === "idle" ? "240px" : "360px");
+  await settleAnimations(page);
   return card.evaluate((el) => {
     const row = el.lastElementChild as HTMLElement;
     const [button, meter] = Array.from(row.children) as HTMLElement[];

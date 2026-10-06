@@ -4,10 +4,10 @@
  * 一覧は話す言語の並び (ja: ja-8bit → base-1.7b-8bit、en: base-1.7b-8bit → ja-8bit)。新規の設定は話す言語 = 表示言語で、
  * 推奨 (先頭) を取得済み・使用中、もう一方は未取得。
  * bf16 は旧候補 (手元にある時だけ出る)。bf16 を含むシナリオは旧版から bf16 を使っていた人の状態。
- * スクリーンショットは e2e/screenshots/<言語>/settings-models-*.png。
+ * スクリーンショット (pnpm screenshots) は e2e/screenshots/<言語>/settings-models-*.png。ダークは撮影だけ。
  */
 import type { Page } from "@playwright/test";
-import { expect, test, type Locale } from "./fixtures";
+import { expect, I18N, SCREENSHOT, SCREENSHOT_ONLY, test, type Locale } from "./fixtures";
 
 const SETTINGS = { width: 840, height: 640 };
 
@@ -58,8 +58,10 @@ const row = (page: Page, id: string) => page.getByTestId(`model-${id}`).locator(
 
 for (const dark of [false, true]) {
   const suffix = dark ? "-dark" : "";
+  // ダークは撮影だけ。既定の並び・推奨は話す言語で違うため en でも回す
+  const tag = dark ? SCREENSHOT_ONLY : SCREENSHOT;
 
-  test(`既定: 話す言語の推奨を使用中、もう一方は未取得。旧候補の bf16 は出ない${suffix}`, async ({ page, m, ui, shot, appLocale }) => {
+  test(`既定: 話す言語の推奨を使用中、もう一方は未取得。旧候補の bf16 は出ない${suffix}`, { tag: dark ? SCREENSHOT_ONLY : [I18N, SCREENSHOT] }, async ({ page, m, ui, snap, appLocale }) => {
     await open(page, "default", dark);
     const rec = RECOMMENDED[appLocale];
     const sep = m.common.separator;
@@ -78,10 +80,10 @@ for (const dark of [false, true]) {
     // 推奨を使っているため案内は出ない
     await expect(page.getByTestId("model-recommendation")).toHaveCount(0);
     await expect(page.getByTestId("model-ja-bf16")).toHaveCount(0);
-    await page.screenshot({ path: shot(`settings-models-default${suffix}`) });
+    await snap(`settings-models-default${suffix}`);
   });
 
-  test(`旧候補: bf16 が手元にあれば出て、使う・削除できる${suffix}`, async ({ page, m, ui, shot }) => {
+  test(`旧候補: bf16 が手元にあれば出て、使う・削除できる${suffix}`, { tag }, async ({ page, m, ui, snap }) => {
     await open(page, "models-legacy", dark);
     const rb = row(page, "ja-bf16");
     await expect(rb).toContainText(ui.models["ja-bf16"].name);
@@ -91,51 +93,42 @@ for (const dark of [false, true]) {
     await expect(rb.getByRole("button", { name: m.common.delete })).toBeEnabled();
     // 旧候補は並びの末尾
     expect((await rowIds(page)).at(-1)).toBe("ja-bf16");
-    await page.screenshot({ path: shot(`settings-models-legacy${suffix}`) });
+    await snap(`settings-models-legacy${suffix}`);
   });
 
-  test(`取得中: 進捗バー・残り時間・一時停止・中止${suffix}`, async ({ page, m, shot }) => {
+  test(`取得中: 進捗バー・残り時間・一時停止・中止${suffix}`, { tag }, async ({ page, m, snap }) => {
     await open(page, "models-downloading", dark);
     const rb = row(page, "ja-bf16");
     await expect(rb).toContainText(`1.5 / 4.1 GB${m.common.separator}${m.format.etaMinutes(3)}`);
     await expect(rb.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "37");
     await expect(rb.getByRole("button", { name: m.common.pause })).toBeEnabled();
     await expect(rb.getByRole("button", { name: m.settings.models.cancel })).toBeEnabled();
-    await page.screenshot({ path: shot(`settings-models-downloading${suffix}`) });
+    await snap(`settings-models-downloading${suffix}`);
   });
 }
 
-test("一時停止: 再開・中止", async ({ page, m, shot }) => {
-  await open(page, "models-paused");
-  const rb = row(page, "ja-bf16");
-  await expect(rb).toContainText(`${m.settings.models.paused}${m.common.separator}1.5 / 4.1 GB`);
-  await expect(rb.getByRole("button", { name: m.common.resume })).toBeEnabled();
-  await expect(rb.getByRole("button", { name: m.settings.models.cancel })).toBeEnabled();
-  await page.screenshot({ path: shot("settings-models-paused") });
-});
-
-test("失敗: 理由を表示し、再試行で取得を再開する", async ({ page, m, ui, shot }) => {
+test("失敗: 理由を表示し、再試行で取得を再開する", { tag: SCREENSHOT }, async ({ page, m, ui, snap }) => {
   await open(page, "models-error");
   const rb = row(page, "ja-bf16");
   await expect(rb).toContainText(`${m.settings.models.failed}${m.common.separator}1.5 / 4.1 GB`);
   await expect(rb.getByRole("alert")).toHaveText(ui.modelDownloadFailed);
-  await page.screenshot({ path: shot("settings-models-error") });
+  await snap("settings-models-error");
   await rb.getByRole("button", { name: m.common.retry }).click();
   await expect(page.getByTestId("model-ja-bf16")).toHaveAttribute("data-state", "downloading");
   await expect(rb.getByRole("alert")).toHaveCount(0);
   expect(await calls(page, "download_model")).toEqual([{ cmd: "download_model", args: { id: "ja-bf16" } }]);
 });
 
-test("使用中のモデルは削除できず、理由を Tooltip で示す", async ({ page, m, shot }) => {
+test("使用中のモデルは削除できず、理由を Tooltip で示す", { tag: SCREENSHOT }, async ({ page, m, snap }) => {
   await open(page, "models-both");
   const del = row(page, "ja-bf16").getByRole("button", { name: m.common.delete });
   await expect(del).toBeDisabled();
   await page.getByLabel(m.settings.models.inUseCantDelete).hover();
   await expect(page.getByRole("tooltip")).toContainText(m.settings.models.inUseCantDelete);
-  await page.screenshot({ path: shot("settings-models-in-use-tooltip") });
+  await snap("settings-models-in-use-tooltip");
 });
 
-test("セットアップ未完了: 案内を出し、操作できない", async ({ page, m, shot, appLocale }) => {
+test("セットアップ未完了: 案内を出し、操作できない", { tag: SCREENSHOT }, async ({ page, m, snap, appLocale }) => {
   await open(page, "models-setup-incomplete");
   const rec = RECOMMENDED[appLocale];
   await expect(page.getByTestId("models-setup-incomplete")).toContainText(m.settings.models.setupIncomplete);
@@ -145,7 +138,7 @@ test("セットアップ未完了: 案内を出し、操作できない", async 
   await expect(page.getByTestId("model-ja-bf16")).toHaveCount(0);
   // セットアップ完了前は推奨への案内も出さない
   await expect(page.getByTestId("model-recommendation")).toHaveCount(0);
-  await page.screenshot({ path: shot("settings-models-setup-incomplete") });
+  await snap("settings-models-setup-incomplete");
 });
 
 test("同時に取得できるのは1つ: 他が取得中ならダウンロード・再開を押せない", async ({ page, m, appLocale }) => {
@@ -169,13 +162,16 @@ test("同時に取得できるのは1つ: 他が取得中ならダウンロー�
 
 // ---------- 取得 ----------
 
-test("取得: 再開 → 進捗 → 一時停止 → 再開 → 完了で「使う」が出る", async ({ page, m }) => {
+test("取得: 一時停止中は再開・中止でき、再開 → 進捗 → 一時停止 → 再開 → 完了で「使う」が出る", { tag: SCREENSHOT }, async ({ page, m, snap }) => {
   const sep = m.common.separator;
   await page.clock.install({ time: 0 });
   await page.clock.pauseAt(1000);
   // 旧候補は新たに取得を始められないため、途中で止まっているものを再開する
   await open(page, "models-paused");
   const rb = row(page, "ja-bf16");
+  await expect(rb).toContainText(`${m.settings.models.paused}${sep}1.5 / 4.1 GB`);
+  await expect(rb.getByRole("button", { name: m.settings.models.cancel })).toBeEnabled();
+  await snap("settings-models-paused");
   await rb.getByRole("button", { name: m.common.resume }).click();
   expect(await calls(page, "download_model")).toEqual([{ cmd: "download_model", args: { id: "ja-bf16" } }]);
   await page.clock.runFor(250);
@@ -216,7 +212,7 @@ test("取得: command の失敗はその行に表示する", async ({ page, m })
 
 // ---------- 切り替え ----------
 
-test("切り替え: loading を経由する間は処理中表示で操作できず、完了で使用中が移る", async ({ page, m, shot }) => {
+test("切り替え: loading を経由する間は処理中表示で操作できず、完了で使用中が移る。旧候補にも切り替えられる", { tag: SCREENSHOT }, async ({ page, m, snap }) => {
   await page.clock.install({ time: 0 });
   await page.clock.pauseAt(1000);
   await open(page, "models-both");
@@ -227,15 +223,20 @@ test("切り替え: loading を経由する間は処理中表示で操作でき�
   await expect(r8.getByRole("button", { name: m.settings.models.switching })).toBeDisabled();
   await expect(r8.getByRole("button", { name: m.common.delete })).toHaveCount(0);
   await expect(page.getByText(m.settings.recognition.loading, { exact: true })).toBeVisible();
-  await page.screenshot({ path: shot("settings-models-switching") });
+  await snap("settings-models-switching");
   expect(await calls(page, "select_model")).toEqual([{ cmd: "select_model", args: { id: "ja-8bit" } }]);
   await page.clock.runFor(1000);
   await expect(r8).toContainText(m.settings.models.inUse);
   await expect(rb.getByRole("button", { name: m.settings.models.use })).toBeEnabled();
   await expect(page.getByText(m.settings.recognition.loaded, { exact: true })).toBeVisible();
+  // 旧候補 (bf16) にも切り替えられる
+  await rb.getByRole("button", { name: m.settings.models.use }).click();
+  await page.clock.runFor(1000);
+  await expect(rb).toContainText(m.settings.models.inUse);
+  await expect(r8.getByRole("button", { name: m.settings.models.use })).toBeEnabled();
 });
 
-test("切り替え: 失敗すると元のモデルに戻り、エラーを表示する", async ({ page, m, shot }) => {
+test("切り替え: 失敗すると元のモデルに戻り、エラーを表示する", { tag: SCREENSHOT }, async ({ page, m, snap }) => {
   await page.clock.install({ time: 0 });
   await page.clock.pauseAt(1000);
   await open(page, "models-both");
@@ -245,19 +246,19 @@ test("切り替え: 失敗すると元のモデルに戻り、エラーを表示
   await expect(page.getByRole("alert")).toHaveText("『日本語 (8bit)』を読み込めませんでした。『日本語 (bf16)』に戻しました");
   await expect(row(page, "ja-bf16")).toContainText(m.settings.models.inUse);
   await expect(row(page, "ja-8bit").getByRole("button", { name: m.settings.models.use })).toBeEnabled();
-  await page.screenshot({ path: shot("settings-models-switch-failed") });
+  await snap("settings-models-switch-failed");
 });
 
 // ---------- 削除 ----------
 
-test("削除: 確認ダイアログでキャンセルすると消さず、削除すると未取得になる", async ({ page, m, ui, shot }) => {
+test("削除: 確認ダイアログでキャンセルすると消さず、削除すると未取得になる", { tag: SCREENSHOT }, async ({ page, m, ui, snap }) => {
   await open(page, "models-both");
   const r8 = row(page, "ja-8bit");
   await r8.getByRole("button", { name: m.common.delete }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toContainText(m.settings.models.deleteTitle);
   await expect(dialog).toContainText(m.settings.models.deleteDescription(ui.models["ja-8bit"].name, "2.2 GB"));
-  await page.screenshot({ path: shot("settings-models-delete-dialog") });
+  await snap("settings-models-delete-dialog");
   await dialog.getByRole("button", { name: m.common.cancel }).click();
   await expect(dialog).toHaveCount(0);
   expect(await calls(page, "delete_model")).toHaveLength(0);
@@ -269,16 +270,6 @@ test("削除: 確認ダイアログでキャンセルすると消さず、削除
   expect(await calls(page, "delete_model")).toEqual([{ cmd: "delete_model", args: { id: "ja-8bit" } }]);
 });
 
-test("削除: 旧候補 (bf16) を削除すると一覧から消える", async ({ page, m, appLocale }) => {
-  await open(page, "models-legacy");
-  await row(page, "ja-bf16").getByRole("button", { name: m.common.delete }).click();
-  await page.getByRole("dialog").getByRole("button", { name: m.common.delete }).click();
-  await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect(page.getByTestId("model-ja-bf16")).toHaveCount(0);
-  expect(await calls(page, "delete_model")).toEqual([{ cmd: "delete_model", args: { id: "ja-bf16" } }]);
-  expect(await rowIds(page)).toEqual([RECOMMENDED[appLocale], OTHER[appLocale]]);
-});
-
 test("一覧が1件の時は使用中の行に削除ボタンを出さない", async ({ page, m, appLocale }) => {
   await open(page, "default");
   const rec = RECOMMENDED[appLocale];
@@ -286,17 +277,6 @@ test("一覧が1件の時は使用中の行に削除ボタンを出さない", a
   await mock(page, `api.db.models = api.db.models.filter((x) => x.id === "${rec}"); api.fire("models-changed", api.db.models);`);
   await expect(page.getByTestId(`model-${OTHER[appLocale]}`)).toHaveCount(0);
   await expect(row(page, rec).getByRole("button", { name: m.common.delete })).toHaveCount(0);
-});
-
-test("切り替え: 旧候補 (bf16) に切り替えられる", async ({ page, m, appLocale }) => {
-  await page.clock.install({ time: 0 });
-  await page.clock.pauseAt(1000);
-  await open(page, "models-legacy");
-  await row(page, "ja-bf16").getByRole("button", { name: m.settings.models.use }).click();
-  await page.clock.runFor(1000);
-  await expect(row(page, "ja-bf16")).toContainText(m.settings.models.inUse);
-  // それまで使っていた推奨モデルに戻せる
-  await expect(row(page, RECOMMENDED[appLocale]).getByRole("button", { name: m.settings.models.use })).toBeEnabled();
 });
 
 test("実行環境とモデルのみ削除の後は話す言語の推奨 (未取得・選択中) が選ばれ、旧候補は消える", async ({ page, m, appLocale }) => {
@@ -329,7 +309,8 @@ test("一覧の取得に失敗したらエラーを表示する", async ({ page,
 
 // ---------- 話す言語 ----------
 
-test("話す言語: 変えると一覧が並び替わり、推奨と注記が移る。使用中は変えず推奨を案内する", async ({ page, m, ui, shot, appLocale }) => {
+// 並び・推奨・注記 (tunedFor) は話す言語で分かれる
+test("話す言語: 変えると一覧が並び替わり、推奨と注記が移る。使用中は変えず推奨を案内する", { tag: [I18N, SCREENSHOT] }, async ({ page, m, ui, snap, appLocale }) => {
   await open(page, "default");
   const other = otherLocale(appLocale);
   const tuned = page.getByTestId("model-ja-8bit-tuned");
@@ -349,10 +330,10 @@ test("話す言語: 変えると一覧が並び替わり、推奨と注記が移
     m.settings.models.recommendation(m.languageName[other], ui.models[RECOMMENDED[other]].name),
   );
   await expect(notice.getByRole("button", { name: m.common.download })).toBeEnabled();
-  await page.screenshot({ path: shot("settings-models-speech-changed") });
+  await snap("settings-models-speech-changed");
 });
 
-test("推奨の案内: 推奨が未取得ならダウンロードを始め、取得中は終わるまで待つよう示す", async ({ page, m, ui, appLocale }) => {
+test("推奨の案内: 推奨が未取得ならダウンロードを始め、取得中は終わるまで待つよう示す", { tag: I18N }, async ({ page, m, ui, appLocale }) => {
   await open(page, "models-not-recommended");
   const rec = RECOMMENDED[appLocale];
   const notice = page.getByTestId("model-recommendation");

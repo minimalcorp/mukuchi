@@ -3,9 +3,10 @@
  * 収縮中にウィンドウを少しずつ縮めると、ネイティブのウィンドウの変更と WebView の描画がずれてカードが揺れるため、
  * 展開・収縮とも set_panel_size は 1 回 (展開は開始時、収縮はアニメーションの終了後) で、
  * アニメーション中はアンカーの辺が動かないことを毎フレーム確認する。
+ * 実時間で毎フレーム採取するため TIMING (並列の後に 1 worker で回す)。
  */
 import type { Page } from "@playwright/test";
-import { expect, test, type Messages } from "./fixtures";
+import { expect, test, TIMING, type Messages } from "./fixtures";
 
 const PANEL = { width: 560, height: 360 };
 const PILL_SIZE = { width: 24 + 240 + 24, height: 16 + 36 + 32 };
@@ -91,10 +92,11 @@ const anchored = (s: Sample, vertical: string, horizontal: string) => ({
   y: vertical === "top" ? s.top : s.bottom,
 });
 
-for (const anchor of ["bottom-center", "top-center", "top-left", "bottom-right"]) {
+// 既定 (下中央) と、縦横とも逆向きの角 (左上)。静的な配置は 6 通りとも panel-anchor.spec.ts で確かめる
+for (const anchor of ["bottom-center", "top-left"]) {
   const [vertical, horizontal] = anchor.split("-");
 
-  test(`panel ${anchor}: 展開・収縮中はアンカーの辺が動かず、set_panel_size は 1 回だけ`, async ({ page, m }) => {
+  test(`panel ${anchor}: 展開・収縮中はアンカーの辺が動かず、set_panel_size は 1 回だけ`, { tag: TIMING }, async ({ page, m }) => {
     await open(page, m, anchor);
     const idle = await page.getByTestId("panel-card").boundingBox();
 
@@ -143,7 +145,7 @@ for (const anchor of ["bottom-center", "top-center", "top-left", "bottom-right"]
   });
 }
 
-test("panel: 収縮の途中で再び展開した時は、展開時の大きさのまま送り直さない", async ({ page, m }) => {
+test("panel: 収縮の途中で再び展開した時は、展開時の大きさのまま送り直さない", { tag: TIMING }, async ({ page, m }) => {
   await open(page, m, "bottom-center");
   await record(page, SPEAK, CARD_IS(360));
   const before = (await sizes(page)).length;
@@ -167,7 +169,7 @@ test("panel: 収縮の途中で再び展開した時は、展開時の大きさ�
   expect(sent.every((s) => s.width === 408)).toBe(true);
 });
 
-test("panel: 動きを減らす設定では、アニメーションせずにすぐ最終の大きさを 1 回送る", async ({ page, m }) => {
+test("panel: 動きを減らす設定では、アニメーションせずにすぐ最終の大きさを 1 回送る", { tag: TIMING }, async ({ page, m }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await open(page, m, "bottom-center");
   await record(page, SPEAK, CARD_IS(360));

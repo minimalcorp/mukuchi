@@ -65,14 +65,24 @@ const STATES = [
   { name: "ON", query: "window=panel&mock=idle", button: "turnOff" as const, on: false },
 ];
 
+/** 要素の中央 (ページ座標) */
+async function center(target: Locator) {
+  const box = await target.boundingBox();
+  if (!box) throw new Error("要素がありません");
+  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+}
+
 for (const s of STATES) {
-  test(`panel ${s.name}: ボタン上から 4px 以上動かすとドラッグになり、切り替えない`, async ({ page, m }) => {
+  test(`panel ${s.name}: ボタン上から 4px 以上動かすとドラッグになり切り替えず、その後もキーボードで切り替えられる`, async ({ page, m }) => {
     await open(page, s.query, PANEL);
     const button = page.getByRole("button", { name: m.panel[s.button] });
     await pressMove(page, button, 12);
     await expect.poll(() => dragCalls(page)).toBe(1);
     expect(await calls(page, "set_listening")).toHaveLength(0);
     await expect(button).toBeVisible();
+    await button.focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await calls(page, "set_listening")).map((c) => c.args)).toEqual([{ on: s.on }]);
   });
 
   test(`panel ${s.name}: 動かさずに離すとクリック (切り替え) になり、ドラッグしない`, async ({ page, m }) => {
@@ -83,26 +93,7 @@ for (const s of STATES) {
     expect(await dragCalls(page)).toBe(0);
   });
 
-  test(`panel ${s.name}: ドラッグの後もキーボードで切り替えられる`, async ({ page, m }) => {
-    await open(page, s.query, PANEL);
-    const button = page.getByRole("button", { name: m.panel[s.button] });
-    await pressMove(page, button, 12);
-    await expect.poll(() => dragCalls(page)).toBe(1);
-    await button.focus();
-    await page.keyboard.press("Enter");
-    await expect.poll(async () => (await calls(page, "set_listening")).map((c) => c.args)).toEqual([{ on: s.on }]);
-  });
-}
-
-/** 要素の中央 (ページ座標) */
-async function center(target: Locator) {
-  const box = await target.boundingBox();
-  if (!box) throw new Error("要素がありません");
-  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-}
-
-for (const s of STATES) {
-  test(`panel ${s.name}: ボタン上の右クリックで show_panel_menu を呼び、切り替え・ドラッグしない`, async ({ page, m }) => {
+  test(`panel ${s.name}: ボタン上の右クリックで show_panel_menu を呼び、右クリック・control + クリックは切り替え・ドラッグしない`, async ({ page, m }) => {
     await open(page, s.query, PANEL);
     const button = page.getByRole("button", { name: m.panel[s.button] });
     const { x, y } = await center(button);
@@ -118,13 +109,7 @@ for (const s of STATES) {
     const args = menu.args as { x: number; y: number };
     expect(Math.abs(args.x - x)).toBeLessThanOrEqual(1);
     expect(Math.abs(args.y - y)).toBeLessThanOrEqual(1);
-    expect(await calls(page, "set_listening")).toHaveLength(0);
-    expect(await dragCalls(page)).toBe(0);
-  });
-
-  test(`panel ${s.name}: control + クリックは切り替え・ドラッグしない`, async ({ page, m }) => {
-    await open(page, s.query, PANEL);
-    const button = page.getByRole("button", { name: m.panel[s.button] });
+    // control + クリック (macOS の副クリック) も切り替え・ドラッグしない
     await button.click({ modifiers: ["Control"] });
     await pressMoveWith(page, button, 12, "Control");
     expect(await calls(page, "set_listening")).toHaveLength(0);

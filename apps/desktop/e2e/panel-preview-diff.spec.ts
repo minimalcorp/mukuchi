@@ -3,7 +3,7 @@
  * 末尾への普通の追加と消えた文字は色付け・表示しない。確定結果への置き換えも同じ差分で表示する。
  */
 import type { Locator, Page } from "@playwright/test";
-import { expect, test, type Messages } from "./fixtures";
+import { expect, SCREENSHOT, SCREENSHOTS, test, TIMING, type Messages } from "./fixtures";
 import { diffPreview } from "../src/windows/panel/preview-diff";
 
 const PANEL = { width: 560, height: 260 };
@@ -105,7 +105,8 @@ test("panel: 途中表示・確定のたびに前回からの差分だけを色�
   await expect(page.locator(".text-fg-unstable")).toHaveCount(0);
 });
 
-test("panel: 色付けは待ってから通常の文字色へ段階的に戻る (動きを減らす設定では一度に戻る)", async ({ page, m }) => {
+// 実時間で戻りきるのを確かめるため TIMING
+test("panel: 色付けは待ってから通常の文字色へ段階的に戻る (動きを減らす設定では一度に戻る)", { tag: TIMING }, async ({ page, m }) => {
   await open(page, m);
   await mock(
     page,
@@ -137,7 +138,7 @@ test("panel: 色付けは待ってから通常の文字色へ段階的に戻る 
 });
 
 for (const scheme of ["light", "dark"] as const) {
-  test(`panel: 差分の色 (${scheme})`, async ({ page, m, shot }) => {
+  test(`panel: 差分の色 (${scheme})`, { tag: SCREENSHOT }, async ({ page, m, snap }) => {
     await open(page, m, scheme);
     // 挿入と書き換えが同時に出る途中表示
     await mock(
@@ -153,10 +154,12 @@ for (const scheme of ["light", "dark"] as const) {
     // 色付けの直後で止めて撮る
     expect(await colorAt(ins, 0)).toBe(COLORS[scheme].insert);
     expect(await colorAt(rep, 0)).toBe(COLORS[scheme].replace);
-    // 色付けは止めたまま、パネルの展開 (180ms) が終わるのを待つ
-    await page.evaluate(() =>
-      Promise.all(document.getAnimations().filter((a) => a.playState === "running").map((a) => a.finished)),
-    );
-    await page.screenshot({ path: shot(`panel-preview-diff-${scheme}`) });
+    // 撮る時は、色付けは止めたまま、パネルの展開 (180ms) が終わるのを待つ
+    if (SCREENSHOTS) {
+      await page.evaluate(() =>
+        Promise.all(document.getAnimations().filter((a) => a.playState === "running").map((a) => a.finished)),
+      );
+    }
+    await snap(`panel-preview-diff-${scheme}`);
   });
 }

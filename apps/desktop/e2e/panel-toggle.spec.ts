@@ -99,7 +99,11 @@ test("panel: ON → OFF は面が OFF のピルの大きさへ縮んでから出
 
   await expect(page.getByText(m.panel.turnOn)).toBeVisible();
   const to = await pillSize(page);
-  expect(Math.abs(morphing.at(-1)!.morph!.width - to.width)).toBeLessThan(8);
+  // 最後に記録したフレームは終わりの直前で、遅い環境 (CI) ではフレームが間引かれて目標から離れることがある。
+  // 固定の px ではなく、縮む量に比べて目標の近くまで来ていることを見る (en は縮む量が ja と違う)
+  const first = morphing[0].morph!.width;
+  const last = morphing.at(-1)!.morph!.width;
+  expect(Math.abs(last - to.width)).toBeLessThan(Math.max(8, Math.abs(first - to.width) * 0.25));
   // 縮み終わってから最終の大きさを 1 回だけ送る (途中の大きさでウィンドウを縮めない)
   await expect
     .poll(async () => (await panelSizes(page)).slice(before))

@@ -29,6 +29,7 @@ use tokio::sync::watch;
 
 use crate::asr::{AsrClient, HttpAsrClient};
 use crate::asr_process::{AsrProcess, LaunchSpec};
+use crate::i18n::{Locale, Msg};
 use crate::paths::DataPaths;
 use hf::{Cache, Downloader, HfModel};
 
@@ -88,7 +89,8 @@ pub struct ProvisioningStatus {
     pub bytes_done: u64,
     pub bytes_total: Option<u64>,
     pub eta_seconds: Option<u64>,
-    pub error: Option<String>,
+    /// 表示用 (送る時点の表示言語)
+    pub error: Option<Msg>,
 }
 
 impl ProvisioningStatus {
@@ -139,18 +141,18 @@ impl ProvisioningStatus {
 pub enum StepError {
     #[error("一時停止")]
     Paused,
-    /// `message` は表示用 (日本語)。`source` はログ用の詳細
+    /// `message` は表示用 (表示する時点の表示言語)。`source` はログ用の詳細
     #[error("{message}")]
     Failed {
-        message: String,
+        message: Msg,
         #[source]
         source: anyhow::Error,
     },
 }
 
-pub fn failed(message: impl Into<String>, source: impl Into<anyhow::Error>) -> StepError {
+pub fn failed(message: Msg, source: impl Into<anyhow::Error>) -> StepError {
     StepError::Failed {
-        message: message.into(),
+        message,
         source: source.into(),
     }
 }
@@ -228,10 +230,10 @@ async fn verify_server(
     wav_path: &std::path::Path,
     cancel: &Cancel,
 ) -> Result<(), StepError> {
-    const ERROR: &str = "文字起こしの動作確認に失敗しました。再試行してください";
+    const ERROR: Msg = Msg::VerifyFailed;
     let wav = std::fs::read(wav_path).map_err(|e| {
         failed(
-            "検証用の音声が見つかりません。アプリを入れ直してください",
+            Msg::VerifyAudioMissing,
             anyhow!(e).context(wav_path.display().to_string()),
         )
     })?;
@@ -244,7 +246,8 @@ async fn verify_server(
     };
     let client = HttpAsrClient::new(url).map_err(|e| failed(ERROR, e))?;
     let t = tokio::select! {
-        r = client.transcribe(wav, None) => r.map_err(|e| failed(ERROR, e))?,
+        // 検証用の音声は日本語 (「確認します。」) のため、話す言語によらず日本語として送る
+        r = client.transcribe(wav, Locale::Ja, None) => r.map_err(|e| failed(ERROR, e))?,
         _ = cancel.cancelled() => return Err(StepError::Paused),
     };
     if t.text.trim().is_empty() {
@@ -635,7 +638,7 @@ impl Provisioner {
             // start と同じロックの中で立てる (確認と開始の間に割り込まれないように)
             let _running = lock(&self.running);
             if self.suspended.swap(true, Ordering::SeqCst) {
-                anyhow::bail!("削除を実行中です");
+                anyhow::bail!(Msg::DeletionInProgress);
             }
             // 削除の途中で「導入済み」とみなされないように
             self.done.store(false, Ordering::SeqCst);
@@ -645,6 +648,32 @@ impl Provisioner {
         };
         self.pause().await;
         Ok(guard)
+    }
+
+    /// セットアップでモデルの取得をまだ始めていなければ (実行中でなく、model が pending)、`f` を呼ぶ。
+    /// 確認と `f` は start と同じロックの中で行う (run は開始時に取得するモデルを決めるため、
+    /// 開始と重なって選択と取得するモデルが食い違わないように)。呼んだかを返す。
+    /// `f` がモデルを変えた (true を返した) 時は、前のモデルの大きさ (前回の開始で一覧から求めたもの) を
+    /// 表示に残さないよう model の bytesTotal・bytesDone を消して送る (次の開始で求め直す)
+    pub fn if_model_not_started(&self, f: impl FnOnce() -> bool) -> bool {
+        let running = lock(&self.running);
+        if running.as_ref().is_some_and(|r| !*r.finished.borrow())
+            || self.is_done()
+            || self.is_suspended()
+            || lock(&self.shared.status).items[ItemId::Model as usize].state != ItemState::Pending
+        {
+            return false;
+        }
+        if f() {
+            self.shared.update_now(|s| {
+                let it = s.item(ItemId::Model);
+                it.bytes_total = None;
+                it.bytes_done = 0;
+                s.eta_seconds = None;
+            });
+        }
+        drop(running);
+        true
     }
 
     pub fn is_suspended(&self) -> bool {
@@ -834,7 +863,7 @@ impl Provisioner {
             .await?;
             if !cache.snapshot_complete(&files) {
                 return Err(failed(
-                    "モデルを保存できません",
+                    Msg::ModelSaveFailed,
                     anyhow!("スナップショットが揃っていない"),
                 ));
             }
@@ -891,7 +920,7 @@ impl Provisioner {
     }
 }
 
-pub(crate) const SAVE_ERROR: &str = "セットアップの状態を保存できません";
+pub(crate) const SAVE_ERROR: Msg = Msg::SetupSaveFailed;
 
 pub fn model_present(paths: &DataPaths, model: &HfModel) -> bool {
     model

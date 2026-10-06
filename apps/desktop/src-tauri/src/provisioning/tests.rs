@@ -42,7 +42,7 @@ impl VerifyStep for FakeVerify {
         let fail = self.fail.load(Ordering::SeqCst);
         Box::pin(async move {
             if fail {
-                Err(failed("動作確認に失敗", anyhow!("fake")))
+                Err(failed(Msg::VerifyFailed, anyhow!("fake")))
             } else {
                 Ok(())
             }
@@ -252,7 +252,10 @@ fn interrupted_download_fails_then_resumes_with_range() {
     p.start();
     let s = block_on(wait_finished(&p));
     assert_eq!(s.stage, Stage::Error, "{s:?}");
-    assert!(s.error.as_deref().unwrap().contains("中断"), "{s:?}");
+    assert!(
+        s.error.as_ref().unwrap().to_string().contains("中断"),
+        "{s:?}"
+    );
     assert_eq!(s.items[1].bytes_done, 20_000);
     assert!(!p.is_done());
     let blob = super::test_server::sha256(&content(64 * 1024, 7));
@@ -331,7 +334,10 @@ fn corrupt_download_is_discarded() {
     p.start();
     let s = block_on(wait_finished(&p));
     assert_eq!(s.stage, Stage::Error);
-    assert!(s.error.as_deref().unwrap().contains("壊れて"), "{s:?}");
+    assert!(
+        s.error.as_ref().unwrap().to_string().contains("壊れて"),
+        "{s:?}"
+    );
     let leftovers: Vec<_> = std::fs::read_dir(fx.storage().join("blobs"))
         .unwrap()
         .flatten()
@@ -401,7 +407,10 @@ fn mismatched_content_range_is_not_written() {
     p.start();
     let s = block_on(wait_finished(&p));
     assert_eq!(s.stage, Stage::Error, "{s:?}");
-    assert!(s.error.as_deref().unwrap().contains("中断"), "{s:?}");
+    assert!(
+        s.error.as_ref().unwrap().to_string().contains("中断"),
+        "{s:?}"
+    );
     assert_eq!(
         std::fs::metadata(safetensors_incomplete(&fx))
             .unwrap()
@@ -481,9 +490,10 @@ fn http_errors_are_reported_in_japanese() {
     p.start();
     let s = block_on(wait_finished(&p));
     assert_eq!(s.stage, Stage::Error);
+    assert_eq!(s.error, Some(Msg::FetchHttp { status: 404 }));
     assert_eq!(
-        s.error.as_deref(),
-        Some("モデルを取得できません (HTTP 404)")
+        s.error.unwrap().to_string(),
+        "モデルを取得できません (HTTP 404)"
     );
 }
 
@@ -495,7 +505,7 @@ fn verify_failure_then_retry_only_verifies() {
     p.start();
     let s = block_on(wait_finished(&p));
     assert_eq!(s.stage, Stage::Error);
-    assert_eq!(s.error.as_deref(), Some("動作確認に失敗"));
+    assert_eq!(s.error, Some(Msg::VerifyFailed));
     assert_eq!(s.items[2].state, ItemState::Active);
     let n = fx.server.state().requests.len();
 
@@ -753,4 +763,72 @@ fn eta_from_recent_rate() {
     // やり直しで減ったら測り直す
     r.push(t + Duration::from_secs(5), 0);
     assert_eq!(r.eta(1000), None);
+}
+
+/// 話す言語の変更でセットアップのモデルを変えてよいのは、モデルの取得を始める前だけ
+/// (docs/architecture.md「言語」のセットアップ中の話す言語の変更)
+#[test]
+fn model_choice_changes_only_before_model_download_starts() {
+    let fx = Fixture::new();
+    {
+        let mut st = fx.server.state();
+        st.files.swap(0, 1);
+        st.throttle = Some(Duration::from_millis(20));
+    }
+    let p = fx.provisioner();
+    let calls = AtomicUsize::new(0);
+    let call = || {
+        calls.fetch_add(1, Ordering::SeqCst);
+        false
+    };
+    assert!(p.if_model_not_started(call), "開始前");
+    p.start();
+    assert!(
+        !p.if_model_not_started(call),
+        "実行中 (取得するモデルは開始時に決まる)"
+    );
+    block_on(async {
+        for _ in 0..500 {
+            if p.status().items[1].bytes_done > 4096 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        p.pause().await;
+    });
+    assert_eq!(p.status().items[1].state, ItemState::Active);
+    assert!(!p.if_model_not_started(call), "取得の途中で一時停止");
+    fx.server.state().throttle = None;
+    p.start();
+    block_on(wait_finished(&p));
+    assert!(!p.if_model_not_started(call), "完了後");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // 削除の後 (未導入に戻った) は取得前
+    p.reset();
+    assert!(p.if_model_not_started(call));
+}
+
+/// 前回の開始で求めた前のモデルの大きさを、選択を変えた後に表示に残さない
+#[test]
+fn model_size_is_cleared_when_model_choice_changes() {
+    let fx = Fixture::new();
+    let p = fx.provisioner();
+    // 前回の開始で一覧から大きさが決まり、runtime の失敗で止まった (model は pending のまま) 状態
+    p.shared.update_now(|s| {
+        let it = s.item(ItemId::Model);
+        it.bytes_total = Some(1000);
+        it.bytes_done = 10;
+    });
+    assert!(p.if_model_not_started(|| false));
+    assert_eq!(
+        p.status().items[1].bytes_total,
+        Some(1000),
+        "変えなければ残す"
+    );
+    let n = fx.events.lock().unwrap().len();
+    assert!(p.if_model_not_started(|| true));
+    let s = p.status();
+    assert_eq!((s.items[1].bytes_total, s.items[1].bytes_done), (None, 0));
+    assert_eq!((s.bytes_total, s.bytes_done), (None, 0));
+    assert_eq!(fx.events.lock().unwrap().len(), n + 1, "送る");
 }

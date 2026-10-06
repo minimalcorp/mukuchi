@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 use crate::asr::{self, AsrClient, HttpAsrClient, Transcript};
 use crate::asr_process::{AsrEvent, AsrProcess, LaunchSpec};
 use crate::audio::{self, Source};
+use crate::i18n::{self, Locale, Msg, UninstallPart};
 use crate::insert::{InsertConfig, InsertQueue, Job, UtteranceResult};
 use crate::macos::{self, MicAuthorization};
 use crate::paths::{DataPaths, Resources};
@@ -42,6 +43,7 @@ pub mod events {
     pub const PROVISIONING_PROGRESS: &str = "provisioning-progress";
     pub const MODELS_CHANGED: &str = "models-changed";
     pub const SHORTCUT_STATUS_CHANGED: &str = "shortcut-status-changed";
+    pub const LOCALE_CHANGED: &str = "locale-changed";
 }
 
 /// 未バンドルの開発実行 (tauri dev) で WebKit がキャッシュ等に使う名前 (実行ファイル名)
@@ -57,9 +59,6 @@ pub const ENV_DEV_NO_PARTIAL: &str = "MUKUCHI_DEV_NO_PARTIAL";
 /// 開発用: 設定するとそのアプリ (bundle id) が前面にある時だけ入力する。
 /// 自動テストで利用者のアプリに入力しないため (デバッグビルドのみ)
 pub const ENV_DEV_TARGET_BUNDLE: &str = "MUKUCHI_DEV_TARGET_BUNDLE";
-
-/// アップデートのインストール中 (再起動待ちを含む) に他の操作を拒む文言
-const MSG_INSTALLING_UPDATE: &str = "アップデートをインストールしています";
 
 /// ON の間に ASR サーバーの死活を確かめる間隔
 const HEALTH_INTERVAL: Duration = Duration::from_secs(5);
@@ -211,6 +210,9 @@ pub struct Core {
     /// 1回ずつ聞き取るの無発話タイマーの世代。張り直し・取り消しのたびに進め、古いタイマーを無効にする
     no_speech_timer: AtomicU64,
     pub updates: Arc<UpdateManager>,
+    /// 起動時の macOS の優先言語から求めた表示言語 (uiLanguage が system の時に使う。
+    /// macOS の言語の変更は起動時にだけ反映する)
+    system_locale: Locale,
 }
 
 impl Core {
@@ -221,10 +223,26 @@ impl Core {
         resources: Resources,
     ) -> Result<Arc<Self>> {
         let asr_process = Arc::new(AsrProcess::new());
+        // 表示言語は他の部品が文言を作る前 (UpdateManager の理由・モデルの表示名等) に決める
+        let system_locale = i18n::system_locale();
+        let settings = SettingsStore::load(paths.settings(), system_locale);
+        let initial = settings.get();
+        i18n::set_current(initial.ui_language.resolve(system_locale));
+        log::info!(
+            "表示言語: {} (設定 {:?})、話す言語: {}",
+            i18n::current().as_str(),
+            initial.ui_language,
+            initial.speech_language.as_str()
+        );
         let emit_app = app.clone();
-        let models = ModelManager::new(paths.clone(), Catalog::distributed(), move |list| {
-            let _ = emit_app.emit(events::MODELS_CHANGED, list);
-        })?;
+        let models = ModelManager::new(
+            paths.clone(),
+            Catalog::distributed(),
+            initial.speech_language,
+            move |list| {
+                let _ = emit_app.emit(events::MODELS_CHANGED, list);
+            },
+        )?;
         let selected = {
             let m = models.clone();
             move || m.selected().hf
@@ -258,7 +276,7 @@ impl Core {
         let updates = UpdateManager::new(app.clone());
         let core = Arc::new(Self {
             app,
-            settings: SettingsStore::load(paths.settings()),
+            settings,
             state: StateManager::new(),
             dev_asr_url: asr::resolve_endpoint(),
             paths,
@@ -281,6 +299,7 @@ impl Core {
             shortcut,
             no_speech_timer: AtomicU64::new(0),
             updates,
+            system_locale,
         });
         let app = core.app.clone();
         core.state.subscribe(move |status| {
@@ -303,6 +322,59 @@ impl Core {
 
     pub fn app(&self) -> &AppHandle {
         &self.app
+    }
+
+    /// 解決した表示言語 (`get_locale`)
+    pub fn locale(&self) -> Locale {
+        i18n::current()
+    }
+
+    /// 表示言語が変わった時: Rust で作る表示を今の言語で作り直して送る (docs/architecture.md「言語」)。
+    /// AppError は code から作り直して status-changed、モデルの表示名・説明は models-changed。
+    /// 状態に持つエラー (セットアップ・アップデート・ショートカット) は送る時点の言語で文字列になるため送り直す
+    fn on_locale_changed(&self) {
+        let l = i18n::current();
+        log::info!("表示言語を変えた: {}", l.as_str());
+        let _ = self.app.emit(events::LOCALE_CHANGED, l);
+        self.state.relocalize();
+        crate::tray::refresh_menu(&self.app);
+        crate::windows::relocalize_titles(&self.app);
+        crate::app_menu::refresh(&self.app);
+        self.models.emit_now();
+        let _ = self
+            .app
+            .emit(events::PROVISIONING_PROGRESS, self.provisioning.status());
+        let _ = self
+            .app
+            .emit(events::SHORTCUT_STATUS_CHANGED, self.shortcut.status());
+        self.updates.emit_status();
+    }
+
+    /// 話す言語が変わった時: モデルの並び・推奨を変える。セットアップでモデルの取得をまだ始めていなければ
+    /// 選択を新しい言語の推奨にする (始めた後・完了後は変えない。docs/architecture.md「言語」)
+    ///
+    /// 選択から外れたモデルに前回の起動で取得しかけたファイル (数GBになりうる) が残っていれば消す
+    /// (取得を終えた記録のあるものは消さない)。開始と重ならないよう provisioning のロックの中で行う。
+    /// 開発で外部の ASR サーバーを使っている時は消さない (`make setup` が記録なしで置いたモデルを
+    /// 外部のサーバーが使っている場合があるため)
+    fn on_speech_language_changed(&self, lang: Locale) {
+        log::info!("話す言語を変えた: {}", lang.as_str());
+        self.models.set_speech(lang);
+        let discard = self.managed_asr() && self.destructive_ops_allowed();
+        let ran = self.provisioning.if_model_not_started(|| {
+            let Some(prev) = self.models.select_recommended() else {
+                return false;
+            };
+            if discard {
+                if let Err(e) = self.models.discard_unrecorded(&prev) {
+                    log::warn!("取得途中のモデルを消せません ({}): {e:#}", prev.id);
+                }
+            }
+            true
+        });
+        if !ran {
+            log::info!("モデルの取得を始めた後のため、選択は変えない");
+        }
     }
 
     /// 入力キューと ASR 接続を開始し、ショートカットを登録する。
@@ -573,9 +645,7 @@ impl Core {
     /// 実行環境とモデルのみ削除 (設定・ログは残す)。以後は未導入 (runtime_missing)
     pub async fn delete_runtime_and_model(self: &Arc<Self>) -> Result<()> {
         if !self.destructive_ops_allowed() {
-            return Err(anyhow!(
-                "開発ビルドを本番のバンドルIDで実行しているため削除しません"
-            ));
+            return Err(anyhow!(Msg::DevBuildWithProductionId));
         }
         if self.managed_asr() {
             self.set_listening(false).await?;
@@ -589,7 +659,10 @@ impl Core {
         let result =
             tauri::async_runtime::spawn_blocking(move || storage::delete_runtime_and_model(&paths))
                 .await
-                .map_err(|e| anyhow!("削除処理が異常終了しました: {e}"));
+                .map_err(|e| {
+                    log::error!("削除処理が異常終了しました: {e}");
+                    anyhow!(Msg::Internal)
+                });
         // 失敗しても (途中まで消えている・サーバーは止めた) 未導入に戻す。記録は最初に消すため、
         // 再セットアップでは残っているものを確かめ直す。モデルの選択は既定に戻る (セットアップで既定を取る)
         self.provisioning.reset();
@@ -599,7 +672,7 @@ impl Core {
         }
         result?.map_err(|e| {
             log::error!("実行環境とモデルを削除できません: {e:#}");
-            anyhow!("実行環境とモデルを削除できません")
+            anyhow!(Msg::CannotDeleteRuntimeAndModel)
         })?;
         log::info!("実行環境とモデルを削除した");
         Ok(())
@@ -610,9 +683,10 @@ impl Core {
     }
 
     fn uninstall_context(&self) -> Result<(PathBuf, String, Option<PathBuf>)> {
-        let home = tauri::Manager::path(&self.app)
-            .home_dir()
-            .context("ホームディレクトリが分かりません")?;
+        let home = tauri::Manager::path(&self.app).home_dir().map_err(|e| {
+            log::error!("ホームディレクトリが分かりません: {e}");
+            Msg::Internal
+        })?;
         let id = self.app.config().identifier.clone();
         Ok((home, id, storage::current_app_bundle()))
     }
@@ -664,7 +738,10 @@ impl Core {
             core.with_uninstall_context(|ctx| uninstall_blocking(ctx, dry_run))
         })
         .await
-        .map_err(|e| anyhow!("アンインストール処理が異常終了しました: {e}"));
+        .map_err(|e| {
+            log::error!("アンインストール処理が異常終了しました: {e}");
+            anyhow!(Msg::Internal)
+        });
         if suspended.is_some() {
             // 本体を消せずに続ける場合 (開発・失敗): データは消えているため未導入に戻す
             self.provisioning.reset();
@@ -687,12 +764,14 @@ impl Core {
     /// (再起動でそれらが途中で切れ、.app の置き換えと削除が重なるため)。
     /// 確認の後、置き換えが終わるまで model_switch を持ち、切り替え・削除・アンインストールを始めさせない
     pub async fn install_update(self: &Arc<Self>) -> Result<()> {
-        const BUSY: &str = "ダウンロード・削除の実行中は更新できません";
         let mut switch = None;
         let result = self
             .updates
             .install(|| async {
-                let guard = self.model_switch.try_lock().map_err(|_| anyhow!(BUSY))?;
+                let guard = self
+                    .model_switch
+                    .try_lock()
+                    .map_err(|_| anyhow!(Msg::UpdateBusy))?;
                 {
                     // ここでは既に installing。gate の中で確かめ、以後の開始 (start_provisioning・
                     // download_model) は installing を見て拒まれる
@@ -701,7 +780,7 @@ impl Core {
                         || self.provisioning.is_suspended()
                         || self.models.is_busy()
                     {
-                        return Err(anyhow!(BUSY));
+                        return Err(anyhow!(Msg::UpdateBusy));
                     }
                 }
                 switch = Some(guard);
@@ -720,13 +799,13 @@ impl Core {
     /// (置き換え中は model_switch を持ち、置き換えの後は再起動待ち) は理由を分けて拒む
     fn lock_model_switch(&self) -> Result<tokio::sync::MutexGuard<'_, ()>> {
         if self.updates.is_installing() {
-            return Err(anyhow!(MSG_INSTALLING_UPDATE));
+            return Err(anyhow!(Msg::InstallingUpdate));
         }
         self.model_switch.try_lock().map_err(|_| {
             if self.updates.is_installing() {
-                anyhow!(MSG_INSTALLING_UPDATE)
+                anyhow!(Msg::InstallingUpdate)
             } else {
-                anyhow!("モデルを切り替え中です")
+                anyhow!(Msg::SwitchingModel)
             }
         })
     }
@@ -802,12 +881,12 @@ impl Core {
     /// 開発で外部のサーバー (process-compose) に接続している時は、応答するかを確かめ直すだけ。
     pub async fn restart_asr(self: &Arc<Self>) -> Result<()> {
         if self.provisioning.is_suspended() {
-            return Err(anyhow!("削除を実行中です"));
+            return Err(anyhow!(Msg::DeletionInProgress));
         }
         let _switch = self.lock_model_switch()?;
         if self.managed_asr() {
             if !self.provisioning.is_done() {
-                return Err(anyhow!("実行環境とモデルが導入されていません"));
+                return Err(anyhow!(Msg::ErrRuntimeMissing));
             }
             log::info!("文字起こしサーバーを起動し直す");
             self.asr_process.start(self.launch_spec(), true).await;
@@ -815,7 +894,7 @@ impl Core {
         }
         let Some(client) = self.asr_client() else {
             if self.state.error().map(|e| e.code) == Some(ErrorCode::RuntimeMissing) {
-                return Err(anyhow!("実行環境とモデルが導入されていません"));
+                return Err(anyhow!(Msg::ErrRuntimeMissing));
             }
             // まだ接続待ち (読み込み中)。準備ができれば自動で使えるようになる
             return Ok(());
@@ -830,7 +909,7 @@ impl Core {
             }
             Err(e) => {
                 log::warn!("ASRサーバーが応答しません: {e:#}");
-                Err(anyhow!("文字起こしサーバーが応答しません"))
+                Err(anyhow!(Msg::AsrNotResponding))
             }
         }
     }
@@ -840,10 +919,10 @@ impl Core {
     /// モデルの操作ができるか: セットアップ完了後で、削除の実行中でない
     fn check_models_available(&self) -> Result<()> {
         if self.provisioning.is_suspended() {
-            return Err(anyhow!("削除を実行中です"));
+            return Err(anyhow!(Msg::DeletionInProgress));
         }
         if !self.provisioning.is_done() {
-            return Err(anyhow!("セットアップが完了していません"));
+            return Err(anyhow!(Msg::SetupIncomplete));
         }
         Ok(())
     }
@@ -856,7 +935,7 @@ impl Core {
         self.check_models_available()?;
         let _gate = self.update_gate();
         if self.updates.is_installing() {
-            return Err(anyhow!(MSG_INSTALLING_UPDATE));
+            return Err(anyhow!(Msg::InstallingUpdate));
         }
         self.models.download(id)
     }
@@ -868,9 +947,7 @@ impl Core {
     pub async fn cancel_model_download(&self, id: &str) -> Result<()> {
         // 途中のファイルを消すため削除と同じ条件で拒む
         if !self.destructive_ops_allowed() {
-            return Err(anyhow!(
-                "開発ビルドを本番のバンドルIDで実行しているため削除しません"
-            ));
+            return Err(anyhow!(Msg::DevBuildWithProductionId));
         }
         self.check_models_available()?;
         self.models.cancel(id).await
@@ -878,9 +955,7 @@ impl Core {
 
     pub fn delete_model(&self, id: &str) -> Result<()> {
         if !self.destructive_ops_allowed() {
-            return Err(anyhow!(
-                "開発ビルドを本番のバンドルIDで実行しているため削除しません"
-            ));
+            return Err(anyhow!(Msg::DevBuildWithProductionId));
         }
         self.check_models_available()?;
         // 切り替えの失敗で元のモデルに戻す間に、元のモデルを消させない
@@ -929,7 +1004,7 @@ impl Core {
                 }
                 Err(e) => {
                     log::error!("モデルの選択を保存できないため {} に戻す: {e:#}", prev.id);
-                    format!("{e}。「{}」に戻しました", prev.name)
+                    Msg::ModelSelectionNotSaved { prev: prev.name() }
                 }
             },
             Err(e) => {
@@ -938,10 +1013,10 @@ impl Core {
                     next.id,
                     prev.id
                 );
-                format!(
-                    "「{}」を読み込めませんでした。「{}」に戻しました",
-                    next.name, prev.name
-                )
+                Msg::ModelLoadFailed {
+                    next: next.name(),
+                    prev: prev.name(),
+                }
             }
         };
         if !self.shutting_down.load(Ordering::SeqCst) {
@@ -981,14 +1056,14 @@ impl Core {
             if let Some(e) = self.state.error() {
                 return Err(anyhow!(e.message));
             }
-            return Err(anyhow!("モデルを読み込んでいます。しばらくお待ちください"));
+            return Err(anyhow!(Msg::ModelLoading));
         }
         // ASR の停止でOFFになった後は、サーバーが戻っているかを確かめてから再開する
         if self.state.error().map(|e| e.code) == Some(ErrorCode::AsrStopped) {
             if let Some(client) = self.asr_client() {
                 if let Err(e) = client.health().await {
                     log::warn!("ASRサーバーが応答しないため再開しない: {e:#}");
-                    return Err(anyhow!("文字起こしサーバーが停止しています"));
+                    return Err(anyhow!(Msg::AsrIsStopped));
                 }
             }
         }
@@ -1047,8 +1122,9 @@ impl Core {
                 return Err(anyhow!(err.message));
             }
             Err(e) => {
+                log::error!("録音の開始処理が異常終了しました: {e}");
                 self.state.set_listening(false);
-                return Err(anyhow!("録音の開始処理が異常終了しました: {e}"));
+                return Err(anyhow!(Msg::Internal));
             }
         };
         *lock(&self.running) = Some(Capture {
@@ -1266,6 +1342,14 @@ impl Core {
         if before.setup_completed != next.setup_completed {
             crate::tray::refresh_menu(&self.app);
         }
+        if before.ui_language != next.ui_language
+            && i18n::set_current(next.ui_language.resolve(self.system_locale))
+        {
+            self.on_locale_changed();
+        }
+        if before.speech_language != next.speech_language {
+            self.on_speech_language_changed(next.speech_language);
+        }
         if before.setup_completed != next.setup_completed
             || before.auto_check_updates != next.auto_check_updates
         {
@@ -1377,7 +1461,11 @@ impl Core {
             audio: samples,
             commit,
         } = req;
-        let context = asr::asr_context(&self.settings.get().asr_context);
+        let settings = self.settings.get();
+        let (language, context) = (
+            settings.speech_language,
+            asr::asr_context(&settings.asr_context),
+        );
         let core = self.clone();
         // 取り消しても応答までは待つ (推論時間を学習するため。close_partial)
         tauri::async_runtime::spawn(async move {
@@ -1385,7 +1473,7 @@ impl Core {
             let secs = samples.len() as f64 / crate::vad::SAMPLE_RATE as f64;
             let result = async {
                 let wav = audio::encode_wav_16k(&samples)?;
-                client.transcribe(wav, context).await
+                client.transcribe(wav, language, context).await
             }
             .await;
             core.partial_done(id, commit, result, secs, started);
@@ -1519,7 +1607,12 @@ impl Core {
             return;
         }
         let client = self.asr_client();
-        let context = asr::asr_context(&self.settings.get().asr_context);
+        // 話す言語・認識のヒントは発話ごとに読む (設定の変更は次の発話から反映)
+        let settings = self.settings.get();
+        let (language, context) = (
+            settings.speech_language,
+            asr::asr_context(&settings.asr_context),
+        );
         let secs = samples.len() as f64 / crate::vad::SAMPLE_RATE as f64;
         log::info!("発話 {id} を確定: {secs:.2}秒 (途中表示の取り消し: {aborted_partial})");
         self.finals_in_flight.fetch_add(1, Ordering::SeqCst);
@@ -1530,7 +1623,10 @@ impl Core {
             let result = async {
                 let client = client.ok_or_else(|| anyhow!("ASRサーバーに接続していません"))?;
                 let wav = audio::encode_wav_16k(&samples)?;
-                client.transcribe(wav, context).await.map(|t| t.text)
+                client
+                    .transcribe(wav, language, context)
+                    .await
+                    .map(|t| t.text)
             }
             .await;
             core.finals_in_flight.fetch_sub(1, Ordering::SeqCst);
@@ -1597,16 +1693,16 @@ fn launch_spec(paths: &DataPaths, log_dir: &std::path::Path, model: &HfModel) ->
 /// アプリが要るため本体より先) → 本体をゴミ箱へ。途中で失敗しても残りは続け、最後にまとめて報告する
 fn uninstall_blocking(ctx: &UninstallContext, dry_run: bool) -> Result<bool> {
     let plan = storage::uninstall_plan(ctx);
-    let mut errors: Vec<String> = Vec::new();
+    let mut errors: Vec<UninstallPart> = Vec::new();
     if dry_run {
         log::info!("[dry-run] ログイン項目を解除");
     } else if let Err(e) = crate::autostart::set_enabled(false) {
         log::warn!("ログイン項目を解除できません: {e:#}");
-        errors.push("ログイン項目".into());
+        errors.push(UninstallPart::LoginItem);
     }
     if let Err(e) = storage::delete_files(&plan, ctx, dry_run) {
         log::error!("{e:#}");
-        errors.push("データ".into());
+        errors.push(UninstallPart::Data);
     }
     if let Some((domain, plist)) = &plan.preferences {
         if dry_run {
@@ -1617,7 +1713,7 @@ fn uninstall_blocking(ctx: &UninstallContext, dry_run: bool) -> Result<bool> {
             if plist.exists() {
                 if let Err(e) = std::fs::remove_file(plist) {
                     log::warn!("{}: {e}", plist.display());
-                    errors.push("設定".into());
+                    errors.push(UninstallPart::Preferences);
                 }
             }
         }
@@ -1625,7 +1721,7 @@ fn uninstall_blocking(ctx: &UninstallContext, dry_run: bool) -> Result<bool> {
     if dry_run {
         log::info!("[dry-run] tccutil reset All {}", ctx.bundle_id);
     } else if !run_tool("/usr/bin/tccutil", &["reset", "All", ctx.bundle_id]) {
-        errors.push("権限の設定".into());
+        errors.push(UninstallPart::Permissions);
     }
     let mut trashed = false;
     match &plan.app_bundle {
@@ -1634,13 +1730,13 @@ fn uninstall_blocking(ctx: &UninstallContext, dry_run: bool) -> Result<bool> {
             Ok(()) => trashed = true,
             Err(e) => {
                 log::error!("{e:#}");
-                errors.push("アプリ本体".into());
+                errors.push(UninstallPart::AppBundle);
             }
         },
         None => log::info!("アプリ本体なし (未バンドルの実行)"),
     }
     if !errors.is_empty() && !trashed {
-        return Err(anyhow!("削除できないものがあります: {}", errors.join("・")));
+        return Err(anyhow!(Msg::UninstallIncomplete(errors)));
     }
     Ok(trashed)
 }

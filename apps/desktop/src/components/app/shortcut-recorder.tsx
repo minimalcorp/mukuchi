@@ -6,6 +6,7 @@ import { useShortcutStatus } from "@/lib/hooks";
 import { commands } from "@/lib/ipc";
 import { eventModifiers, modifierSymbols, recordKey, shortcutParts } from "@/lib/shortcut";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n/context";
 
 /** キーの表示 (⌥・Space 等を1つずつ囲む) */
 export function ShortcutKeys({ shortcut, className }: { shortcut: string; className?: string }) {
@@ -25,9 +26,6 @@ function Kbd({ children }: { children: ReactNode }) {
     </kbd>
   );
 }
-
-const RECORDING_GUIDE = "⌃ ⌥ ⇧ ⌘ のいずれかと一緒に押してください。esc で取り消し、⌫ でなしにします";
-const UNSUPPORTED_GUIDE = "このキーはショートカットに使えません。別のキーを押してください。esc で取り消します";
 
 /**
  * グローバルショートカットの表示と記録。
@@ -50,6 +48,7 @@ export function ShortcutRecorder({
   hint?: ReactNode;
   disabled?: boolean;
 }) {
+  const { t } = useI18n();
   const status = useShortcutStatus();
   const [recording, setRecording] = useState(false);
   // 記録中に押している修飾キー (「⌥ …」のように途中経過を見せる)
@@ -149,7 +148,7 @@ export function ShortcutRecorder({
           tabIndex={-1}
           role="textbox"
           aria-readonly
-          aria-label="ショートカット"
+          aria-label={t.shortcut.label}
           data-testid="shortcut-field"
           data-recording={recording}
           onKeyDown={onKeyDown}
@@ -167,33 +166,33 @@ export function ShortcutRecorder({
               {held.map((m) => (
                 <Kbd key={m}>{m}</Kbd>
               ))}
-              <span className="text-xs text-fg-muted">{held.length > 0 ? "…" : "キーを押してください"}</span>
+              <span className="text-xs text-fg-muted">{held.length > 0 ? "…" : t.shortcut.pressKeys}</span>
             </>
           ) : shortcut ? (
             <ShortcutKeys shortcut={shortcut} />
           ) : (
-            <span className="text-xs text-fg-muted">なし</span>
+            <span className="text-xs text-fg-muted">{t.shortcut.none}</span>
           )}
         </div>
         {recording ? (
           // 押した時に枠からフォーカスを移さない (blur での取り消しで先にボタンが入れ替わり、クリックが届かなくなるため)
           <Button size="sm" variant="ghost" onMouseDown={(e) => e.preventDefault()} onClick={() => finish()}>
-            キャンセル
+            {t.common.cancel}
           </Button>
         ) : (
           <>
             <Button size="sm" disabled={disabled} onClick={start}>
-              変更
+              {t.shortcut.change}
             </Button>
             {shortcut ? (
-              <IconButton icon={X} size="sm" label="ショートカットをなしにする" disabled={disabled} onClick={() => onChange(null)} />
+              <IconButton icon={X} size="sm" label={t.shortcut.clear} disabled={disabled} onClick={() => onChange(null)} />
             ) : null}
           </>
         )}
       </div>
       {recording ? (
         <p className={cn("m-0 text-xs leading-[1.5]", rejected ? "text-fg-warning" : "text-fg-muted")}>
-          {rejected === "unsupported" ? UNSUPPORTED_GUIDE : RECORDING_GUIDE}
+          {rejected === "unsupported" ? t.shortcut.unsupportedGuide : t.shortcut.recordingGuide}
         </p>
       ) : hint && !error && !warning ? (
         // エラー・警告の間は補足を出さない (セットアップの狭いウィンドウに収めるため。直すべきことを優先して見せる)

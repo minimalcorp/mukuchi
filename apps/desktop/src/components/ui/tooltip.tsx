@@ -1,6 +1,7 @@
 import { Tooltip as TooltipPrimitive } from "radix-ui";
 import { CircleHelp } from "lucide-react";
 import type * as React from "react";
+import { useI18n } from "@/i18n/context";
 
 export function TooltipProvider({ children }: { children: React.ReactNode }) {
   return (
@@ -39,11 +40,12 @@ export function Tooltip({
 
 /** 補足の「?」アイコン + Tooltip */
 export function HelpTip({ content }: { content: React.ReactNode }) {
+  const { t } = useI18n();
   return (
     <Tooltip content={content}>
       <button
         type="button"
-        aria-label="説明"
+        aria-label={t.common.help}
         className="inline-flex cursor-help items-center border-0 bg-transparent p-0 text-fg-subtle"
       >
         <CircleHelp size={14} aria-hidden />

@@ -4,7 +4,8 @@
  * 展開・収縮とも set_panel_size は 1 回 (展開は開始時、収縮はアニメーションの終了後) で、
  * アニメーション中はアンカーの辺が動かないことを毎フレーム確認する。
  */
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test, type Messages } from "./fixtures";
 
 const PANEL = { width: 560, height: 360 };
 const PILL_SIZE = { width: 24 + 240 + 24, height: 16 + 36 + 32 };
@@ -25,7 +26,7 @@ const SPEAK = `api.setStatus({ phase: "speaking" }); api.started(1); api.partial
 // 入力できた最終結果は 750ms 表示してから消え、カードがピルに戻る (live のシナリオなので時間で消える)
 const INSERT = `api.setStatus({ phase: "finalizing" }); api.result({ kind: "inserted", id: 1, text: "明日の打ち合わせは十時からに変更してください。", appName: "メモ" }); api.setStatus({ phase: "listening" });`;
 
-async function open(page: Page, anchor: string) {
+async function open(page: Page, m: Messages, anchor: string) {
   await page.setViewportSize(PANEL);
   // default は live (確定結果を時間で消す)。オフで始まるので待機中にする (発話を流す onListen は呼ばない)
   await page.goto(`/?window=panel&mock=default&anchor=${anchor}`);
@@ -33,7 +34,7 @@ async function open(page: Page, anchor: string) {
   await page.waitForFunction(() => (document.getElementById("root")?.childElementCount ?? 0) > 0);
   await page.evaluate(() => document.fonts.ready);
   await page.evaluate(() => (window as unknown as { __mukuchiMock: { setStatus: (p: object) => void } }).__mukuchiMock.setStatus({ phase: "listening" }));
-  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
   await expect.poll(async () => (await sizes(page)).at(-1)).toEqual(PILL_SIZE);
 }
 
@@ -93,8 +94,8 @@ const anchored = (s: Sample, vertical: string, horizontal: string) => ({
 for (const anchor of ["bottom-center", "top-center", "top-left", "bottom-right"]) {
   const [vertical, horizontal] = anchor.split("-");
 
-  test(`panel ${anchor}: 展開・収縮中はアンカーの辺が動かず、set_panel_size は 1 回だけ`, async ({ page }) => {
-    await open(page, anchor);
+  test(`panel ${anchor}: 展開・収縮中はアンカーの辺が動かず、set_panel_size は 1 回だけ`, async ({ page, m }) => {
+    await open(page, m, anchor);
     const idle = await page.getByTestId("panel-card").boundingBox();
 
     const expand = await record(page, SPEAK, CARD_IS(360));
@@ -142,8 +143,8 @@ for (const anchor of ["bottom-center", "top-center", "top-left", "bottom-right"]
   });
 }
 
-test("panel: 収縮の途中で再び展開した時は、展開時の大きさのまま送り直さない", async ({ page }) => {
-  await open(page, "bottom-center");
+test("panel: 収縮の途中で再び展開した時は、展開時の大きさのまま送り直さない", async ({ page, m }) => {
+  await open(page, m, "bottom-center");
   await record(page, SPEAK, CARD_IS(360));
   const before = (await sizes(page)).length;
   // 消えてピルへ戻り始めた直後に次の発話が始まる
@@ -166,9 +167,9 @@ test("panel: 収縮の途中で再び展開した時は、展開時の大きさ�
   expect(sent.every((s) => s.width === 408)).toBe(true);
 });
 
-test("panel: 動きを減らす設定では、アニメーションせずにすぐ最終の大きさを 1 回送る", async ({ page }) => {
+test("panel: 動きを減らす設定では、アニメーションせずにすぐ最終の大きさを 1 回送る", async ({ page, m }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await open(page, "bottom-center");
+  await open(page, m, "bottom-center");
   await record(page, SPEAK, CARD_IS(360));
   const collapse = await record(page, INSERT, `${CARD_IS(240)} && api.calls.at(-1)?.cmd === "set_panel_size"`, 3000);
   expect(collapse.at(-1)!.sizes).toEqual([PILL_SIZE]);

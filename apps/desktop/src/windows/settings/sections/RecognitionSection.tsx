@@ -3,24 +3,29 @@ import { Cpu, Download, RotateCw } from "lucide-react";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Select } from "@/components/ui/select";
 import { ASR_CONTEXT_MAX, commands, runCommand, type AppStatus } from "@/lib/ipc";
+import { useModels } from "@/lib/hooks";
+import { useI18n, type Messages } from "@/i18n/context";
+import { isLocale, LOCALE_AUTONYMS, LOCALES } from "@/i18n/locales";
 import { cn } from "@/lib/utils";
 import { Card, FieldError, FieldHeading, TitleWithSub, type SectionProps } from "./common";
 import { ModelList } from "./ModelList";
 
-function modelState(status: AppStatus | null): { tone: BadgeTone; label: string; sub: string } {
-  if (!status) return { tone: "neutral", label: "確認中", sub: "" };
+function modelState(status: AppStatus | null, t: Messages): { tone: BadgeTone; label: string; sub: string } {
+  const r = t.settings.recognition;
+  if (!status) return { tone: "neutral", label: r.checking, sub: "" };
   if (status.phase === "loading") {
     const pct = status.loadingProgress == null ? "" : ` ${Math.round(status.loadingProgress * 100)}%`;
-    return { tone: "info", label: `読み込み中${pct}`, sub: "モデルを読み込んでいます" };
+    return { tone: "info", label: `${r.loading}${pct}`, sub: r.loadingSub };
   }
   if (status.error?.code === "asr_stopped") {
-    return { tone: "danger", label: "停止中", sub: "文字起こしサーバーが停止しています" };
+    return { tone: "danger", label: r.stopped, sub: r.stoppedSub };
   }
   if (status.error?.code === "runtime_missing") {
-    return { tone: "warning", label: "未導入", sub: "実行環境とモデルがありません" };
+    return { tone: "warning", label: r.missing, sub: r.missingSub };
   }
-  return { tone: "success", label: "読み込み済み", sub: "Apple Silicon GPU で実行中" };
+  return { tone: "success", label: r.loaded, sub: r.loadedSub };
 }
 
 /** Unicode スカラー値の数 (Rust の chars().count() と同じ数え方。String.length は UTF-16 単位で絵文字等を 2 と数える) */
@@ -110,6 +115,8 @@ function useTextCommit(value: string, commit: (v: string) => void, delayMs = 800
 }
 
 function AsrContextField({ settings, update, errors }: SectionProps) {
+  const { t } = useI18n();
+  const r = t.settings.recognition;
   const text = useTextCommit(settings.asrContext, (v) => update({ asrContext: v }));
   // Rust は前後の空白を除いてから上限を確かめるため、同じ数え方にする (末尾の改行だけで超過と表示しない)
   const length = scalarLength(text.value.trim());
@@ -117,8 +124,8 @@ function AsrContextField({ settings, update, errors }: SectionProps) {
   return (
     <div className="flex flex-col gap-2">
       <FieldHeading
-        label="認識のヒント"
-        help="書いた内容は文字起こしのモデルにそのまま渡されます。話す話題や、用語の表記（読み方を添えて）を書くと、その表記で認識されやすくなります。長いほど認識が遅くなります"
+        label={r.context}
+        help={r.contextHelp}
         value={
           <span className={cn(over && "font-medium text-fg-danger")}>
             {length} / {ASR_CONTEXT_MAX}
@@ -126,10 +133,10 @@ function AsrContextField({ settings, update, errors }: SectionProps) {
         }
       />
       <Textarea
-        aria-label="認識のヒント"
+        aria-label={r.context}
         aria-invalid={over || errors.asrContext != null}
         rows={6}
-        placeholder={"例: 開発の話です。以下の用語は英字で表記する: Claude Code (読み: クロードコード), pnpm"}
+        placeholder={r.contextPlaceholder}
         value={text.value}
         onChange={(e) => text.change(e.target.value, (e.nativeEvent as InputEvent).isComposing)}
         onCompositionEnd={(e) => text.compositionEnd(e.currentTarget.value)}
@@ -137,7 +144,7 @@ function AsrContextField({ settings, update, errors }: SectionProps) {
       />
       <FieldError
         message={
-          errors.asrContext ?? (over ? `${ASR_CONTEXT_MAX} 文字を超えています（${length - ASR_CONTEXT_MAX} 文字オーバー）` : null)
+          errors.asrContext ?? (over ? r.contextOver(ASR_CONTEXT_MAX, length - ASR_CONTEXT_MAX) : null)
         }
       />
     </div>
@@ -150,28 +157,47 @@ export function RecognitionSection({
   errors,
   status,
 }: SectionProps & { status: AppStatus | null }) {
-  const model = modelState(status);
+  const { t } = useI18n();
+  const r = t.settings.recognition;
+  const model = modelState(status, t);
+  const { models, error: modelsError } = useModels();
+  // 使用中のモデルの名前 (表示言語。Rust の ModelInfo.name)。一覧の取得前は空にする
+  const selectedName = models?.find((m) => m.selected)?.name ?? "";
 
   return (
     <>
       <Card className="flex-row items-center gap-3 p-3.5">
         <Cpu size={20} className="flex-none text-fg-muted" aria-hidden />
-        <TitleWithSub title="Qwen3-ASR（日本語追加学習）" sub={model.sub} />
+        <TitleWithSub title={selectedName || "\u00a0"} sub={model.sub} />
         {status?.error?.code === "runtime_missing" ? (
           <Button size="sm" iconLeft={Download} onClick={() => runCommand(commands.openSetup())}>
-            セットアップを開く
+            {t.common.openSetup}
           </Button>
         ) : null}
         {status?.error?.code === "asr_stopped" ? (
           <Button size="sm" iconLeft={RotateCw} onClick={() => runCommand(commands.restartAsr())}>
-            再起動
+            {t.common.restart}
           </Button>
         ) : null}
         <Badge tone={model.tone} dot>
           {model.label}
         </Badge>
       </Card>
-      <ModelList />
+      <div className="flex flex-col gap-2">
+        <FieldHeading label={r.speechLanguage} help={r.speechLanguageHelp} />
+        <Select
+          aria-label={r.speechLanguage}
+          data-testid="speech-language"
+          className="w-[200px]"
+          options={LOCALES.map((l) => ({ value: l, label: LOCALE_AUTONYMS[l] }))}
+          value={settings.speechLanguage}
+          onValueChange={(v) => {
+            if (isLocale(v)) update({ speechLanguage: v });
+          }}
+        />
+        <FieldError message={errors.speechLanguage} />
+      </div>
+      <ModelList models={models} listError={modelsError} speechLanguage={settings.speechLanguage} />
       <AsrContextField settings={settings} update={update} errors={errors} />
     </>
   );

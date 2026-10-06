@@ -3,7 +3,8 @@
  * 各状態の表示、set_panel_size (通常より小さく、影の余白は同じ)、クリック・ドラッグ・右クリック、
  * 通常 ⇄ コンパクトの切り替え、設定 > 一般 のスイッチを確認し、ライト・ダークのスクリーンショットを撮る。
  */
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 const PANEL = { width: 560, height: 260 };
 const SETTINGS = { width: 840, height: 640 };
@@ -62,23 +63,27 @@ async function pressMove(page: Page, target: Locator, dx: number) {
 
 const compact = (page: Page) => page.getByTestId("panel-compact");
 
-const STATES: { mock: string; state: string; button: string | null; spinner: boolean; ring: boolean; error: boolean }[] = [
-  { mock: "off", state: "off", button: "音声入力をオン", spinner: false, ring: false, error: false },
+type Toggle = "turnOn" | "turnOff";
+
+const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const STATES: { mock: string; state: string; button: Toggle | null; spinner: boolean; ring: boolean; error: boolean }[] = [
+  { mock: "off", state: "off", button: "turnOn", spinner: false, ring: false, error: false },
   { mock: "loading", state: "loading", button: null, spinner: true, ring: false, error: false },
-  { mock: "idle", state: "listening", button: "音声入力をオフ", spinner: false, ring: true, error: false },
-  { mock: "speaking", state: "speaking", button: "音声入力をオフ", spinner: false, ring: true, error: false },
-  { mock: "finalizing", state: "finalizing", button: "音声入力をオフ", spinner: true, ring: true, error: false },
-  { mock: "error-asr", state: "error", button: "音声入力をオン", spinner: false, ring: false, error: true },
+  { mock: "idle", state: "listening", button: "turnOff", spinner: false, ring: true, error: false },
+  { mock: "speaking", state: "speaking", button: "turnOff", spinner: false, ring: true, error: false },
+  { mock: "finalizing", state: "finalizing", button: "turnOff", spinner: true, ring: true, error: false },
+  { mock: "error-asr", state: "error", button: "turnOn", spinner: false, ring: false, error: true },
 ];
 
 for (const s of STATES) {
   for (const dark of [false, true]) {
     const name = `panel-compact-${s.mock}${dark ? "-dark" : ""}`;
-    test(`${name}: 円形ボタンだけを表示する`, async ({ page }) => {
+    test(`${name}: 円形ボタンだけを表示する`, async ({ page, m, shot }) => {
       await open(page, `window=panel&style=compact&mock=${s.mock}`, { dark });
       await expect(compact(page)).toHaveAttribute("data-state", s.state);
       await expect(page.locator("[data-panel-style]")).toHaveAttribute("data-panel-style", "compact");
-      if (s.button) await expect(page.getByRole("button", { name: s.button })).toBeVisible();
+      if (s.button) await expect(page.getByRole("button", { name: m.panel[s.button] })).toBeVisible();
       else await expect(page.getByRole("button")).toHaveCount(0);
       await expect(page.getByTestId("panel-compact-spinner")).toHaveCount(s.spinner ? 1 : 0);
       await expect(page.getByTestId("panel-compact-ring")).toHaveCount(s.ring ? 1 : 0);
@@ -87,13 +92,14 @@ for (const s of STATES) {
       await expect(page.getByTestId("preview")).toHaveCount(0);
       await expect(page.getByTestId("panel-card")).toHaveCount(0);
       await expect(page.getByTestId("panel-pill")).toHaveCount(0);
-      await expect(page.locator("body")).not.toContainText(/待機中|認識中|確定しています|文字起こしが停止|読み込んでいます/);
+      const words = [m.panel.idle, m.panel.speaking, m.panel.finalizing, m.panel.errors.asr_stopped, m.panel.loadingModelShort];
+      await expect(page.locator("body")).not.toContainText(new RegExp(words.map(escapeRe).join("|")));
       // 36px の円
       await expect(compact(page)).toHaveCSS("width", "36px");
       await expect(compact(page)).toHaveCSS("height", "36px");
       // 入力レベル (静止シナリオでも約15Hz で届く) とリングの追従を待ってから撮る
       await page.waitForTimeout(400);
-      await page.screenshot({ path: `e2e/screenshots/${name}.png` });
+      await page.screenshot({ path: shot(name) });
     });
   }
 }
@@ -107,9 +113,9 @@ test("panel compact: 発話中は音量に合わせてリングが広がり、�
   await expect.poll(async () => (await ring.boundingBox())?.width ?? 0).toBeLessThan(29);
 });
 
-test("panel compact: エラーは赤い点で示し、内容を読み上げ用のラベルに持つ", async ({ page }) => {
+test("panel compact: エラーは赤い点で示し、内容を読み上げ用のラベルに持つ", async ({ page, ui }) => {
   await open(page, "window=panel&style=compact&mock=error-asr");
-  const dot = page.getByRole("img", { name: "文字起こしサーバーが停止しました" });
+  const dot = page.getByRole("img", { name: ui.errors.asr_stopped });
   await expect(dot).toBeVisible();
   await expect(dot).toHaveCSS("background-color", "rgb(200, 50, 47)");
 });
@@ -125,9 +131,9 @@ test("panel compact: 確定処理中のリングは動きを減らす設定で�
   await expect(spinner).toHaveCSS("animation-name", "spin");
 });
 
-test("panel compact: set_panel_size は通常より小さく、影の余白は同じ", async ({ page }) => {
+test("panel compact: set_panel_size は通常より小さく、影の余白は同じ", async ({ page, m }) => {
   await open(page, "window=panel&mock=idle");
-  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
   await expect.poll(async () => (await panelSizes(page)).length).toBeGreaterThan(0);
   const full = (await panelSizes(page)).at(-1)!;
 
@@ -159,26 +165,26 @@ for (const anchor of ["top-left", "bottom-right"] as const) {
 }
 
 for (const s of [
-  { name: "OFF", mock: "off", button: "音声入力をオン", on: true },
-  { name: "ON", mock: "idle", button: "音声入力をオフ", on: false },
+  { name: "OFF", mock: "off", button: "turnOn" as Toggle, on: true },
+  { name: "ON", mock: "idle", button: "turnOff" as Toggle, on: false },
 ]) {
-  test(`panel compact ${s.name}: クリックで切り替える`, async ({ page }) => {
+  test(`panel compact ${s.name}: クリックで切り替える`, async ({ page, m }) => {
     await open(page, `window=panel&style=compact&mock=${s.mock}`);
-    await pressMove(page, page.getByRole("button", { name: s.button }), 2);
+    await pressMove(page, page.getByRole("button", { name: m.panel[s.button] }), 2);
     await expect.poll(async () => (await calls(page, "set_listening")).map((c) => c.args)).toEqual([{ on: s.on }]);
     expect(await dragCalls(page)).toBe(0);
   });
 
-  test(`panel compact ${s.name}: 4px 以上動かすとドラッグになり、切り替えない`, async ({ page }) => {
+  test(`panel compact ${s.name}: 4px 以上動かすとドラッグになり、切り替えない`, async ({ page, m }) => {
     await open(page, `window=panel&style=compact&mock=${s.mock}`);
-    await pressMove(page, page.getByRole("button", { name: s.button }), 12);
+    await pressMove(page, page.getByRole("button", { name: m.panel[s.button] }), 12);
     await expect.poll(() => dragCalls(page)).toBe(1);
     expect(await calls(page, "set_listening")).toHaveLength(0);
   });
 
-  test(`panel compact ${s.name}: 右クリックで show_panel_menu を呼び、切り替えない`, async ({ page }) => {
+  test(`panel compact ${s.name}: 右クリックで show_panel_menu を呼び、切り替えない`, async ({ page, m }) => {
     await open(page, `window=panel&style=compact&mock=${s.mock}`);
-    await page.getByRole("button", { name: s.button }).click({ button: "right" });
+    await page.getByRole("button", { name: m.panel[s.button] }).click({ button: "right" });
     await expect.poll(async () => (await calls(page, "show_panel_menu")).length).toBe(1);
     expect(await calls(page, "set_listening")).toHaveLength(0);
     expect(await dragCalls(page)).toBe(0);
@@ -201,9 +207,9 @@ test("panel compact: 円の縁 (ボタンの外) からもドラッグ・右ク�
   expect(await calls(page, "set_listening")).toHaveLength(0);
 });
 
-test("panel: 通常 → コンパクトは面が縮んでから円を出し、ウィンドウも縮む", async ({ page }) => {
+test("panel: 通常 → コンパクトは面が縮んでから円を出し、ウィンドウも縮む", async ({ page, m }) => {
   await open(page, "window=panel&mock=idle");
-  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
   await expect.poll(async () => (await panelSizes(page)).length).toBeGreaterThan(0);
   const before = (await panelSizes(page)).length;
   await mock(page, `api.invoke("update_settings", { patch: { panelStyle: "compact" } });`);
@@ -214,12 +220,12 @@ test("panel: 通常 → コンパクトは面が縮んでから円を出し、�
   await expect.poll(async () => (await panelSizes(page)).slice(before)).toEqual([COMPACT_SIZE]);
 });
 
-test("panel: コンパクト → 通常は最初に最終の大きさを送る", async ({ page }) => {
+test("panel: コンパクト → 通常は最初に最終の大きさを送る", async ({ page, m }) => {
   await open(page, "window=panel&style=compact&mock=idle");
   await expect.poll(async () => (await panelSizes(page)).at(-1)).toEqual(COMPACT_SIZE);
   const before = (await panelSizes(page)).length;
   await mock(page, `api.invoke("update_settings", { patch: { panelStyle: "full" } });`);
-  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
   await expect(page.getByTestId("panel-morph")).toBeHidden();
   const sizes = (await panelSizes(page)).slice(before);
   // 広げる時は最初の 1 回で最終の大きさ (カードが途中で切れない)
@@ -228,10 +234,10 @@ test("panel: コンパクト → 通常は最初に最終の大きさを送る",
   expect(sizes[0].width).toBeGreaterThan(COMPACT_SIZE.width);
 });
 
-test("settings 一般: コンパクト表示のスイッチで panelStyle を書く", async ({ page }) => {
+test("settings 一般: コンパクト表示のスイッチで panelStyle を書く", async ({ page, m, shot }) => {
   await open(page, "window=settings&mock=default&category=general", { viewport: SETTINGS });
-  await expect(page.getByText("音声入力パネルをマイクのボタンだけにします。右クリックメニューからも切り替えられます")).toBeVisible();
-  const sw = page.getByRole("switch", { name: "コンパクト表示" });
+  await expect(page.getByText(m.settings.general.compactSub)).toBeVisible();
+  const sw = page.getByRole("switch", { name: m.settings.general.compact });
   await expect(sw).toHaveAttribute("aria-checked", "false");
   await sw.click();
   await expect(sw).toHaveAttribute("aria-checked", "true");
@@ -240,7 +246,7 @@ test("settings 一般: コンパクト表示のスイッチで panelStyle を書
     .toEqual([{ patch: { panelStyle: "compact" } }]);
   // スイッチのつまみの移動 (120ms) が終わってから撮る
   await page.waitForTimeout(250);
-  await page.screenshot({ path: "e2e/screenshots/settings-general-compact.png" });
+  await page.screenshot({ path: shot("settings-general-compact") });
   await sw.click();
   await expect.poll(async () => (await calls(page, "update_settings")).at(-1)?.args).toEqual({ patch: { panelStyle: "full" } });
   // 他のウィンドウ (右クリックメニュー) からの変更も反映する
@@ -248,8 +254,8 @@ test("settings 一般: コンパクト表示のスイッチで panelStyle を書
   await expect(sw).toHaveAttribute("aria-checked", "true");
 });
 
-test("settings 一般 (ダーク)", async ({ page }) => {
+test("settings 一般 (ダーク)", async ({ page, m, shot }) => {
   await open(page, "window=settings&mock=default&category=general", { viewport: SETTINGS, dark: true });
-  await expect(page.getByRole("switch", { name: "コンパクト表示" })).toBeVisible();
-  await page.screenshot({ path: "e2e/screenshots/settings-general-dark.png" });
+  await expect(page.getByRole("switch", { name: m.settings.general.compact })).toBeVisible();
+  await page.screenshot({ path: shot("settings-general-dark") });
 });

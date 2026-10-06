@@ -11,6 +11,8 @@
 
 use anyhow::{bail, Result};
 
+use crate::i18n::Msg;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     NotRegistered,
@@ -53,7 +55,7 @@ pub fn status() -> Status {
 pub fn set_enabled(enabled: bool) -> Result<()> {
     use objc2_service_management::SMAppService;
     if !available() {
-        bail!("ログイン時の起動には macOS 13 以降が必要です");
+        bail!(Msg::LoginItemNeedsMacos13);
     }
     let action = if enabled { "登録" } else { "解除" };
     // SAFETY: クラスの存在を確認済み。register/unregister は NSError を返す同期 API
@@ -74,13 +76,11 @@ pub fn set_enabled(enabled: bool) -> Result<()> {
     log::info!("ログイン項目の{action}後の状態: {after:?}");
     match (enabled, after) {
         (true, Status::Enabled) => Ok(()),
-        (true, Status::RequiresApproval) => bail!(
-            "ログイン項目が許可されていません。システム設定の「一般 > ログイン項目」で mukuchi をオンにしてください"
-        ),
-        (true, _) => bail!("ログイン時の起動を設定できません"),
+        (true, Status::RequiresApproval) => bail!(Msg::LoginItemNotApproved),
+        (true, _) => bail!(Msg::LoginItemEnableFailed),
         // 登録されていないものの解除 (kSMErrorJobNotFound) も成功扱い
         (false, Status::NotRegistered | Status::NotFound) => Ok(()),
-        (false, _) => bail!("ログイン時の起動を解除できません"),
+        (false, _) => bail!(Msg::LoginItemDisableFailed),
     }
 }
 
@@ -88,7 +88,7 @@ pub fn set_enabled(enabled: bool) -> Result<()> {
 pub fn open_login_items_settings() -> Result<()> {
     use objc2_service_management::SMAppService;
     if !available() {
-        bail!("ログイン時の起動には macOS 13 以降が必要です");
+        bail!(Msg::LoginItemNeedsMacos13);
     }
     // SAFETY: クラスの存在を確認済み。引数のないクラスメソッド
     unsafe { SMAppService::openSystemSettingsLoginItems() };

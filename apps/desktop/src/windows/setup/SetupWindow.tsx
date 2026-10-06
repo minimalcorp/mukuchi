@@ -27,17 +27,21 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { InputModeRadio } from "@/components/app/input-mode-options";
-import { INPUT_MODES, SHORTCUT_HINT } from "@/lib/input-mode";
+import { Select } from "@/components/ui/select";
 import { ShortcutKeys, ShortcutRecorder } from "@/components/app/shortcut-recorder";
 import { HelpTip } from "@/components/ui/tooltip";
 import { useAudioLevel } from "@/lib/audio-level";
 import { useLevelEnvelope } from "@/lib/level-envelope";
 import { devOverrides } from "@/lib/env";
 import { formatBytes, formatBytesPair, formatEta } from "@/lib/format";
+import { useI18n, type Messages } from "@/i18n/context";
+import { isLocale, LOCALE_AUTONYMS, LOCALES } from "@/i18n/locales";
+import { SAMPLE_PHRASES } from "@/i18n/speech";
 import {
   errorMessage,
   isPermissionsGranted,
   useAppStatus,
+  useModels,
   usePermissions,
   useProvisioning,
   useSettings,
@@ -48,6 +52,8 @@ import {
   runCommand,
   subscribeEvents,
   type InputMode,
+  type Locale,
+  type ModelInfo,
   type Permissions,
   type ProvisioningStatus,
 } from "@/lib/ipc";
@@ -61,8 +67,11 @@ function inProgress(p: ProvisioningStatus): boolean {
 }
 
 export function SetupWindow() {
+  const { t } = useI18n();
   const [step, setStep] = useState(() => Math.min(STEPS, Math.max(1, devOverrides.setupStep ?? 1)));
   const provisioning = useProvisioning();
+  // 取得するモデル (選択中。セットアップでは話す言語の推奨) の名前・容量を出すため
+  const { models } = useModels();
   // ウィンドウを閉じると破棄され、開き直すと最初のステップから始まる。
   // 導入が途中なら (閉じている間も Rust で進んでいる)、最初に状態が届いた時点でダウンロードのステップへ移る
   const [resumeChecked, setResumeChecked] = useState(false);
@@ -83,12 +92,12 @@ export function SetupWindow() {
           <TrafficLights />
           <span className="flex-1" />
           <span data-tauri-drag-region className="text-xs text-fg-muted">
-            mukuchi セットアップ
+            {t.setup.windowTitle}
           </span>
           <span className="flex-1" />
           <span className="w-[52px]" />
         </header>
-        <div className="flex gap-1 px-8 pt-4" aria-label={`${step} / ${STEPS}`}>
+        <div className="flex gap-1 px-8 pt-4" aria-label={t.setup.progress(step, STEPS)}>
           {Array.from({ length: STEPS }, (_, i) => (
             <span
               key={i}
@@ -96,9 +105,9 @@ export function SetupWindow() {
             />
           ))}
         </div>
-        {step === 1 && <WelcomeStep provisioning={provisioning} onNext={next} />}
+        {step === 1 && <WelcomeStep provisioning={provisioning} models={models} onNext={next} />}
         {step === 2 && <PermissionsStep onBack={back} onNext={next} />}
-        {step === 3 && <DownloadStep provisioning={provisioning} onNext={next} />}
+        {step === 3 && <DownloadStep provisioning={provisioning} models={models} onNext={next} />}
         {step === 4 && <InputModeStep onBack={back} onNext={next} />}
         {step === 5 && <TestStep onBack={back} onNext={next} />}
         {step === 6 && <DoneStep provisioning={provisioning} />}
@@ -107,14 +116,25 @@ export function SetupWindow() {
   );
 }
 
-function StepBody({ hero = false, dense = false, children }: { hero?: boolean; dense?: boolean; children: ReactNode }) {
+function StepBody({
+  hero = false,
+  dense = false,
+  tight = false,
+  children,
+}: {
+  hero?: boolean;
+  dense?: boolean;
+  /** 上の余白を詰める (内容の多いステップ) */
+  tight?: boolean;
+  children: ReactNode;
+}) {
   return (
     // 文言が長い場合にフッターへ重ならないよう、はみ出した分はスクロールさせる
     <div
       className={cn(
         "flex min-h-0 flex-1 flex-col overflow-y-auto px-8 pb-3",
         dense ? "gap-3" : "gap-3.5",
-        hero ? "pt-10" : "pt-7",
+        hero ? "pt-10" : tight ? "pt-5" : "pt-7",
       )}
     >
       {children}
@@ -145,70 +165,156 @@ function Title({ large = false, children }: { large?: boolean; children: ReactNo
 
 /* ---------- 1. ようこそ ---------- */
 
-function WelcomeStep({ provisioning, onNext }: { provisioning: ProvisioningStatus | null; onNext: () => void }) {
-  // 容量は実測値 (デザインの 3.6 GB は仮)。取れない場合は容量を出さない
-  const total = provisioning?.bytesTotal;
+/** 取得するモデル。選択中 (セットアップ中は Rust が話す言語の推奨にそろえる) が無ければ推奨 */
+function setupModel(models: ModelInfo[] | null): ModelInfo | null {
+  return models?.find((m) => m.selected) ?? models?.find((m) => m.recommended) ?? null;
+}
+
+/** 選択肢 (各言語の自称) */
+const LANGUAGE_OPTIONS = LOCALES.map((l) => ({ value: l, label: LOCALE_AUTONYMS[l] }));
+
+function WelcomeStep({
+  provisioning,
+  models,
+  onNext,
+}: {
+  provisioning: ProvisioningStatus | null;
+  models: ModelInfo[] | null;
+  onNext: () => void;
+}) {
+  const { locale, t } = useI18n();
+  const w = t.setup.welcome;
+  const [settings, update, errors] = useSettings();
+  // 容量は取得するモデルの固定値 (list_models の sizeBytes)。ファイル一覧の取得前でも出せる。取れない場合は容量を出さない
+  const size = setupModel(models)?.sizeBytes;
+  // 話す言語の変更で取得するモデル (選択) が変わるのは、導入が実行中でも完了済みでもなく、モデルの取得を始めていない時だけ
+  // (Rust の Provisioning::if_model_not_started と同じ条件)。それ以外は選ばせず理由を出す
+  const lock = speechLock(provisioning);
   return (
     <>
-      <StepBody hero>
-        <AppLogo size={44} />
-        <Title large>mukuchi へようこそ</Title>
-        <p className="m-0 text-md leading-[1.6] text-fg-body">
-          話すだけで文字を入力できる音声入力アプリです。いくつかの準備を済ませると使えるようになります。
-        </p>
-        <ul className="m-0 mt-1 flex list-none flex-col gap-2 p-0 text-sm text-fg-muted">
-          <li className="flex items-center gap-2">
-            <ShieldCheck size={16} aria-hidden />
-            文字起こしはこの Mac の中で行い、音声は外部に送信しません
+      {/* 言語の選択を足した分、ロゴは見出しと横に並べて縦に詰める (ウィンドウの高さは固定) */}
+      <StepBody dense tight>
+        <div className="flex items-center gap-3.5">
+          <AppLogo size={44} />
+          <Title large>{w.title}</Title>
+        </div>
+        <p className="m-0 text-md leading-[1.6] text-fg-body">{w.lead}</p>
+        <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-sm text-fg-muted">
+          <li className="flex items-start gap-2">
+            <ShieldCheck size={16} className="mt-0.5 flex-none" aria-hidden />
+            {w.privacy}
           </li>
-          <li className="flex items-center gap-2">
-            <Download size={16} aria-hidden />
-            {total ? `実行環境とモデル（約 ${formatBytes(total)}）をダウンロードします` : "実行環境とモデルをダウンロードします"}
+          <li data-testid="welcome-download" className="flex items-start gap-2">
+            <Download size={16} className="mt-0.5 flex-none" aria-hidden />
+            {size ? w.downloadWithSize(formatBytes(size, locale)) : w.download}
           </li>
-          <li className="flex items-center gap-2">
-            <Clock size={16} aria-hidden />
-            所要時間の目安は 5〜10 分です
+          <li className="flex items-start gap-2">
+            <Clock size={16} className="mt-0.5 flex-none" aria-hidden />
+            {w.duration}
           </li>
         </ul>
+        <div className="grid grid-cols-2 gap-3">
+          <LanguageField label={w.uiLanguage}>
+            <Select
+              aria-label={w.uiLanguage}
+              data-testid="ui-language"
+              options={LANGUAGE_OPTIONS}
+              // 初期は解決済みの表示言語 (uiLanguage は system のまま)。選ぶとその言語で保存し、すぐに切り替わる
+              value={locale}
+              disabled={!settings}
+              onValueChange={(v) => {
+                if (isLocale(v)) update({ uiLanguage: v });
+              }}
+            />
+          </LanguageField>
+          <LanguageField label={w.speechLanguage} help={w.speechLanguageHelp}>
+            <Select
+              aria-label={w.speechLanguage}
+              data-testid="speech-language"
+              options={LANGUAGE_OPTIONS}
+              value={settings?.speechLanguage ?? ""}
+              // 導入の状態の取得前も変えさせない (Rust がモデルの選択を変えるか分からないため)
+              disabled={!settings || !provisioning || lock != null}
+              onValueChange={(v) => {
+                if (isLocale(v)) update({ speechLanguage: v });
+              }}
+            />
+          </LanguageField>
+        </div>
+        {lock ? (
+          <p data-testid="speech-language-locked" data-reason={lock} className="m-0 text-xs leading-[1.5] text-fg-muted">
+            {lock === "running" ? w.speechLanguageLockedRunning : w.speechLanguageLocked}
+          </p>
+        ) : null}
+        {errors.uiLanguage || errors.speechLanguage ? (
+          <p role="alert" className="m-0 text-xs leading-[1.5] text-fg-danger">
+            {errors.uiLanguage ?? errors.speechLanguage}
+          </p>
+        ) : null}
       </StepBody>
       <StepFooter>
         <Button variant="primary" onClick={onNext}>
-          はじめる
+          {w.start}
         </Button>
       </StepFooter>
     </>
   );
 }
 
+/**
+ * 話す言語を変えられない理由。running: 導入の実行中 (実行環境の準備中を含む)。started: モデルの取得を始めた・完了した。
+ */
+function speechLock(p: ProvisioningStatus | null): "running" | "started" | null {
+  if (!p) return null;
+  if (p.items.some((i) => i.id === "model" && i.state !== "pending") || p.stage === "done") return "started";
+  if (p.stage === "runtime" || p.stage === "model" || p.stage === "verify") return "running";
+  return null;
+}
+
+function LanguageField({ label, help, children }: { label: string; help?: string; children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <span className="flex items-center gap-1.5 text-sm leading-[1.4] font-medium text-fg-body">
+        {label}
+        {help ? <HelpTip content={help} /> : null}
+      </span>
+      {children}
+    </div>
+  );
+}
+
 /* ---------- 2. 権限 ---------- */
 
 function PermissionBadge({ granted }: { granted: boolean }) {
+  const { t } = useI18n();
   return granted ? (
     <Badge tone="success" dot>
-      許可済み
+      {t.common.granted}
     </Badge>
   ) : (
     <Badge tone="warning" dot>
-      未許可
+      {t.common.notGranted}
     </Badge>
   );
 }
 
 function PermissionsStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }) {
+  const { t } = useI18n();
+  const ps = t.setup.permissions;
   // システム設定での変更は通知されないことがあるため 1 秒ごとに再取得する
   const [perms, setPerms] = usePermissions(1000);
   const granted = isPermissionsGranted(perms);
   return (
     <>
       <StepBody>
-        <Title>権限を許可してください</Title>
-        <p className="m-0 text-sm leading-[1.6] text-fg-muted">2 つとも許可すると次に進めます。</p>
+        <Title>{ps.title}</Title>
+        <p className="m-0 text-sm leading-[1.6] text-fg-muted">{ps.lead}</p>
         <div className="flex flex-col rounded-lg border border-line-default">
           <div className="flex items-center gap-3 border-b border-line-subtle px-4 py-3.5">
             <Mic size={20} className="flex-none text-fg-muted" aria-hidden />
             <div className="flex flex-1 flex-col gap-0.5">
-              <span className="text-md leading-[1.4] font-medium">マイク</span>
-              <span className="text-xs leading-[1.4] text-fg-muted">発話を聞き取るために使います</span>
+              <span className="text-md leading-[1.4] font-medium">{ps.microphone}</span>
+              <span className="text-xs leading-[1.4] text-fg-muted">{ps.microphoneSub}</span>
             </div>
             <PermissionBadge granted={perms?.microphone === "granted"} />
           </div>
@@ -216,10 +322,10 @@ function PermissionsStep({ onBack, onNext }: { onBack: () => void; onNext: () =>
             <Keyboard size={20} className="flex-none text-fg-muted" aria-hidden />
             <div className="flex flex-1 flex-col gap-0.5">
               <span className="flex items-center gap-1.5 text-md leading-[1.4] font-medium">
-                アクセシビリティ
-                <HelpTip content="他のアプリのカーソル位置に文字とキー操作を送るために必要です" />
+                {ps.accessibility}
+                <HelpTip content={ps.accessibilityHelp} />
               </span>
-              <span className="text-xs leading-[1.4] text-fg-muted">文字の入力に使います</span>
+              <span className="text-xs leading-[1.4] text-fg-muted">{ps.accessibilitySub}</span>
             </div>
             <PermissionBadge granted={!!perms?.accessibility} />
           </div>
@@ -228,10 +334,10 @@ function PermissionsStep({ onBack, onNext }: { onBack: () => void; onNext: () =>
       </StepBody>
       <StepFooter align="between">
         <Button variant="ghost" onClick={onBack}>
-          戻る
+          {t.common.back}
         </Button>
         <Button variant="primary" disabled={!granted} onClick={onNext}>
-          次へ
+          {t.common.next}
         </Button>
       </StepFooter>
     </>
@@ -240,27 +346,29 @@ function PermissionsStep({ onBack, onNext }: { onBack: () => void; onNext: () =>
 
 /** 未許可の権限への案内。先に未許可のマイク、次にアクセシビリティの順で 1 つずつ出す */
 function PermissionGuide({ perms, onChange }: { perms: Permissions; onChange: (p: Permissions) => void }) {
+  const { t } = useI18n();
+  const ps = t.setup.permissions;
   let text: string;
   let button: ReactNode;
   if (perms.microphone === "not_determined") {
-    text = "マイクの使用を許可してください。確認のダイアログが表示されます。";
+    text = ps.guideMicNotDetermined;
     button = (
       <Button size="sm" onClick={() => commands.requestMicrophone().then(onChange, () => {})}>
-        許可する
+        {t.common.allow}
       </Button>
     );
   } else if (perms.microphone === "denied") {
-    text = "システム設定のマイクで mukuchi をオンにしてください。許可するとここに自動で反映されます。";
+    text = ps.guideMicDenied;
     button = (
       <Button size="sm" iconRight={ExternalLink} onClick={() => runCommand(commands.openSystemSettings("microphone"))}>
-        システム設定を開く
+        {t.common.openSystemSettings}
       </Button>
     );
   } else {
-    text = "システム設定で mukuchi をオンにしてください。許可するとここに自動で反映されます。";
+    text = ps.guideAccessibility;
     button = (
       <Button size="sm" iconRight={ExternalLink} onClick={() => runCommand(commands.openSystemSettings("accessibility"))}>
-        システム設定を開く
+        {t.common.openSystemSettings}
       </Button>
     );
   }
@@ -276,44 +384,57 @@ function PermissionGuide({ perms, onChange }: { perms: Permissions; onChange: (p
 
 type ProvisioningItem = ProvisioningStatus["items"][number];
 
-const ITEM_LABEL: Record<ProvisioningItem["id"], string> = {
-  runtime: "Python 実行環境",
-  model: "Qwen3-ASR（日本語追加学習）",
-  verify: "動作確認",
-};
+/** 項目の名前。model は取得するモデルの表示名 (Rust の ModelInfo.name。一覧の取得前は汎用の名前) */
+function itemLabel(id: ProvisioningItem["id"], model: ModelInfo | null, t: Messages): string {
+  const d = t.setup.download;
+  if (id === "runtime") return d.runtime;
+  if (id === "model") return model?.name ?? d.modelFallback;
+  return d.verify;
+}
 
-const RUNNING_TEXT: Record<ProvisioningItem["id"], string> = {
-  runtime: "準備しています…",
-  // model の大きさはファイル一覧を取得するまで分からない
-  model: "ファイル一覧を取得しています…",
-  verify: "確認しています…",
-};
+function runningText(id: ProvisioningItem["id"], t: Messages): string {
+  const d = t.setup.download;
+  return id === "runtime" ? d.runningRuntime : id === "model" ? d.runningModel : d.runningVerify;
+}
 
 function isRunning(p: ProvisioningStatus): boolean {
   return p.stage === "runtime" || p.stage === "model" || p.stage === "verify";
 }
 
 /** 全体の行の右側。バイト数は model のみ (runtime・verify は大きさが分からない) */
-function summaryText(p: ProvisioningStatus): string {
+function summaryText(p: ProvisioningStatus, locale: Locale, t: Messages): string {
+  const d = t.setup.download;
   const parts: string[] = [];
-  if (p.bytesTotal != null) parts.push(`${formatBytes(p.bytesDone)} / ${formatBytes(p.bytesTotal)}`);
-  if (p.stage === "runtime" || (p.stage === "idle" && p.bytesTotal == null)) parts.push("実行環境を準備しています");
-  if (p.stage === "model") parts.push(p.etaSeconds != null ? formatEta(p.etaSeconds) : "残り時間を計算しています");
-  if (p.stage === "verify") parts.push("動作を確認しています");
-  if (p.stage === "paused") parts.push("一時停止中");
-  return parts.join(" ・ ");
+  if (p.bytesTotal != null) parts.push(`${formatBytes(p.bytesDone, locale)} / ${formatBytes(p.bytesTotal, locale)}`);
+  if (p.stage === "runtime" || (p.stage === "idle" && p.bytesTotal == null)) parts.push(d.preparingRuntime);
+  if (p.stage === "model") parts.push(p.etaSeconds != null ? formatEta(p.etaSeconds, t) : d.etaCalculating);
+  if (p.stage === "verify") parts.push(d.verifying);
+  if (p.stage === "paused") parts.push(d.paused);
+  return parts.join(t.common.separator);
 }
 
-function itemRight(item: ProvisioningItem, stage: ProvisioningStatus["stage"]): string {
-  if (item.state === "pending") return "待機中";
-  if (item.state === "done") return item.bytesTotal != null ? formatBytes(item.bytesTotal) : "完了";
-  if (item.bytesTotal != null) return formatBytesPair(item.bytesDone, item.bytesTotal);
-  if (stage === "paused") return "一時停止中";
-  if (stage === "error") return "失敗";
-  return RUNNING_TEXT[item.id];
+function itemRight(item: ProvisioningItem, stage: ProvisioningStatus["stage"], locale: Locale, t: Messages): string {
+  const d = t.setup.download;
+  if (item.state === "pending") return d.pending;
+  if (item.state === "done") return item.bytesTotal != null ? formatBytes(item.bytesTotal, locale) : d.done;
+  if (item.bytesTotal != null) return formatBytesPair(item.bytesDone, item.bytesTotal, locale);
+  if (stage === "paused") return d.paused;
+  if (stage === "error") return d.failed;
+  return runningText(item.id, t);
 }
 
-function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningStatus | null; onNext: () => void }) {
+function DownloadStep({
+  provisioning: p,
+  models,
+  onNext,
+}: {
+  provisioning: ProvisioningStatus | null;
+  models: ModelInfo[] | null;
+  onNext: () => void;
+}) {
+  const { locale, t } = useI18n();
+  const d = t.setup.download;
+  const model = setupModel(models);
   const started = useRef(false);
   // 一時停止は止まるまで待って返るため、その間はボタンを押せなくする
   const [pausing, setPausing] = useState(false);
@@ -335,8 +456,8 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
   if (!p) {
     return (
       <StepBody dense>
-        <Title>実行環境とモデルのダウンロード</Title>
-        <p className="m-0 text-sm text-fg-muted">状態を確認しています…</p>
+        <Title>{d.titlePending}</Title>
+        <p className="m-0 text-sm text-fg-muted">{d.checkingStatus}</p>
       </StepBody>
     );
   }
@@ -354,23 +475,17 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
     <>
       <StepBody dense>
         <Title>
-          {done
-            ? "実行環境とモデルの準備ができました"
-            : paused
-              ? "ダウンロードを一時停止しました"
-              : failed
-                ? "準備を完了できませんでした"
-                : "実行環境とモデルをダウンロードしています"}
+          {done ? d.titleDone : paused ? d.titlePaused : failed ? d.titleFailed : d.titleRunning}
         </Title>
         <div className="flex flex-col gap-2">
           <div className="flex justify-between gap-3 text-sm">
-            <span>全体</span>
-            <span className="tabular text-fg-muted">{summaryText(p)}</span>
+            <span>{d.overall}</span>
+            <span className="tabular text-fg-muted">{summaryText(p, locale, t)}</span>
           </div>
           <div
             className="h-1.5 rounded-[3px] bg-meter-track"
             role="progressbar"
-            aria-label="全体の進捗"
+            aria-label={d.overallProgress}
             aria-valuenow={Math.round(pct)}
             aria-valuemin={0}
             aria-valuemax={100}
@@ -413,8 +528,10 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
                   )}
                   aria-hidden
                 />
-                <span className="flex-1">{ITEM_LABEL[item.id]}</span>
-                <span className={cn(item.state !== "pending" && "tabular text-fg-muted")}>{itemRight(item, p.stage)}</span>
+                <span className="flex-1">{itemLabel(item.id, model, t)}</span>
+                <span className={cn(item.state !== "pending" && "tabular text-fg-muted")}>
+                  {itemRight(item, p.stage, locale, t)}
+                </span>
               </div>
             );
           })}
@@ -426,11 +543,11 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
           >
             <CircleAlert size={16} className="mt-0.5 flex-none" aria-hidden />
             <span className="flex-1 leading-[1.5]">
-              {p.error ?? "準備に失敗しました。"}
-              {resumeBytes > 0 ? `取得済みの ${formatBytes(resumeBytes)} から再開します。` : ""}
+              {p.error ?? d.failedFallback}
+              {resumeBytes > 0 ? d.resumeFrom(formatBytes(resumeBytes, locale)) : ""}
             </span>
             <Button size="sm" iconLeft={RotateCw} onClick={start}>
-              再試行
+              {t.common.retry}
             </Button>
           </div>
         ) : null}
@@ -443,7 +560,7 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
       <StepFooter align="between">
         {paused ? (
           <Button iconLeft={Play} onClick={start}>
-            再開
+            {t.common.resume}
           </Button>
         ) : (
           <Button
@@ -459,12 +576,12 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
                 .finally(() => setPausing(false));
             }}
           >
-            一時停止
+            {t.common.pause}
           </Button>
         )}
         {/* 動作確認まで済んでから (stage=done) 次へ進める。complete_setup はその後でしか呼ばない */}
         <Button variant="primary" disabled={!done} onClick={onNext}>
-          次へ
+          {t.common.next}
         </Button>
       </StepFooter>
     </>
@@ -474,13 +591,15 @@ function DownloadStep({ provisioning: p, onNext }: { provisioning: ProvisioningS
 /* ---------- 4. 入力モード ---------- */
 
 function InputModeStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }) {
+  const { t } = useI18n();
   const [settings, update, errors] = useSettings();
-  const mode = settings?.inputMode ?? "continuous";
-  const current = INPUT_MODES.find((m) => m.id === mode) ?? INPUT_MODES[0];
+  // 未知の値 (Rust が足した等) は既定として扱う
+  const mode: InputMode = settings?.inputMode === "oneShot" ? "oneShot" : "continuous";
+  const current = t.inputMode[mode];
   return (
     <>
       <StepBody dense>
-        <Title>入力のしかたを選んでください</Title>
+        <Title>{t.setup.inputMode.title}</Title>
         <div className="flex gap-3">
           <InputModeRadio
             className="w-[264px] flex-none"
@@ -490,7 +609,7 @@ function InputModeStep({ onBack, onNext }: { onBack: () => void; onNext: () => v
           />
           {/* 選んでいるモードが向いている場面。選び替えると入れ替わる */}
           <div data-testid="input-mode-use-cases" className="flex min-w-0 flex-1 flex-col gap-2 rounded-lg bg-surface-muted px-3.5 py-3">
-            <span className="text-xs font-semibold text-fg-muted">こんなときに</span>
+            <span className="text-xs font-semibold text-fg-muted">{t.setup.inputMode.useCases}</span>
             <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-sm leading-[1.5] text-fg-body">
               {current.useCases.map((u) => (
                 <li key={u} className="flex items-start gap-1.5">
@@ -508,24 +627,24 @@ function InputModeStep({ onBack, onNext }: { onBack: () => void; onNext: () => v
         ) : null}
         <div className="flex items-start gap-3">
           <span className="flex h-[30px] flex-none items-center gap-1.5 text-sm font-medium">
-            ショートカット
-            <HelpTip content="どのアプリを使っていても押せます。他のアプリと同じキーだと動かないことがあります" />
+            {t.shortcut.label}
+            <HelpTip content={t.shortcut.help} />
           </span>
           <ShortcutRecorder
             shortcut={settings?.shortcut}
             disabled={!settings}
             onChange={(shortcut) => update({ shortcut })}
             error={errors.shortcut}
-            hint={SHORTCUT_HINT[mode]}
+            hint={t.inputMode.shortcutHint[mode]}
           />
         </div>
       </StepBody>
       <StepFooter align="between">
         <Button variant="ghost" onClick={onBack}>
-          戻る
+          {t.common.back}
         </Button>
         <Button variant="primary" onClick={onNext}>
-          次へ
+          {t.common.next}
         </Button>
       </StepFooter>
     </>
@@ -546,25 +665,17 @@ function SetupLevelBar({ on }: { on: boolean }) {
 }
 
 /** 動作テストの案内。1回ずつ聞き取るではショートカットで始めてもらい、自動でオフになることを先に伝える */
-function TestInstruction({ mode, shortcut }: { mode: InputMode; shortcut: string | null }) {
+function TestInstruction({ mode, shortcut, sample }: { mode: InputMode; shortcut: string | null; sample: string }) {
+  const { t } = useI18n();
+  const ts = t.setup.test;
   const keys = shortcut ? <ShortcutKeys shortcut={shortcut} className="mx-0.5 align-[1px]" /> : null;
-  if (mode === "oneShot") {
-    return (
-      <>
-        画面の下にパネルを表示しました。{keys ? <>{keys} を押して</> : "パネルで音声入力をオンにして"}
-        、「君は無口だね」のように話してください。話し終わると自動でオフになります。
-      </>
-    );
-  }
-  return (
-    <>
-      画面の下にパネルを表示しました。{keys ? <>パネルか {keys} で</> : "パネルで"}
-      音声入力をオンにして、「君は無口だね」のように話してください。
-    </>
-  );
+  if (mode === "oneShot") return keys ? ts.oneShotWithKeys(keys, sample) : ts.oneShotNoKeys(sample);
+  return keys ? ts.continuousWithKeys(keys, sample) : ts.continuousNoKeys(sample);
 }
 
 function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }) {
+  const { t } = useI18n();
+  const ts = t.setup.test;
   const status = useAppStatus();
   const [settings] = useSettings();
   const [recognized, setRecognized] = useState(false);
@@ -594,20 +705,27 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
   return (
     <>
       <StepBody>
-        <Title>試しに話してみてください</Title>
+        <Title>{ts.title}</Title>
         <p data-testid="test-instruction" className="m-0 text-sm leading-[1.6] text-fg-muted">
-          {settings ? <TestInstruction mode={settings.inputMode} shortcut={settings.shortcut} /> : null}
+          {settings ? (
+            <TestInstruction
+              mode={settings.inputMode}
+              shortcut={settings.shortcut}
+              // 例文は話す言語で出す
+              sample={SAMPLE_PHRASES[settings.speechLanguage] ?? SAMPLE_PHRASES.ja}
+            />
+          ) : null}
         </p>
         <div className="flex h-8 flex-none items-center gap-2.5 rounded-md bg-surface-muted px-3">
           <AudioLines size={16} className="flex-none text-blue-500" aria-hidden />
           <SetupLevelBar on={on} />
-          <span className="text-xs text-fg-muted">入力レベル</span>
+          <span className="text-xs text-fg-muted">{ts.inputLevel}</span>
         </div>
         {/* 実際の入力先。前面のこの欄に Rust から貼り付けられる */}
         <div className="flex min-h-[88px] flex-col rounded-md border border-line-default px-3 py-2 transition-control focus-within:border-line-focus focus-within:shadow-[var(--focus-ring)]">
           <textarea
             autoFocus
-            aria-label="テスト入力欄"
+            aria-label={ts.field}
             rows={2}
             className="w-full flex-1 resize-none border-0 bg-transparent p-0 pt-1 text-md leading-[1.6] text-fg-strong outline-none focus-visible:outline-none"
           />
@@ -616,7 +734,7 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
               {commandsSent.map((c) => (
                 <span key={c.id} className="inline-flex items-center gap-2">
                   {c.text}
-                  <Badge tone="violet">{c.key} を送信</Badge>
+                  <Badge tone="violet">{ts.sentKey(c.key)}</Badge>
                 </span>
               ))}
             </div>
@@ -625,20 +743,20 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
         {recognized ? (
           <div className="flex items-center gap-1.5 text-xs text-fg-success">
             <CircleCheck size={14} aria-hidden />
-            正しく認識できました。
+            {ts.recognized}
           </div>
         ) : null}
       </StepBody>
       <StepFooter align="between">
         <Button variant="ghost" onClick={onBack}>
-          戻る
+          {t.common.back}
         </Button>
         <div className="flex gap-2">
           <Button variant="ghost" onClick={onNext}>
-            スキップ
+            {t.common.skip}
           </Button>
           <Button variant="primary" onClick={onNext}>
-            次へ
+            {t.common.next}
           </Button>
         </div>
       </StepFooter>
@@ -649,6 +767,8 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
 /* ---------- 6. 完了 ---------- */
 
 function DoneStep({ provisioning }: { provisioning: ProvisioningStatus | null }) {
+  const { t } = useI18n();
+  const ds = t.setup.done;
   const [settings, update, settingsErrors] = useSettings();
   const [completeError, setCompleteError] = useState<string | null>(null);
   // 導入が済むまで (動作確認の成功まで) はセットアップを完了させない
@@ -659,30 +779,19 @@ function DoneStep({ provisioning }: { provisioning: ProvisioningStatus | null })
         <div className="flex size-11 items-center justify-center rounded-full bg-tone-success-bg text-green-500">
           <CircleCheck size={20} aria-hidden />
         </div>
-        <Title large>準備ができました</Title>
-        <p className="m-0 text-md leading-[1.6]">
-          mukuchi はメニューバーに常駐します。設定はメニューバーのアイコンから開けます。
-        </p>
+        <Title large>{ds.title}</Title>
+        <p className="m-0 text-md leading-[1.6]">{ds.lead}</p>
         <div className="flex items-center gap-2.5 rounded-lg border border-line-default px-3.5 py-3 text-sm">
           <span data-testid="done-toggle-hint" className="flex-1 leading-[1.6]">
-            {settings?.shortcut && settings.inputMode === "oneShot" ? (
-              <>
-                <ShortcutKeys shortcut={settings.shortcut} className="mx-0.5 align-[1px]" />{" "}
-                を押すと1回聞き取ります。パネルやメニューバーのアイコンからも始められます
-              </>
-            ) : settings?.shortcut ? (
-              <>
-                オン／オフはパネル・メニューバーのアイコン・
-                <ShortcutKeys shortcut={settings.shortcut} className="mx-0.5 align-[1px]" />
-                で切り替えます
-              </>
-            ) : (
-              "オン／オフはパネルか、メニューバーのアイコンから切り替えます"
-            )}
+            {settings?.shortcut && settings.inputMode === "oneShot"
+              ? ds.hintOneShot(<ShortcutKeys shortcut={settings.shortcut} className="mx-0.5 align-[1px]" />)
+              : settings?.shortcut
+                ? ds.hintWithKeys(<ShortcutKeys shortcut={settings.shortcut} className="mx-0.5 align-[1px]" />)
+                : ds.hintNoKeys}
           </span>
         </div>
         <Switch
-          label="ログイン時に起動"
+          label={ds.launchAtLogin}
           checked={settings?.launchAtLogin ?? true}
           disabled={!settings}
           onCheckedChange={(v) => update({ launchAtLogin: v })}
@@ -703,7 +812,7 @@ function DoneStep({ provisioning }: { provisioning: ProvisioningStatus | null })
             commands.completeSetup().catch((e: unknown) => setCompleteError(errorMessage(e)));
           }}
         >
-          閉じる
+          {t.common.close}
         </Button>
       </StepFooter>
     </>

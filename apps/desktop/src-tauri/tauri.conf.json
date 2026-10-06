@@ -31,7 +31,9 @@
       "../THIRD_PARTY_NOTICES": "THIRD_PARTY_NOTICES",
       "resources/silero/LICENSE": "licenses/silero-vad-LICENSE",
       "bundle-resources/asr-server": "asr-server",
-      "bundle-resources/verify.wav": "verify.wav"
+      "bundle-resources/verify.wav": "verify.wav",
+      "infoplist/ja.lproj/InfoPlist.strings": "ja.lproj/InfoPlist.strings",
+      "infoplist/en.lproj/InfoPlist.strings": "en.lproj/InfoPlist.strings"
     },
     "macOS": {
       "minimumSystemVersion": "13.0",

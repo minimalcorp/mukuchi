@@ -235,10 +235,10 @@ pub fn check_app_bundle(app_bundle: Option<&Path>, dev: bool) -> Result<()> {
         return Ok(());
     }
     let Some(b) = app_bundle else {
-        bail!("アプリ本体の場所が分からないため、アンインストールできません");
+        bail!(crate::i18n::Msg::AppBundleUnknown);
     };
     if is_translocated(b) {
-        bail!("アプリが一時的な場所から実行されています。mukuchi を「アプリケーション」フォルダに移動して開き直してから、もう一度アンインストールしてください");
+        bail!(crate::i18n::Msg::AppTranslocated);
     }
     Ok(())
 }

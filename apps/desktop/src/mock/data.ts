@@ -1,6 +1,7 @@
 /* モックの初期データ */
 import type {
   AppStatus,
+  Locale,
   AudioDevice,
   AudioLevel,
   ModelInfo,
@@ -12,13 +13,16 @@ import type {
   UpdateStatus,
 } from "@/lib/ipc";
 import type { MockApi } from "./index";
+import { MOCK_SPEECH_TEXTS, MOCK_UI_TEXTS } from "./texts";
 
 export type MockDb = {
+  /** OS の言語 (uiLanguage が system の時の表示言語)。?locale= で指定する */
+  systemLocale: Locale;
   status: AppStatus;
   settings: Settings;
   permissions: Permissions;
   provisioning: ProvisioningStatus;
-  /** list_models の値 (カタログ順) */
+  /** モデルの状態。list_models・models-changed は presentModels で表示言語・話す言語に合わせて返す */
   models: ModelInfo[];
   /** get_shortcut_status の値 */
   shortcut: ShortcutStatus;
@@ -44,93 +48,119 @@ export type MockDb = {
   onListen: ((api: MockApi) => void) | null;
 };
 
-const DEFAULT_SETTINGS: Settings = {
-  launchAtLogin: true,
-  inputDeviceId: null,
-  vadSensitivity: 60,
-  silenceMs: 1300,
-  voiceCommandsEnabled: true,
-  voiceCommands: [
-    { id: "confirm", phrases: ["確定", "エンター"], key: { key: "enter", modifiers: [] } },
-    { id: "newline", phrases: ["改行"], key: { key: "enter", modifiers: ["shift"] } },
-    { id: "send", phrases: ["送信"], key: { key: "enter", modifiers: ["cmd"] } },
-  ],
-  asrContext: [
-    "macOS アプリの開発についての話です。",
-    "以下の用語は英字で表記する: mukuchi (読み: むくち), Qwen3-ASR (読み: クウェン、クエン), Tauri (読み: タウリ), Claude Code (読み: クロードコード), pnpm",
-  ].join("\n"),
-  excludedApps: [
-    { bundleId: "com.1password.1password", name: "1Password" },
-    { bundleId: "com.apple.Terminal", name: "ターミナル" },
-  ],
-  panelPosition: null,
-  setupCompleted: true,
-  panelStyle: "full",
-  inputMode: "continuous",
-  autoCheckUpdates: true,
-  shortcut: "Alt+Space",
-};
+/** 新規の設定 (Rust の既定と同じ)。speechLanguage は解決した表示言語、既定の音声コマンドは話す言語のもの */
+function defaultSettings(locale: Locale): Settings {
+  const sp = MOCK_SPEECH_TEXTS[locale];
+  return {
+    launchAtLogin: true,
+    inputDeviceId: null,
+    vadSensitivity: 60,
+    silenceMs: 1300,
+    voiceCommandsEnabled: true,
+    voiceCommands: structuredClone(sp.voiceCommands),
+    asrContext: sp.asrContext,
+    excludedApps: [
+      { bundleId: "com.1password.1password", name: "1Password" },
+      { bundleId: "com.apple.Terminal", name: sp.terminal },
+    ],
+    panelPosition: null,
+    setupCompleted: true,
+    panelStyle: "full",
+    inputMode: "continuous",
+    autoCheckUpdates: true,
+    shortcut: "Alt+Space",
+    uiLanguage: "system",
+    speechLanguage: locale,
+  };
+}
 
 export const GB = 1_000_000_000;
 
 export const MODEL_TOTAL = 2.4 * GB;
 
-/** カタログ (Rust の provisioning/models.rs の CATALOG と同じ値) */
+/** カタログ (Rust の provisioning/models.rs の CATALOG と同じ値)。名前・説明は表示言語ごと (texts.ts) */
 const CATALOG = [
-  {
-    id: "ja-8bit",
-    name: "日本語 (8bit)",
-    description: "元のモデルと同等の精度で、より速く、メモリの使用量が少ない (約3GB)",
-    sizeBytes: 2_185_804_096,
-    recommended: true,
-    legacy: false,
-  },
-  {
-    id: "ja-bf16",
-    name: "日本語 (bf16)",
-    description: "量子化していない元のモデル。容量とメモリの使用量 (約8.5GB) が大きい",
-    sizeBytes: 4_092_092_275,
-    recommended: false,
-    // 旧候補: 手元にある時だけ一覧に出る (docs/architecture.md「モデルの管理」の旧候補)
-    legacy: true,
-  },
-] as const;
+  { id: "ja-8bit", sizeBytes: 2_185_804_096, tunedFor: "ja", legacy: false },
+  { id: "base-1.7b-8bit", sizeBytes: 2_174_372_462, tunedFor: null, legacy: false },
+  // 旧候補: 手元にある時だけ一覧に出る (docs/architecture.md「モデルの管理」の旧候補)
+  { id: "ja-bf16", sizeBytes: 4_092_092_275, tunedFor: "ja", legacy: true },
+] as const satisfies readonly { id: string; sizeBytes: number; tunedFor: Locale | null; legacy: boolean }[];
 
 export type ModelId = (typeof CATALOG)[number]["id"];
 
+/** 話す言語ごとの並び (Rust の MODEL_ORDER)。先頭が推奨 */
+export const MODEL_ORDER: Record<Locale, ModelId[]> = {
+  ja: ["ja-8bit", "base-1.7b-8bit"],
+  en: ["base-1.7b-8bit", "ja-8bit"],
+};
+
+/** 解決した表示言語 (Rust の get_locale)。system は OS の言語 (モックでは ?locale=) */
+export function resolvedLocale(db: MockDb): Locale {
+  return db.settings.uiLanguage === "system" ? db.systemLocale : db.settings.uiLanguage;
+}
+
 /**
- * Rust の list_models と同じく、旧候補は選択中か手元にある時だけ出す (not_downloaded かつ未選択なら除く)。
+ * Rust の list_models と同じ形にする: 旧候補は選択中か手元にある時だけ出し (not_downloaded かつ未選択なら除く)、
+ * 名前・説明は表示言語、推奨は話す言語の先頭、並びは話す言語の順 (旧候補・カタログにない id は末尾)。
  * カタログにない id (テストで足した行) はそのまま出す
  */
-export function visibleModels(models: ModelInfo[]): ModelInfo[] {
-  return models.filter(
-    (m) => !(CATALOG.find((c) => c.id === m.id)?.legacy && m.state === "not_downloaded" && !m.selected),
-  );
+export function presentModels(db: MockDb, models: ModelInfo[] = db.models): ModelInfo[] {
+  const order = MODEL_ORDER[db.settings.speechLanguage] ?? MODEL_ORDER.ja;
+  const texts = MOCK_UI_TEXTS[resolvedLocale(db)].models;
+  const rank = (id: string) => {
+    const i = order.indexOf(id as ModelId);
+    return i < 0 ? order.length : i;
+  };
+  return models
+    .filter((m) => !(CATALOG.find((c) => c.id === m.id)?.legacy && m.state === "not_downloaded" && !m.selected))
+    .map((m) => {
+      const c = CATALOG.find((x) => x.id === m.id);
+      if (!c) return m;
+      // 取得の失敗の文言 (モックの既定) も表示言語にする
+      const failed = Object.values(MOCK_UI_TEXTS).some((x) => x.modelDownloadFailed === m.error);
+      return {
+        ...m,
+        ...texts[c.id],
+        tunedFor: c.tunedFor,
+        recommended: order[0] === c.id,
+        error: failed ? MOCK_UI_TEXTS[resolvedLocale(db)].modelDownloadFailed : m.error,
+      };
+    })
+    .sort((x, y) => rank(x.id) - rank(y.id));
 }
 
 /**
  * Rust と同じ形の ModelInfo を作る。bytesDone は downloading・paused・error の時だけ使う
- * (downloaded は sizeBytes、not_downloaded は 0)。diskBytes は手元のファイルの量
+ * (downloaded は sizeBytes、not_downloaded は 0)。diskBytes は手元のファイルの量。
+ * 名前・説明・推奨は presentModels が表示言語・話す言語に合わせて入れ直す
  */
 export function model(
   id: ModelId,
   state: ModelInfo["state"],
   opts: { selected?: boolean; bytesDone?: number; eta?: number | null; error?: string } = {},
 ): ModelInfo {
-  // legacy は Rust の ModelInfo にない (返す値に含めない)
-  const { name, description, sizeBytes, recommended } = CATALOG.find((m) => m.id === id)!;
-  const c = { id, name, description, sizeBytes, recommended };
+  const { sizeBytes, tunedFor } = CATALOG.find((m) => m.id === id)!;
   const bytesDone =
-    state === "downloaded" ? c.sizeBytes : state === "not_downloaded" ? 0 : (opts.bytesDone ?? 0.9 * GB);
+    state === "downloaded" ? sizeBytes : state === "not_downloaded" ? 0 : (opts.bytesDone ?? 0.9 * GB);
   return {
-    ...c,
+    id,
+    ...MOCK_UI_TEXTS.ja.models[id],
+    tunedFor,
+    sizeBytes,
+    recommended: id === MODEL_ORDER.ja[0],
     selected: opts.selected ?? false,
     state,
     bytesDone,
     etaSeconds: state === "downloading" ? (opts.eta === undefined ? 180 : opts.eta) : null,
-    error: state === "error" ? (opts.error ?? "モデルのダウンロードに失敗しました。ネットワーク接続を確認してください。") : null,
+    error: state === "error" ? (opts.error ?? MOCK_UI_TEXTS.ja.modelDownloadFailed) : null,
     diskBytes: bytesDone,
   };
+}
+
+/** 新規の導入の一覧: 話す言語の推奨を選択中 (state は引数)、他は未取得 */
+export function defaultModels(speech: Locale, selectedState: ModelInfo["state"] = "downloaded"): ModelInfo[] {
+  const order = MODEL_ORDER[speech];
+  return order.map((id, i) => (i === 0 ? model(id, selectedState, { selected: true }) : model(id, "not_downloaded")));
 }
 
 type ItemId = ProvisioningStatus["items"][number]["id"];
@@ -144,9 +174,10 @@ const ORDER: ItemId[] = ["runtime", "model", "verify"];
  */
 export function provisioning(
   stage: ProvisioningStatus["stage"],
-  opts: { modelDone?: number; stoppedAt?: ItemId; eta?: number | null } = {},
+  opts: { modelDone?: number; stoppedAt?: ItemId; eta?: number | null; locale?: Locale } = {},
 ): ProvisioningStatus {
-  const { modelDone = 0.9 * GB, stoppedAt = "model", eta = 180 } = opts;
+  const { modelDone = 0.9 * GB, stoppedAt = "model", eta = 180, locale = "ja" } = opts;
+  const tx = MOCK_UI_TEXTS[locale];
   const current: ItemId | null =
     stage === "runtime" || stage === "model" || stage === "verify"
       ? stage
@@ -171,10 +202,10 @@ export function provisioning(
     error:
       stage === "error"
         ? stoppedAt === "model"
-          ? "モデルのダウンロードに失敗しました。ネットワーク接続を確認してください。"
+          ? tx.modelDownloadFailed
           : stoppedAt === "runtime"
-            ? "実行環境を導入できませんでした。"
-            : "動作確認に失敗しました。"
+            ? tx.runtimeFailed
+            : tx.verifyFailed
         : null,
   };
 }
@@ -203,24 +234,27 @@ export function updateStatus(state: UpdateStatus["state"], opts: Partial<UpdateS
   };
 }
 
-export function createDb(): MockDb {
+export function createDb(locale: Locale): MockDb {
+  const settings = defaultSettings(locale);
+  const sp = MOCK_SPEECH_TEXTS[locale];
   return {
+    systemLocale: locale,
     status: { phase: "off", loadingProgress: null, error: null, seq: 0 },
-    settings: structuredClone(DEFAULT_SETTINGS),
+    settings,
     permissions: { microphone: "granted", accessibility: true },
-    provisioning: provisioning("done"),
-    // 新規の導入: 旧候補 (bf16) は出ない
-    models: [model("ja-8bit", "downloaded", { selected: true })],
-    shortcut: { shortcut: DEFAULT_SETTINGS.shortcut, registered: true, error: null },
+    provisioning: provisioning("done", { locale }),
+    // 新規の導入: 話す言語の推奨を取得済み・選択中。旧候補 (bf16) は出ない
+    models: defaultModels(locale),
+    shortcut: { shortcut: settings.shortcut, registered: true, error: null },
     shortcutSuspended: false,
     // エラー表示の確認用。実機で何が拒否されるかは OS 次第 (他アプリと同じキーでも登録は成功しうる)
     shortcutRejected: ["Cmd+Space", "Ctrl+Space"],
     modelSelectFail: null,
     level: { level: 0.18, threshold: 0.55, speech: false },
     devices: [
-      { id: "builtin", name: "MacBook Pro のマイク", isDefault: true },
+      { id: "builtin", name: sp.builtInMic, isDefault: true },
       { id: "airpods", name: "AirPods Pro", isDefault: false },
-      { id: "usb", name: "USB オーディオ", isDefault: false },
+      { id: "usb", name: sp.usbMic, isDefault: false },
     ],
     anchor: { horizontal: "center", vertical: "bottom" },
     update: updateStatus("idle"),
@@ -230,5 +264,3 @@ export function createDb(): MockDb {
     onListen: null,
   };
 }
-
-

@@ -3,7 +3,8 @@
  * 面 (panel-morph) が切り替え前の大きさから切り替え後の大きさへ変わり、その間 切り替え後の内容は見えないこと、
  * set_panel_size は広げる時は最初に最終の大きさ、縮む時は終わってから 1 回だけ送ることを確認する。
  */
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 const PANEL = { width: 560, height: 260 };
 // 影の余白 (PanelFrame の px-6 pt-4 pb-8) + 待機中のピル (240 x 36)
@@ -58,14 +59,14 @@ function recordToggle(page: Page, name: string): Promise<Frame[]> {
   }, name);
 }
 
-test("panel: OFF → ON は面がピルの大きさへ広がってから待機中を出し、最初に最終の大きさを送る", async ({ page }) => {
+test("panel: OFF → ON は面がピルの大きさへ広がってから待機中を出し、最初に最終の大きさを送る", async ({ page, m }) => {
   await open(page, "off");
-  await expect(page.getByText("音声入力をオン")).toBeVisible();
+  await expect(page.getByText(m.panel.turnOn)).toBeVisible();
   const from = await pillSize(page);
   await expect.poll(async () => (await panelSizes(page)).length).toBeGreaterThan(0);
   const before = (await panelSizes(page)).length;
 
-  const frames = await recordToggle(page, "音声入力をオン");
+  const frames = await recordToggle(page, m.panel.turnOn);
   const morphing = frames.filter((f) => f.morph);
   expect(morphing.length).toBeGreaterThan(2);
   // 面が出ている間は切り替え後の内容を見せない
@@ -77,18 +78,18 @@ test("panel: OFF → ON は面がピルの大きさへ広がってから待機�
   expect(frames.at(-1)!.morph).toBeNull();
   expect(frames.at(-1)!.bodyVisible).toBe(true);
 
-  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
   // 広げる時は最初の 1 回で最終の大きさ (ピルが途中で切れない)
   await expect.poll(async () => (await panelSizes(page)).slice(before)).toEqual([PILL_SIZE]);
 });
 
-test("panel: ON → OFF は面が OFF のピルの大きさへ縮んでから出し、終わってから 1 回だけ送る", async ({ page }) => {
+test("panel: ON → OFF は面が OFF のピルの大きさへ縮んでから出し、終わってから 1 回だけ送る", async ({ page, m }) => {
   await open(page, "idle");
-  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
   await expect.poll(async () => (await panelSizes(page)).at(-1)).toEqual(PILL_SIZE);
   const before = (await panelSizes(page)).length;
 
-  const frames = await recordToggle(page, "音声入力をオフ");
+  const frames = await recordToggle(page, m.panel.turnOff);
   const morphing = frames.filter((f) => f.morph);
   expect(morphing.length).toBeGreaterThan(2);
   expect(morphing.every((f) => !f.bodyVisible)).toBe(true);
@@ -96,7 +97,7 @@ test("panel: ON → OFF は面が OFF のピルの大きさへ縮んでから出
   expect(morphing[0].morph!.width).toBeLessThanOrEqual(240);
   expect(frames.at(-1)!.morph).toBeNull();
 
-  await expect(page.getByText("音声入力をオン")).toBeVisible();
+  await expect(page.getByText(m.panel.turnOn)).toBeVisible();
   const to = await pillSize(page);
   expect(Math.abs(morphing.at(-1)!.morph!.width - to.width)).toBeLessThan(8);
   // 縮み終わってから最終の大きさを 1 回だけ送る (途中の大きさでウィンドウを縮めない)
@@ -105,9 +106,9 @@ test("panel: ON → OFF は面が OFF のピルの大きさへ縮んでから出
     .toEqual([{ width: Math.ceil((24 + to.width + 24) / 2) * 2, height: Math.ceil(16 + to.height + 32) }]);
 });
 
-test("panel: 状態が同じ種類の中で変わる時 (待機中 → 認識中) は面を出さない", async ({ page }) => {
+test("panel: 状態が同じ種類の中で変わる時 (待機中 → 認識中) は面を出さない", async ({ page, m }) => {
   await open(page, "idle");
-  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
   const seen = await page.evaluate(async () => {
     const api = (window as unknown as { __mukuchiMock: { setStatus: (p: object) => void } }).__mukuchiMock;
     api.setStatus({ phase: "speaking" });
@@ -122,20 +123,20 @@ test("panel: 状態が同じ種類の中で変わる時 (待機中 → 認識中
   expect(seen).toBe(false);
 });
 
-test("panel: 動きを減らす設定では面を出さずに切り替える", async ({ page }) => {
+test("panel: 動きを減らす設定では面を出さずに切り替える", async ({ page, m }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await open(page, "off");
-  await expect(page.getByText("音声入力をオン")).toBeVisible();
-  const frames = await page.evaluate(async () => {
+  await expect(page.getByText(m.panel.turnOn)).toBeVisible();
+  const frames = await page.evaluate(async (turnOn) => {
     const morph = document.querySelector<HTMLElement>('[data-testid="panel-morph"]')!;
-    [...document.querySelectorAll("button")].find((b) => b.textContent === "音声入力をオン")!.click();
+    [...document.querySelectorAll("button")].find((b) => b.textContent === turnOn)!.click();
     const out: boolean[] = [];
     for (let i = 0; i < 10; i++) {
       await new Promise((r) => requestAnimationFrame(r));
       out.push(morph.hidden === true);
     }
     return out;
-  });
+  }, m.panel.turnOn);
   expect(frames.every((hidden) => hidden)).toBe(true);
-  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
 });

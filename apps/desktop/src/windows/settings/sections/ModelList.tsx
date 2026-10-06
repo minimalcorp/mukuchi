@@ -1,27 +1,37 @@
 /*
  * モデルの管理 (docs/architecture.md「モデルの管理」)。認識カテゴリの一部。
- * 状態は Rust の ModelInfo[] (list_models + models-changed) をそのまま表示し、
+ * 状態は Rust の ModelInfo[] (list_models + models-changed) をそのまま、受け取った順 (話す言語の並び) で表示し、
  * この画面が持つのは応答待ちの操作 (切り替え・一時停止等) と command の失敗だけ。
+ * 使用中のモデルが話す言語の推奨でなければ、推奨モデルの取得・切り替えを案内する (自動では切り替えない)。
  */
 import { useState, type ReactNode } from "react";
-import { CircleAlert, Download, Pause, Play, RotateCw, X } from "lucide-react";
+import { CircleAlert, Download, Lightbulb, Pause, Play, RotateCw, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Tooltip } from "@/components/ui/tooltip";
 import { formatBytes, formatBytesPair, formatEta } from "@/lib/format";
-import { errorMessage, useModels, useProvisioning } from "@/lib/hooks";
-import { commands, type ModelInfo } from "@/lib/ipc";
+import { errorMessage, useProvisioning } from "@/lib/hooks";
+import { commands, type Locale, type ModelInfo } from "@/lib/ipc";
+import { useI18n } from "@/i18n/context";
 import { cn } from "@/lib/utils";
 import { Card, ConfirmLayout, FieldError, FieldHeading, Row } from "./common";
 
 type Op = "download" | "pause" | "cancel";
 
-const DOWNLOADING_ELSEWHERE = "他のモデルをダウンロード中です。同時にダウンロードできるのは 1 つです";
-const IN_USE = "使用中のモデルは削除できません。他のモデルに切り替えてから削除してください";
-
-export function ModelList() {
-  const { models, error: listError } = useModels();
+export function ModelList({
+  models,
+  listError,
+  speechLanguage,
+}: {
+  /** list_models (useModels)。null は取得前 */
+  models: ModelInfo[] | null;
+  listError: string | null;
+  /** 話す言語。推奨の案内と「日本語向けに調整」の注記に使う */
+  speechLanguage: Locale;
+}) {
+  const { t } = useI18n();
+  const ml = t.settings.models;
   const provisioning = useProvisioning();
   // モデルの操作はセットアップ完了後のみ (Rust も拒む)。取得前 (null) も操作させない
   const ready = provisioning?.stage === "done";
@@ -59,13 +69,14 @@ export function ModelList() {
   };
 
   const downloadingId = models?.find((m) => m.state === "downloading")?.id ?? null;
+  const selected = models?.find((m) => m.selected) ?? null;
+  const recommended = models?.find((m) => m.recommended) ?? null;
+  // セットアップ完了前は操作できないため案内しない (セットアップは推奨モデルを取得する)
+  const suggest = ready && selected && recommended && !selected.recommended ? recommended : null;
 
   return (
     <div className="flex flex-col gap-2.5">
-      <FieldHeading
-        label="モデル"
-        help="文字起こしに使うモデルです。切り替えるとモデルを読み込み直し、その間は音声入力がオフになります"
-      />
+      <FieldHeading label={ml.heading} help={ml.help} />
       {provisioning && !ready ? (
         <div
           data-testid="models-setup-incomplete"
@@ -73,9 +84,20 @@ export function ModelList() {
         >
           <CircleAlert size={16} className="flex-none text-fg-muted" aria-hidden />
           <span className="flex-1 leading-[1.5]">
-            セットアップが完了するまで、モデルの切り替えやダウンロードはできません。
+            {ml.setupIncomplete}
           </span>
         </div>
+      ) : null}
+      {suggest ? (
+        <Recommendation
+          model={suggest}
+          speechLanguage={speechLanguage}
+          switching={switching}
+          busyOp={busy?.id === suggest.id ? busy.op : null}
+          downloadBlocked={downloadingId != null && downloadingId !== suggest.id}
+          onSelect={() => select(suggest)}
+          onDownload={() => run(suggest.id, "download", () => commands.downloadModel(suggest.id))}
+        />
       ) : null}
       {models ? (
         <Card>
@@ -85,6 +107,7 @@ export function ModelList() {
               model={m}
               last={i === models.length - 1}
               alone={models.length === 1}
+              speechLanguage={speechLanguage}
               ready={ready}
               switching={switching}
               busyOp={busy?.id === m.id ? busy.op : null}
@@ -99,10 +122,67 @@ export function ModelList() {
           ))}
         </Card>
       ) : listError ? null : (
-        <p className="m-0 text-sm text-fg-muted">確認しています…</p>
+        <p className="m-0 text-sm text-fg-muted">{t.common.checking}</p>
       )}
       <FieldError message={selectError ?? listError} />
       <DeleteModelDialog model={deleting} onClose={() => setDeleting(null)} />
+    </div>
+  );
+}
+
+/** 話す言語の推奨モデルへの案内。取得済みなら切り替え、未取得なら取得 (取得中は進捗を一覧の行で見せる) */
+function Recommendation({
+  model: m,
+  speechLanguage,
+  switching,
+  busyOp,
+  downloadBlocked,
+  onSelect,
+  onDownload,
+}: {
+  model: ModelInfo;
+  speechLanguage: Locale;
+  switching: string | null;
+  busyOp: Op | null;
+  downloadBlocked: boolean;
+  onSelect: () => void;
+  onDownload: () => void;
+}) {
+  const { t } = useI18n();
+  const ml = t.settings.models;
+  let action: ReactNode = null;
+  if (m.state === "downloaded") {
+    action = (
+      <Button size="sm" variant="primary" disabled={switching != null} loading={switching === m.id} onClick={onSelect}>
+        {ml.switchTo}
+      </Button>
+    );
+  } else if (m.state !== "downloading") {
+    action = (
+      <WithReason reason={downloadBlocked ? ml.downloadingElsewhere : null}>
+        <Button
+          size="sm"
+          iconLeft={m.state === "error" ? RotateCw : m.state === "paused" ? Play : Download}
+          disabled={downloadBlocked || busyOp != null}
+          loading={busyOp === "download"}
+          onClick={onDownload}
+        >
+          {m.state === "error" ? t.common.retry : m.state === "paused" ? t.common.resume : t.common.download}
+        </Button>
+      </WithReason>
+    );
+  }
+  return (
+    <div
+      data-testid="model-recommendation"
+      className="flex items-center gap-2.5 rounded-md bg-tone-info-bg px-3 py-2.5 text-xs text-tone-info-fg"
+    >
+      <Lightbulb size={16} className="flex-none" aria-hidden />
+      <span className="flex flex-1 flex-col gap-0.5 leading-[1.5]">
+        <span>{ml.recommendation(t.languageName[speechLanguage] ?? speechLanguage, m.name)}</span>
+        {m.state === "downloading" ? <span>{ml.recommendationDownloading}</span> : null}
+      </span>
+      {action}
     </div>
   );
 }
@@ -111,6 +191,7 @@ function ModelRow({
   model: m,
   last,
   alone,
+  speechLanguage,
   ready,
   switching,
   busyOp,
@@ -126,6 +207,7 @@ function ModelRow({
   last: boolean;
   /** 一覧がこの1件だけ (切り替え先がない) */
   alone: boolean;
+  speechLanguage: Locale;
   ready: boolean;
   switching: string | null;
   busyOp: Op | null;
@@ -138,27 +220,29 @@ function ModelRow({
   onCancel: () => void;
   onDelete: () => void;
 }) {
+  const { t } = useI18n();
+  const ml = t.settings.models;
   const busy = busyOp != null;
   const actions: ReactNode[] = [];
 
   if (switching === m.id) {
     actions.push(
       <Button key="switching" size="sm" loading>
-        切り替えています…
+        {ml.switching}
       </Button>,
     );
   } else if (m.selected) {
     actions.push(
       <Badge key="in-use" tone="success" dot>
-        使用中
+        {ml.inUse}
       </Badge>,
     );
     // 切り替え先がない時は「切り替えてから削除」の案内が成り立たないため、削除ボタン自体を出さない
     if (m.state === "downloaded" && !alone) {
       actions.push(
-        <WithReason key="delete" reason={IN_USE}>
+        <WithReason key="delete" reason={ml.inUseCantDelete}>
           <Button size="sm" disabled>
-            削除
+            {t.common.delete}
           </Button>
         </WithReason>,
       );
@@ -167,34 +251,34 @@ function ModelRow({
     const disabled = !ready || switching != null;
     actions.push(
       <Button key="select" size="sm" variant="primary" disabled={disabled} onClick={onSelect}>
-        使う
+        {ml.use}
       </Button>,
       <Button key="delete" size="sm" disabled={disabled} onClick={onDelete}>
-        削除
+        {t.common.delete}
       </Button>,
     );
   }
 
   if (m.state === "not_downloaded") {
     actions.push(
-      <WithReason key="download" reason={ready && downloadBlocked ? DOWNLOADING_ELSEWHERE : null}>
+      <WithReason key="download" reason={ready && downloadBlocked ? ml.downloadingElsewhere : null}>
         <Button size="sm" iconLeft={Download} disabled={!ready || downloadBlocked} loading={busyOp === "download"} onClick={onDownload}>
-          ダウンロード
+          {t.common.download}
         </Button>
       </WithReason>,
     );
   } else if (m.state === "downloading") {
     actions.push(
       <Button key="pause" size="sm" iconLeft={Pause} disabled={!ready || busy} loading={busyOp === "pause"} onClick={onPause}>
-        一時停止
+        {t.common.pause}
       </Button>,
       <Button key="cancel" size="sm" iconLeft={X} disabled={!ready || busy} loading={busyOp === "cancel"} onClick={onCancel}>
-        中止
+        {ml.cancel}
       </Button>,
     );
   } else if (m.state === "paused" || m.state === "error") {
     actions.push(
-      <WithReason key="resume" reason={ready && downloadBlocked ? DOWNLOADING_ELSEWHERE : null}>
+      <WithReason key="resume" reason={ready && downloadBlocked ? ml.downloadingElsewhere : null}>
         <Button
           size="sm"
           iconLeft={m.state === "error" ? RotateCw : Play}
@@ -202,21 +286,27 @@ function ModelRow({
           loading={busyOp === "download"}
           onClick={onDownload}
         >
-          {m.state === "error" ? "再試行" : "再開"}
+          {m.state === "error" ? t.common.retry : t.common.resume}
         </Button>
       </WithReason>,
       <Button key="cancel" size="sm" iconLeft={X} disabled={!ready || busy} loading={busyOp === "cancel"} onClick={onCancel}>
-        中止
+        {ml.cancel}
       </Button>,
     );
   }
 
+  // 追加学習した言語が話す言語と違う時に添える (例: 英語を話す時の日本語向けモデル)
+  const tunedElsewhere = m.tunedFor != null && m.tunedFor !== speechLanguage;
+
   return (
     <Row last={last} className="items-start">
       <div data-testid={`model-${m.id}`} data-state={m.state} className="flex min-w-0 flex-1 flex-col gap-1">
-        <div className="flex items-center gap-1.5 text-sm leading-[1.4] font-medium">
+        <div className="flex flex-wrap items-center gap-1.5 text-sm leading-[1.4] font-medium">
           {m.name}
-          {m.recommended ? <Badge tone="primary">推奨</Badge> : null}
+          {m.recommended ? <Badge tone="primary">{ml.recommended}</Badge> : null}
+          {tunedElsewhere && m.tunedFor ? (
+            <Badge data-testid={`model-${m.id}-tuned`}>{ml.tunedFor(t.languageName[m.tunedFor] ?? m.tunedFor)}</Badge>
+          ) : null}
         </div>
         <span className="text-xs leading-[1.5] text-fg-muted">{m.description}</span>
         <ModelProgress model={m} />
@@ -229,30 +319,35 @@ function ModelRow({
 
 /** 容量と取得の状態。取得途中は進捗バーを出す */
 function ModelProgress({ model: m }: { model: ModelInfo }) {
+  const { locale, t } = useI18n();
+  const ml = t.settings.models;
+  const sep = t.common.separator;
   if (m.state === "not_downloaded" || m.state === "downloaded") {
     // 取得済みはディスク上の使用量、未取得は取得する量
     const bytes = m.state === "downloaded" ? m.diskBytes : m.sizeBytes;
-    const label = m.state === "downloaded" ? "ダウンロード済み" : "未ダウンロード";
+    const label = m.state === "downloaded" ? ml.downloaded : ml.notDownloaded;
     return (
       <span className="tabular text-xs text-fg-muted">
-        {label} ・ {formatBytes(bytes)}
+        {label}
+        {sep}
+        {formatBytes(bytes, locale)}
       </span>
     );
   }
   const pct = m.sizeBytes > 0 ? Math.min(100, (m.bytesDone / m.sizeBytes) * 100) : 0;
-  const pair = formatBytesPair(m.bytesDone, m.sizeBytes);
+  const pair = formatBytesPair(m.bytesDone, m.sizeBytes, locale);
   const text =
     m.state === "downloading"
-      ? `${pair} ・ ${m.etaSeconds != null ? formatEta(m.etaSeconds) : "残り時間を計算しています"}`
+      ? `${pair}${sep}${m.etaSeconds != null ? formatEta(m.etaSeconds, t) : ml.etaCalculating}`
       : m.state === "paused"
-        ? `一時停止中 ・ ${pair}`
-        : `失敗 ・ ${pair}`;
+        ? `${ml.paused}${sep}${pair}`
+        : `${ml.failed}${sep}${pair}`;
   return (
     <div className="mt-0.5 flex flex-col gap-1">
       <div
         className="h-1.5 rounded-[3px] bg-meter-track"
         role="progressbar"
-        aria-label={`${m.name} のダウンロード`}
+        aria-label={ml.progress(m.name)}
         aria-valuenow={Math.round(pct)}
         aria-valuemin={0}
         aria-valuemax={100}
@@ -280,6 +375,7 @@ function WithReason({ reason, children }: { reason: string | null; children: Rea
 }
 
 function DeleteModelDialog({ model, onClose }: { model: ModelInfo | null; onClose: () => void }) {
+  const { locale, t } = useI18n();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const close = () => {
@@ -291,13 +387,13 @@ function DeleteModelDialog({ model, onClose }: { model: ModelInfo | null; onClos
       <DialogContent>
         {model ? (
           <ConfirmLayout
-            title="モデルを削除しますか？"
-            description={`「${model.name}」（${formatBytes(model.diskBytes)}）を削除します。再び使うときはダウンロードし直します。`}
+            title={t.settings.models.deleteTitle}
+            description={t.settings.models.deleteDescription(model.name, formatBytes(model.diskBytes, locale))}
             error={error}
             actions={
               <>
                 <Button disabled={busy} onClick={close}>
-                  キャンセル
+                  {t.common.cancel}
                 </Button>
                 <Button
                   variant="danger"
@@ -311,7 +407,7 @@ function DeleteModelDialog({ model, onClose }: { model: ModelInfo | null; onClos
                       .finally(() => setBusy(false));
                   }}
                 >
-                  削除
+                  {t.common.delete}
                 </Button>
               </>
             }

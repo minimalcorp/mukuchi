@@ -6,6 +6,8 @@
     "moduleResolution": "bundler",
     "types": ["node"],
     "skipLibCheck": true,
+    // e2e が読む辞書・モックの文言 (src/i18n・src/mock/texts.ts) の型の import 用
+    "paths": { "@/*": ["./src/*"] },
     "noEmit": true,
     "strict": true,
     "noUnusedLocals": true,

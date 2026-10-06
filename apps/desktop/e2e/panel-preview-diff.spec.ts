@@ -2,7 +2,8 @@
  * プレビューの差分表示: 前回の途中表示から挿入 (緑)・書き換え (黄) された語だけを一瞬色付けし、通常の文字色へ戻す。
  * 末尾への普通の追加と消えた文字は色付け・表示しない。確定結果への置き換えも同じ差分で表示する。
  */
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
+import { expect, test, type Messages } from "./fixtures";
 import { diffPreview } from "../src/windows/panel/preview-diff";
 
 const PANEL = { width: 560, height: 260 };
@@ -24,14 +25,14 @@ const COLORS = {
   dark: { insert: "rgb(95, 211, 160)", replace: "rgb(242, 193, 78)", strong: "rgb(245, 247, 250)" },
 };
 
-async function open(page: Page, scheme: "light" | "dark" = "light") {
+async function open(page: Page, m: Messages, scheme: "light" | "dark" = "light") {
   await page.setViewportSize(PANEL);
   await page.emulateMedia({ colorScheme: scheme });
   await page.goto("/?window=panel&mock=idle");
   await page.waitForFunction(() => (document.getElementById("root")?.childElementCount ?? 0) > 0);
   await page.evaluate(() => document.fonts.ready);
   await page.waitForFunction(() => "__mukuchiMock" in window);
-  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
 }
 
 async function mock(page: Page, fn: string) {
@@ -82,8 +83,8 @@ test("preview-diff: 単語単位で挿入・書き換え・末尾の追加を分
   expect(diffPreview("あいう", "あいう")).toEqual([{ text: "あいう", kind: "same" }]);
 });
 
-test("panel: 途中表示・確定のたびに前回からの差分だけを色付けする", async ({ page }) => {
-  await open(page);
+test("panel: 途中表示・確定のたびに前回からの差分だけを色付けする", async ({ page, m }) => {
+  await open(page, m);
   const line = page.getByTestId("preview").locator("p").last();
   await mock(page, `api.setStatus({ phase: "speaking" }); api.started(1);`);
   for (let k = 0; k < STEPS.length; k++) {
@@ -104,8 +105,8 @@ test("panel: 途中表示・確定のたびに前回からの差分だけを色�
   await expect(page.locator(".text-fg-unstable")).toHaveCount(0);
 });
 
-test("panel: 色付けは待ってから通常の文字色へ段階的に戻る (動きを減らす設定では一度に戻る)", async ({ page }) => {
-  await open(page);
+test("panel: 色付けは待ってから通常の文字色へ段階的に戻る (動きを減らす設定では一度に戻る)", async ({ page, m }) => {
+  await open(page, m);
   await mock(
     page,
     `api.setStatus({ phase: "speaking" }); api.started(1);
@@ -136,8 +137,8 @@ test("panel: 色付けは待ってから通常の文字色へ段階的に戻る 
 });
 
 for (const scheme of ["light", "dark"] as const) {
-  test(`panel: 差分の色 (${scheme})`, async ({ page }) => {
-    await open(page, scheme);
+  test(`panel: 差分の色 (${scheme})`, async ({ page, m, shot }) => {
+    await open(page, m, scheme);
     // 挿入と書き換えが同時に出る途中表示
     await mock(
       page,
@@ -156,6 +157,6 @@ for (const scheme of ["light", "dark"] as const) {
     await page.evaluate(() =>
       Promise.all(document.getAnimations().filter((a) => a.playState === "running").map((a) => a.finished)),
     );
-    await page.screenshot({ path: `e2e/screenshots/panel-preview-diff-${scheme}.png` });
+    await page.screenshot({ path: shot(`panel-preview-diff-${scheme}`) });
   });
 }

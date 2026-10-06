@@ -1,0 +1,6 @@
+/*
+  Info.plist の権限の説明文 (日本語)。キーが無い・ファイルが読めない時は Info.plist 本体の値になる。
+  UTF-8 で置く: Tauri の bundle.resources は変換せずに複写する。CFBundle は UTF-8 の .strings を読める
+  (Apple の Resource Programming Guide は UTF-8 を推奨)。git で差分を見られるようにするためでもある。
+*/
+"NSMicrophoneUsageDescription" = "話した言葉を文字起こしして入力するためにマイクを使用します。";

@@ -38,6 +38,8 @@ import { env } from "@/lib/env";
 import { errorActionView } from "@/lib/error-actions";
 import { usePanelDrag } from "@/lib/panel-drag";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n/context";
+import type { Messages } from "@/i18n/context";
 import { usePanelModel, type PanelItem } from "./usePanelModel";
 import type { DiffKind } from "./preview-diff";
 
@@ -267,6 +269,7 @@ function PanelFrame({ children }: { children: ReactNode }) {
 /* ---------- OFF ---------- */
 
 function OffPill() {
+  const { t } = useI18n();
   const drag = usePanelDrag();
   return (
     // ドラッグはピル全体 (ボタンの上も含む) で行う。動かさずに離した時だけボタンの操作になる
@@ -281,7 +284,7 @@ function OffPill() {
         className="press flex h-7 cursor-pointer items-center gap-1.5 rounded-full border-0 bg-transparent pr-3 pl-2.5 text-xs font-medium text-fg-strong transition-control hover:bg-surface-active"
       >
         <MicOff size={16} className="text-fg-muted" aria-hidden />
-        音声入力をオン
+        {t.panel.turnOn}
       </button>
     </div>
   );
@@ -316,35 +319,38 @@ function StatusPill({ icon: Icon, iconClass, spin, action, children }: {
 }
 
 function LoadingPill({ progress }: { progress: number | null }) {
+  const { t } = useI18n();
   // 進捗が取れない場合は % を出さない (不定表示)
   const pct = progress == null ? "" : ` ${Math.round(progress * 100)}%`;
   return (
     <StatusPill icon={LoaderCircle} iconClass="text-cyan-500" spin>
-      モデルを読み込んでいます…{pct}
+      {t.panel.loadingModel}
+      {pct}
     </StatusPill>
   );
 }
 
-// デザイン 06 の短い表示。未定義のコード (microphone_denied / insert_failed) は近いものに合わせた
-const ERROR_PILL: Record<AppError["code"], { icon: LucideIcon; iconClass: string; short: string }> = {
-  accessibility_denied: { icon: ShieldAlert, iconClass: "text-red-500", short: "アクセシビリティが未許可です" },
-  microphone_denied: { icon: ShieldAlert, iconClass: "text-red-500", short: "マイクが未許可です" },
-  asr_stopped: { icon: ServerOff, iconClass: "text-red-500", short: "文字起こしが停止しました" },
-  microphone_missing: { icon: MicOff, iconClass: "text-amber-500", short: "マイクが見つかりません" },
-  runtime_missing: { icon: PackageX, iconClass: "text-amber-500", short: "モデルがありません" },
-  insert_failed: { icon: CircleAlert, iconClass: "text-red-500", short: "入力できませんでした" },
-  vad_failed: { icon: CircleAlert, iconClass: "text-red-500", short: "発話検出を開始できません" },
+// デザイン 06 の短い表示 (文言は辞書の panel.errors)。未定義のコード (microphone_denied / insert_failed) は近いものに合わせた
+const ERROR_PILL: Record<AppError["code"], { icon: LucideIcon; iconClass: string }> = {
+  accessibility_denied: { icon: ShieldAlert, iconClass: "text-red-500" },
+  microphone_denied: { icon: ShieldAlert, iconClass: "text-red-500" },
+  asr_stopped: { icon: ServerOff, iconClass: "text-red-500" },
+  microphone_missing: { icon: MicOff, iconClass: "text-amber-500" },
+  runtime_missing: { icon: PackageX, iconClass: "text-amber-500" },
+  insert_failed: { icon: CircleAlert, iconClass: "text-red-500" },
+  vad_failed: { icon: CircleAlert, iconClass: "text-red-500" },
 };
 
 // Rust が新しいエラーコードを足した場合 (フロントが未対応) は Rust の表示用メッセージをそのまま出す
-function errorPill(error: AppError) {
+function errorPill(error: AppError, t: Messages) {
   return Object.hasOwn(ERROR_PILL, error.code)
-    ? ERROR_PILL[error.code]
+    ? { ...ERROR_PILL[error.code], short: t.panel.errors[error.code] }
     : { icon: CircleAlert, iconClass: "text-red-500", short: error.message };
 }
 
 function ErrorPill({ error }: { error: AppError }) {
-  const e = errorPill(error);
+  const { t } = useI18n();
+  const e = errorPill(error, t);
   return (
     <StatusPill icon={e.icon} iconClass={e.iconClass} action={<ErrorActionButton error={error} />}>
       {e.short}
@@ -356,7 +362,8 @@ function ErrorPill({ error }: { error: AppError }) {
  * 復旧操作 (メニューバーの復旧項目と同じ)。デザイン 06 のピルは文言のみだが、パネルからも直接復旧できるようにした。
  */
 function ErrorActionButton({ error }: { error: AppError }) {
-  const action = errorActionView(error.action);
+  const { t } = useI18n();
+  const action = errorActionView(error.action, t);
   if (!action) return null;
   const Icon = action.icon;
   return (
@@ -492,11 +499,12 @@ function ListeningPanel({ anchor, isOn, expanded, items }: {
 }
 
 function ToggleButton({ isOn, className }: { isOn: boolean; className?: string }) {
+  const { t } = useI18n();
   if (!isOn) {
     return (
       <button
         type="button"
-        aria-label="音声入力をオン"
+        aria-label={t.panel.turnOn}
         onClick={() => runCommand(commands.setListening(true))}
         className={cn(
           "press flex size-7 flex-none cursor-pointer items-center justify-center rounded-full border-0 bg-surface-active text-fg-muted transition-control",
@@ -510,7 +518,7 @@ function ToggleButton({ isOn, className }: { isOn: boolean; className?: string }
   return (
     <button
       type="button"
-      aria-label="音声入力をオフ"
+      aria-label={t.panel.turnOff}
       onClick={() => runCommand(commands.setListening(false))}
       className={cn(
         "press flex size-7 flex-none cursor-pointer items-center justify-center rounded-full border-0 bg-action-primary text-gray-0 transition-control hover:bg-action-primary-hover active:bg-action-primary-active",
@@ -544,6 +552,7 @@ function compactState(status: AppStatus, items: PanelItem[]): CompactState {
  * エラーは右上の赤い点のみ (内容と復旧は右クリックメニューに出る)。ドラッグ・右クリックは通常の表示と同じ
  */
 function CompactPanel({ status, items }: { status: AppStatus; items: PanelItem[] }) {
+  const { t } = useI18n();
   const drag = usePanelDrag();
   const state = compactState(status, items);
   const isOn = ON_PHASES.includes(status.phase);
@@ -560,7 +569,7 @@ function CompactPanel({ status, items }: { status: AppStatus; items: PanelItem[]
       {state === "loading" ? (
         // 読み込み中は通常の表示と同じく切り替えを出さない
         <span className="relative flex size-7 items-center justify-center rounded-full bg-surface-active text-fg-muted">
-          <MicOff size={14} aria-label="モデルを読み込んでいます" />
+          <MicOff size={14} aria-label={t.panel.loadingModelShort} />
         </span>
       ) : (
         // リング (absolute) より上に描くため relative にする
@@ -636,12 +645,12 @@ function PanelLevelMeter({ active }: { active: boolean }) {
 // iconOnly: 文言は読み上げ用にだけ持ち、アイコンだけを表示する
 type StatusView = { icon: LucideIcon | null; className: string; label: string; spin?: boolean; iconOnly?: boolean };
 
-function statusView(items: PanelItem[]): StatusView | null {
+function statusView(items: PanelItem[], t: Messages): StatusView | null {
   if (items.some((it) => it.stage === "speaking")) {
-    return { icon: AudioLines, className: "text-fg-listening", label: "認識中" };
+    return { icon: AudioLines, className: "text-fg-listening", label: t.panel.speaking };
   }
   if (items.some((it) => it.stage === "finalizing")) {
-    return { icon: LoaderCircle, className: "text-fg-muted", label: "確定しています…", spin: true };
+    return { icon: LoaderCircle, className: "text-fg-muted", label: t.panel.finalizing, spin: true };
   }
   const last = [...items].reverse().find((it) => it.result);
   const r = last?.result;
@@ -649,21 +658,22 @@ function statusView(items: PanelItem[]): StatusView | null {
   switch (r.kind) {
     case "inserted":
       // 入力先はフォーカスで分かるためアプリ名は出さず、成功マークだけにする
-      return { icon: CircleCheck, className: "text-fg-success", label: "入力しました", iconOnly: true };
+      return { icon: CircleCheck, className: "text-fg-success", label: t.panel.inserted, iconOnly: true };
     case "command":
-      return { icon: CornerDownLeft, className: "text-fg-command", label: "音声コマンド" };
+      return { icon: CornerDownLeft, className: "text-fg-command", label: t.panel.command };
     case "skipped_excluded":
       // 入力しなかった理由。状態の欄 (約 370px から メーターの最小幅を除いた分) に収まる短さにする
-      return { icon: TriangleAlert, className: "text-fg-warning", label: `${r.appName} は入力しない設定です` };
+      return { icon: TriangleAlert, className: "text-fg-warning", label: t.panel.excluded(r.appName) };
     case "failed":
       return { icon: CircleAlert, className: "text-fg-danger", label: r.error.message };
   }
 }
 
 function StatusLabel({ expanded, items }: { expanded: boolean; items: PanelItem[] }) {
-  const view = expanded ? statusView(items) : null;
+  const { t } = useI18n();
+  const view = expanded ? statusView(items, t) : null;
   if (!view) {
-    return <span className="text-2xs leading-[1.6] whitespace-nowrap text-fg-muted">待機中</span>;
+    return <span className="text-2xs leading-[1.6] whitespace-nowrap text-fg-muted">{t.panel.idle}</span>;
   }
   const Icon = view.icon;
   return (
@@ -703,6 +713,7 @@ const DIFF_CLASS: Record<Exclude<DiffKind, "same">, string> = {
 };
 
 function PreviewItem({ item }: { item: PanelItem }) {
+  const { t } = useI18n();
   const r = item.result;
   return (
     <div className="flex flex-none flex-col gap-1">
@@ -721,8 +732,13 @@ function PreviewItem({ item }: { item: PanelItem }) {
       {r?.kind === "command" ? (
         <div className="flex items-center gap-1.5 text-xs leading-[1.6] text-fg-muted">
           <CornerDownLeft size={14} aria-hidden />
-          <kbd className="rounded-sm border border-line-strong px-1.5 py-px font-mono text-xs text-fg-strong">{r.key}</kbd>
-          を送信しました
+          <span>
+            {t.panel.commandSent(
+              <kbd className="rounded-sm border border-line-strong px-1.5 py-px font-mono text-xs text-fg-strong">
+                {r.key}
+              </kbd>,
+            )}
+          </span>
         </div>
       ) : null}
     </div>

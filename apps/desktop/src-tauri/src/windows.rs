@@ -24,6 +24,7 @@ use tauri::{
 use tauri_nspanel::{CollectionBehavior, ManagerExt, PanelBuilder, PanelLevel, StyleMask};
 
 use crate::core::Core;
+use crate::i18n::Msg;
 use crate::macos::{activation, screen};
 use crate::settings::PanelPosition;
 use geometry::{PanelAnchor, Point, Rect};
@@ -557,7 +558,7 @@ pub fn open_settings(app: &AppHandle, category: Option<SettingsCategory>) -> Res
         None => "index.html".into(),
     };
     let w = WebviewWindowBuilder::new(app, SETTINGS, WebviewUrl::App(url.into()))
-        .title("mukuchi 設定")
+        .title(Msg::WindowSettings.to_string())
         .inner_size(760.0, 560.0)
         .resizable(false)
         .maximizable(false)
@@ -576,7 +577,7 @@ pub fn open_setup(app: &AppHandle) -> Result<()> {
         return show_regular(app, &w);
     }
     let w = WebviewWindowBuilder::new(app, SETUP, WebviewUrl::App("index.html".into()))
-        .title("mukuchi セットアップ")
+        .title(Msg::WindowSetup.to_string())
         .inner_size(560.0, 440.0)
         .resizable(false)
         .maximizable(false)
@@ -604,6 +605,18 @@ pub fn open_on_relaunch(app: &AppHandle) {
     };
     if let Err(e) = result {
         log::error!("再起動時に画面を開けません: {e:#}");
+    }
+}
+
+/// 表示言語の変更時: 開いているウィンドウのタイトルを今の表示言語にする
+/// (タイトルは隠しているが、ウィンドウの一覧・アクセシビリティに出るため)
+pub fn relocalize_titles(app: &AppHandle) {
+    for (label, msg) in [(SETTINGS, Msg::WindowSettings), (SETUP, Msg::WindowSetup)] {
+        if let Some(w) = app.get_webview_window(label) {
+            if let Err(e) = w.set_title(&msg.to_string()) {
+                log::warn!("ウィンドウのタイトルを変えられません ({label}): {e}");
+            }
+        }
     }
 }
 

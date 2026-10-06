@@ -1,8 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Tauri CLI が生成する Info.plist に重ねる値。
+  ローカライズ: 対応言語 (ja・en) を宣言し、翻訳は infoplist/{ja,en}.lproj/InfoPlist.strings
+  (tauri.conf.json の bundle.resources で Contents/Resources/ に同梱)。ここの値は .strings が使えない時の既定で、
+  en.lproj と同じ英語にする (アプリの表示言語の「ja・en に当たらなければ en」と揃えるため)。
+  宣言した言語は WebView (navigator.language)・AppKit の標準 UI (右クリックメニュー等) の言語にも効く。
+-->
 <plist version="1.0">
 <dict>
+	<!-- 既定の言語。macOS の優先言語が ja・en のどちらにも当たらない時の行き先なので en にする
+	     (アプリの表示言語の解決と同じ。ja にすると fr 等の Mac で権限の説明文・AppKit の標準 UI だけ日本語になりうる) -->
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>ja</string>
+		<string>en</string>
+	</array>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>話した言葉を文字起こしして入力するためにマイクを使用します。</string>
+	<string>mukuchi uses the microphone to transcribe what you say and type it for you.</string>
 </dict>
 </plist>

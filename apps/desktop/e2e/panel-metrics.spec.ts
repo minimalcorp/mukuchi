@@ -3,7 +3,8 @@
  * (角丸・ボタン・メーターの太さ・余白・行の高さ・カード下端からボタンまでの距離)。
  * メーターの長さはカードの幅に合わせて伸びるので比べない。
  */
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 const PANEL = { width: 560, height: 360 };
 

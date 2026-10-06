@@ -11,6 +11,7 @@ import "@fontsource/ibm-plex-mono/500.css";
 import "./styles/index.css";
 import { env, isWindowKind, type WindowKind } from "./lib/env";
 import { TooltipProvider } from "./components/ui/tooltip";
+import { I18nProvider } from "./i18n/provider";
 
 async function boot() {
   const params = new URLSearchParams(window.location.search);
@@ -38,9 +39,11 @@ async function boot() {
 
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
-      <TooltipProvider>
-        <Screen />
-      </TooltipProvider>
+      <I18nProvider>
+        <TooltipProvider>
+          <Screen />
+        </TooltipProvider>
+      </I18nProvider>
     </React.StrictMode>,
   );
 }

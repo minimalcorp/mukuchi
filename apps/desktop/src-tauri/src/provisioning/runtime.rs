@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use super::{failed, BoxFuture, Cancel, RuntimeStep, StepError};
 use crate::asr_process::open_log;
+use crate::i18n::Msg;
 use crate::paths::{resolve_existing, DataPaths, Resources};
 
 /// uv に引き継ぐ環境変数 (他は渡さない)。プロキシは大文字・小文字の両方を読むツールがあるため両方渡す。
@@ -86,7 +87,7 @@ impl UvRuntime {
         log::info!("uv {}", args.join(" "));
         let mut child = cmd.spawn().map_err(|e| {
             failed(
-                "実行環境の導入ツール (uv) を起動できません",
+                Msg::UvLaunchFailed,
                 anyhow!(e).context(format!("{}", self.resources.uv.display())),
             )
         })?;
@@ -112,8 +113,7 @@ impl UvRuntime {
     }
 }
 
-const RUNTIME_ERROR: &str =
-    "実行環境の導入に失敗しました。ネットワーク接続を確認して再試行してください";
+const RUNTIME_ERROR: Msg = Msg::RuntimeInstallFailed;
 
 impl RuntimeStep for UvRuntime {
     fn version(&self) -> Option<String> {
@@ -139,7 +139,7 @@ impl RuntimeStep for UvRuntime {
         Box::pin(async move {
             if !this.resources.uv.is_file() {
                 return Err(failed(
-                    "実行環境の導入ツール (uv) が見つかりません。アプリを入れ直してください",
+                    Msg::UvMissing,
                     anyhow!("{}", this.resources.uv.display()),
                 ));
             }
@@ -147,12 +147,7 @@ impl RuntimeStep for UvRuntime {
             tauri::async_runtime::spawn_blocking(move || copy_asr_server(&src, &dst))
                 .await
                 .map_err(|e| failed(RUNTIME_ERROR, anyhow!("{e}")))?
-                .map_err(|e| {
-                    failed(
-                        "文字起こしサーバーの同梱ファイルを展開できません。アプリを入れ直してください",
-                        e,
-                    )
-                })?;
+                .map_err(|e| failed(Msg::AsrServerFilesFailed, e))?;
             // .python-version の版を python/ に入れる。引数なしの `uv python install` は
             // .python-version があっても最新版も入れる (uv 0.12.17 で確認) ため版を明示する
             let version = std::fs::read_to_string(this.paths.asr_server().join(".python-version"))

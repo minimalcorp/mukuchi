@@ -2,7 +2,8 @@
  * panel のアンカー (get_panel_anchor / panel-anchor)。描画内容をアンカーの辺・角に寄せ、
  * 展開・収縮がその辺・角から始まること、set_panel_size の値はアンカーによらず同じことを確認する。
  */
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, test, type Messages } from "./fixtures";
 
 const PANEL = { width: 560, height: 260 };
 // 影の余白 (PanelFrame の px-6 pt-4 pb-8)
@@ -53,8 +54,8 @@ function anchoredEdges(r: Rect, vertical: Vertical, horizontal: Horizontal) {
 }
 
 /** ピル → 展開までの set_panel_size の最終値 (ピル・展開) */
-async function pillAndExpandedSizes(page: Page): Promise<[Size | undefined, Size | undefined]> {
-  await expect(page.getByText("待機中")).toBeVisible();
+async function pillAndExpandedSizes(page: Page, m: Messages): Promise<[Size | undefined, Size | undefined]> {
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
   await expect.poll(async () => (await panelSizes(page)).length).toBeGreaterThan(0);
   const pill = (await panelSizes(page)).at(-1);
   await mock(page, SPEAK);
@@ -66,10 +67,10 @@ async function pillAndExpandedSizes(page: Page): Promise<[Size | undefined, Size
 for (const { vertical, horizontal } of ANCHORS) {
   const name = `${vertical}-${horizontal}`;
 
-  test(`panel anchor ${name}: 描画内容をアンカーに寄せ、展開はアンカーの辺・角から広がる`, async ({ page }) => {
+  test(`panel anchor ${name}: 描画内容をアンカーに寄せ、展開はアンカーの辺・角から広がる`, async ({ page, m }) => {
     await open(page, `window=panel&mock=idle&anchor=${name}`);
     await expect(page.locator("[data-anchor]")).toHaveAttribute("data-anchor", name);
-    await expect(page.getByText("待機中")).toBeVisible();
+    await expect(page.getByText(m.panel.idle)).toBeVisible();
 
     const check = async () => {
       const frame = await rect(page, "panel-frame");
@@ -125,11 +126,11 @@ for (const { vertical, horizontal } of ANCHORS) {
     expect(preview.bottom).toBeLessThanOrEqual(meter.top);
   });
 
-  test(`panel anchor ${name}: set_panel_size の値はアンカーによらない`, async ({ page }) => {
+  test(`panel anchor ${name}: set_panel_size の値はアンカーによらない`, async ({ page, m }) => {
     await open(page, "window=panel&mock=idle");
-    const base = await pillAndExpandedSizes(page);
+    const base = await pillAndExpandedSizes(page, m);
     await open(page, `window=panel&mock=idle&anchor=${name}`);
-    expect(await pillAndExpandedSizes(page)).toEqual(base);
+    expect(await pillAndExpandedSizes(page, m)).toEqual(base);
   });
 }
 
@@ -144,12 +145,12 @@ test("panel anchor: panel-anchor で配置を切り替える", async ({ page }) 
   expect(frame.top).toBeCloseTo(0, 0);
 });
 
-test("panel anchor: 購読後に届いた panel-anchor を遅れて届く get_panel_anchor の応答で上書きしない", async ({ page }) => {
+test("panel anchor: 購読後に届いた panel-anchor を遅れて届く get_panel_anchor の応答で上書きしない", async ({ page, m }) => {
   // 応答を返すタイミングを clock で決める (実時間だと遅い CI では変更より先に応答が届き、確認したい順序にならない)
   await page.clock.install({ time: 0 });
   await page.clock.pauseAt(1000);
   await open(page, "window=panel&mock=idle&anchor=bottom-right&slow=get_panel_anchor");
-  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(() =>
@@ -166,11 +167,11 @@ test("panel anchor: 購読後に届いた panel-anchor を遅れて届く get_pa
 });
 
 for (const name of ["top-left", "bottom-right"]) {
-  test(`panel anchor ${name}: 展開表示のスクリーンショット`, async ({ page }) => {
+  test(`panel anchor ${name}: 展開表示のスクリーンショット`, async ({ page, m, shot }) => {
     await open(page, `window=panel&mock=speaking&anchor=${name}`);
-    await expect(page.getByText("認識中")).toBeVisible();
+    await expect(page.getByText(m.panel.speaking)).toBeVisible();
     await expect(page.getByTestId("panel-card")).toHaveCSS("width", "360px");
     await page.waitForTimeout(300);
-    await page.screenshot({ path: `e2e/screenshots/panel-anchor-${name}.png` });
+    await page.screenshot({ path: shot(`panel-anchor-${name}`) });
   });
 }

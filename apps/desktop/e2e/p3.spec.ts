@@ -457,7 +457,10 @@ test("settings: 認識のヒントの文字数は Unicode スカラー値で数�
 });
 
 test("settings: 認識のヒントは待ち時間内にページが隠れても保存し、変換中の値は送らない", async ({ page, m }) => {
+  // 待ち時間 (800ms) を実時間で過ごすと、遅い CI では pagehide の前に保存されてしまうため時計を止める
+  await page.clock.install();
   await open(page, "window=settings&mock=default&category=recognition", SETTINGS);
+  await pauseClock(page);
   const field = page.getByLabel(m.settings.recognition.context);
   await field.fill("閉じる直前の入力");
   // 変換中の入力 (確定前) を再現する。React の onChange に届くよう、ネイティブの setter で値を変えてから input を送る

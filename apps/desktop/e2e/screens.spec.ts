@@ -330,6 +330,9 @@ test("panel: 入力できた時は成功マークだけを出す", async ({ page
 async function resultDuration(page: Page, turnOn: string, result: string, visible: () => Promise<void>) {
   await open(page, { query: "window=panel&mock=default", viewport: PANEL });
   await expect(page.getByRole("button", { name: turnOn })).toBeVisible();
+  // 結果を送る直前から測る。表示されたのを確かめてから測ると、遅い CI では確認が遅れた分だけ短く出る
+  // (表示時間のタイマーは結果を受け取ってから始まるので、送る直前からなら必ず表示時間以上になる)
+  const sentAt = Date.now();
   await page.evaluate(`(() => {
     const api = window.__mukuchiMock;
     api.setStatus({ phase: "listening" });
@@ -337,9 +340,8 @@ async function resultDuration(page: Page, turnOn: string, result: string, visibl
     api.result(${result});
   })()`);
   await visible();
-  const shownAt = Date.now();
-  await expect(page.getByTestId("panel-card")).toHaveAttribute("data-expanded", "false", { timeout: 5000 });
-  return Date.now() - shownAt;
+  await expect(page.getByTestId("panel-card")).toHaveAttribute("data-expanded", "false", { timeout: 8000 });
+  return Date.now() - sentAt;
 }
 
 test("panel: 入力しないアプリの時は理由を 3 秒表示する", async ({ page, m }) => {
@@ -349,8 +351,8 @@ test("panel: 入力しないアプリの時は理由を 3 秒表示する", asyn
     `{ kind: "skipped_excluded", id: 1, text: "こんにちは", appName: "1Password" }`,
     () => expect(page.getByRole("status").filter({ hasText: m.panel.excluded("1Password") })).toBeVisible(),
   );
-  expect(ms).toBeGreaterThan(2500);
-  expect(ms).toBeLessThan(3800);
+  expect(ms).toBeGreaterThanOrEqual(2950);
+  expect(ms).toBeLessThan(6000);
 });
 
 test("panel: 入力できなかった時は Rust のメッセージを理由として 3 秒表示する", async ({ page, m, ui }) => {
@@ -361,8 +363,8 @@ test("panel: 入力できなかった時は Rust のメッセージを理由と�
     `{ kind: "failed", id: 1, text: "こんにちは", error: { code: "accessibility_denied", message: ${JSON.stringify(message)}, action: "open_accessibility" } }`,
     () => expect(page.getByRole("status").filter({ hasText: message })).toBeVisible(),
   );
-  expect(ms).toBeGreaterThan(2500);
-  expect(ms).toBeLessThan(3800);
+  expect(ms).toBeGreaterThanOrEqual(2950);
+  expect(ms).toBeLessThan(6000);
 });
 
 test("panel: 入力できた時は成功マークを 750ms 表示する", async ({ page, m, sp }) => {
@@ -372,7 +374,8 @@ test("panel: 入力できた時は成功マークを 750ms 表示する", async 
     `{ kind: "inserted", id: 1, text: "こんにちは", appName: ${JSON.stringify(sp.notes)} }`,
     () => expect(page.getByRole("status").filter({ hasText: m.panel.inserted })).toHaveCount(1),
   );
-  expect(ms).toBeLessThan(1500);
+  expect(ms).toBeGreaterThanOrEqual(700);
+  expect(ms).toBeLessThan(2500);
 });
 
 test("panel: 理由が長くてもメーターを潰さず、文言を省略する", async ({ page }) => {

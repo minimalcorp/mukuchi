@@ -59,80 +59,22 @@ export async function detectPlatform(nav: NavigatorLike): Promise<Platform> {
   return "other";
 }
 
+/** ボタンの出し分け (文言は辞書の cta.states) */
 export interface CtaState {
   kind: "download" | "unavailable";
-  label: string;
-  short: string;
   icon: "download" | "ban" | "clock" | "laptop" | "monitor";
-  note: string;
   noteIcon: "circle-check" | "info";
   noteTone: "success" | "muted";
 }
 
-const DOWNLOAD = {
-  kind: "download",
-  label: "Mac 版をダウンロード",
-  short: "ダウンロード",
-  icon: "download",
-} as const;
-const ONLY_APPLE_SILICON = "現在は Apple Silicon 搭載の Mac のみに対応しています";
+const INFO = { noteIcon: "info", noteTone: "muted" } as const;
 
 export const CTA: Record<Platform, CtaState> = {
-  "mac-arm": {
-    ...DOWNLOAD,
-    note: "Apple Silicon 搭載の Mac を検出しました",
-    noteIcon: "circle-check",
-    noteTone: "success",
-  },
-  "mac-unknown": {
-    ...DOWNLOAD,
-    note: "Intel 搭載の Mac では動作しません",
-    noteIcon: "info",
-    noteTone: "muted",
-  },
-  "mac-intel": {
-    kind: "unavailable",
-    label: "Apple Silicon 専用です",
-    short: "非対応",
-    icon: "ban",
-    note: "Intel 搭載の Mac には対応していません",
-    noteIcon: "info",
-    noteTone: "muted",
-  },
-  windows: {
-    kind: "unavailable",
-    label: "Windows 版は準備中",
-    short: "準備中",
-    icon: "clock",
-    note: ONLY_APPLE_SILICON,
-    noteIcon: "info",
-    noteTone: "muted",
-  },
-  linux: {
-    kind: "unavailable",
-    label: "Linux 版は準備中",
-    short: "準備中",
-    icon: "clock",
-    note: ONLY_APPLE_SILICON,
-    noteIcon: "info",
-    noteTone: "muted",
-  },
-  mobile: {
-    kind: "unavailable",
-    label: "Mac でダウンロード",
-    short: "Mac 版のみ",
-    icon: "laptop",
-    note: "Mac のブラウザでこのページを開いてください",
-    noteIcon: "info",
-    noteTone: "muted",
-  },
-  other: {
-    kind: "unavailable",
-    label: "デスクトップ版のみ提供",
-    short: "Mac 版のみ",
-    icon: "monitor",
-    note: "Apple Silicon 搭載の Mac からアクセスしてください",
-    noteIcon: "info",
-    noteTone: "muted",
-  },
+  "mac-arm": { kind: "download", icon: "download", noteIcon: "circle-check", noteTone: "success" },
+  "mac-unknown": { kind: "download", icon: "download", ...INFO },
+  "mac-intel": { kind: "unavailable", icon: "ban", ...INFO },
+  windows: { kind: "unavailable", icon: "clock", ...INFO },
+  linux: { kind: "unavailable", icon: "clock", ...INFO },
+  mobile: { kind: "unavailable", icon: "laptop", ...INFO },
+  other: { kind: "unavailable", icon: "monitor", ...INFO },
 };

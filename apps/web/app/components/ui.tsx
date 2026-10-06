@@ -14,6 +14,7 @@ import {
   InfinityIcon,
   InfoIcon,
   KeyboardIcon,
+  LanguagesIcon,
   LaptopIcon,
   LinkIcon,
   MicIcon,
@@ -25,6 +26,7 @@ import {
   Trash2Icon,
   UserRoundIcon,
   WifiOffIcon,
+  XIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -44,6 +46,7 @@ const ICONS = {
   infinity: InfinityIcon,
   info: InfoIcon,
   keyboard: KeyboardIcon,
+  languages: LanguagesIcon,
   laptop: LaptopIcon,
   link: LinkIcon,
   mic: MicIcon,
@@ -55,6 +58,7 @@ const ICONS = {
   "trash-2": Trash2Icon,
   "user-round": UserRoundIcon,
   "wifi-off": WifiOffIcon,
+  x: XIcon,
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof ICONS;

@@ -533,13 +533,15 @@ test.describe("言語 PC", () => {
     const header = page.locator("header").getByTestId("language-switch");
     await expect(header.locator('[aria-current="page"]')).toHaveText("日本語");
     await header.getByRole("link", { name: "English" }).click();
-    await expect(page).toHaveURL(/\/en\/$/);
+    // パスで待つ (正規表現の /\/$/ は /en/ にも当たり移動を待たない)。CI の dev サーバーは初回の
+    // 読み込み・依存の最適化で遷移が5秒を超えることがあるため長めに待つ
+    await expect(page).toHaveURL((u) => u.pathname === "/en/", { timeout: 15_000 });
     await expect(page.locator("html")).toHaveAttribute("lang", "en");
 
     const footer = page.locator("footer").getByTestId("language-switch");
     await expect(footer.locator('[aria-current="page"]')).toHaveText("English");
     await footer.getByRole("link", { name: "日本語" }).click();
-    await expect(page).toHaveURL(/\/$/);
+    await expect(page).toHaveURL((u) => u.pathname === "/", { timeout: 15_000 });
     await expect(page.locator("html")).toHaveAttribute("lang", "ja");
   });
 
@@ -599,7 +601,7 @@ test.describe("英語のページの案内", () => {
     await expect(notice.getByRole("link")).toHaveText("This page is also available in English →");
     await expect(notice.getByRole("link")).toHaveAttribute("href", "/en/");
     // 自動では移動しない
-    await expect(page).toHaveURL(/\/$/);
+    await expect(page).toHaveURL((u) => u.pathname === "/");
     await expect(page.locator("html")).toHaveAttribute("lang", "ja");
 
     await notice.getByRole("button", { name: "Close" }).click();

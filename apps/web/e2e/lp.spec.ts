@@ -3,7 +3,7 @@ import { en } from "../app/i18n/en";
 import { ja, type Messages } from "../app/i18n/ja";
 import { COMPANY_URL, DOWNLOAD_URL, SITE_URL, googlePartnerSitesUrl } from "../app/lib/site";
 
-// 日本語のページの確認はブラウザの言語を日本語にする (日本語以外だと英語のページの案内が出る)
+// 日本語のページの確認はブラウザの言語を日本語にする (日本語以外だと `/` は `/en/` へ移る)
 test.use({ locale: "ja-JP" });
 
 const PC = { width: 1280, height: 800 };
@@ -528,8 +528,6 @@ test.describe("言語 PC", () => {
       "href",
       googlePartnerSitesUrl("en"),
     );
-    // 英語のページに日本語の案内は出さない
-    await expect(page.getByTestId("english-notice")).toHaveCount(0);
     expect(errors).toEqual([]);
   });
 
@@ -600,44 +598,51 @@ test.describe("言語 PC", () => {
   });
 });
 
-test.describe("英語のページの案内", () => {
+test.describe("英語のブラウザで `/` を開いた時", () => {
   test.use({ viewport: PC, locale: "en-US" });
 
-  test("日本語以外のブラウザで `/` を開くと案内を出し、閉じると次から出さない", async ({
-    page,
-  }) => {
+  test("`/en/` へ移り、クエリとハッシュを引き継ぐ", async ({ page }) => {
     const errors: string[] = [];
     page.on("console", (msg) => {
       if (msg.type() === "error") errors.push(msg.text());
     });
-    await fakeNavigator(page, ENVS.macArm);
-    await page.goto("/");
-    const notice = page.getByTestId("english-notice");
-    await expect(notice).toBeVisible();
-    await expect(notice.getByRole("link")).toHaveText("This page is also available in English →");
-    await expect(notice.getByRole("link")).toHaveAttribute("href", "/en/");
-    // 自動では移動しない
-    await expect(page).toHaveURL((u) => u.pathname === "/");
-    await expect(page.locator("html")).toHaveAttribute("lang", "ja");
-
-    await notice.getByRole("button", { name: "Close" }).click();
-    await expect(notice).toHaveCount(0);
-    await page.reload();
-    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-    await expect(page.getByTestId("cta-note").first()).toHaveText(/検出しました/);
-    await expect(page.getByTestId("english-notice")).toHaveCount(0);
-    // 事前生成の HTML (案内なし) とハイドレーションが食い違わない
+    await page.goto("/?utm_source=x#features");
+    await expect(page).toHaveURL(
+      (u) => u.pathname === "/en/" && u.search === "?utm_source=x" && u.hash === "#features",
+    );
+    await expect(page.locator("html")).toHaveAttribute("lang", "en");
+    await expect(page.getByRole("heading", { level: 1 })).toContainText("Just speak.");
     expect(errors).toEqual([]);
   });
 
-  test("案内のリンクで英語のページへ移動する", async ({ page }) => {
+  test("言語の切り替えで日本語を選ぶと、次に `/` を開いても日本語のまま", async ({ page }) => {
     await page.goto("/");
-    await page.getByTestId("english-notice").getByRole("link").click();
-    await expect(page).toHaveURL(/\/en\/$/);
-    await expect(page.locator("html")).toHaveAttribute("lang", "en");
+    await expect(page).toHaveURL((u) => u.pathname === "/en/");
+    await settleBeforeClick(page);
+    await page
+      .locator("footer")
+      .getByTestId("language-switch")
+      .getByRole("link", { name: "日本語" })
+      .click();
+    await expect(page).toHaveURL((u) => u.pathname === "/", { timeout: 15_000 });
+    await expect(page.locator("html")).toHaveAttribute("lang", "ja");
+    await page.goto("/");
+    await expect(page.locator("html")).toHaveAttribute("lang", "ja");
+    await expect(page).toHaveURL((u) => u.pathname === "/");
+
+    // 英語を選び直すと、また `/` から英語へ移る
+    await settleBeforeClick(page);
+    await page
+      .locator("header")
+      .getByTestId("language-switch")
+      .getByRole("link", { name: "English" })
+      .click();
+    await expect(page).toHaveURL((u) => u.pathname === "/en/", { timeout: 15_000 });
+    await page.goto("/");
+    await expect(page).toHaveURL((u) => u.pathname === "/en/");
   });
 
-  test("localStorage が使えなくても案内を出し、閉じられる", async ({ page }) => {
+  test("localStorage が使えなくても、サイト内から日本語を選べば日本語のまま", async ({ page }) => {
     await page.addInitScript(() => {
       Object.defineProperty(window, "localStorage", {
         get() {
@@ -646,18 +651,35 @@ test.describe("英語のページの案内", () => {
       });
     });
     await page.goto("/");
-    const notice = page.getByTestId("english-notice");
-    await expect(notice).toBeVisible();
-    await notice.getByRole("button", { name: "Close" }).click();
-    await expect(notice).toHaveCount(0);
+    await expect(page).toHaveURL((u) => u.pathname === "/en/");
+    await settleBeforeClick(page);
+    await page
+      .locator("footer")
+      .getByTestId("language-switch")
+      .getByRole("link", { name: "日本語" })
+      .click();
+    await expect(page).toHaveURL((u) => u.pathname === "/", { timeout: 15_000 });
+    await expect(page.locator("html")).toHaveAttribute("lang", "ja");
+  });
+
+  test("クローラーは移さない", async ({ page }) => {
+    await fakeNavigator(page, {
+      ...ENVS.macArm,
+      userAgent:
+        "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html) Chrome/140.0.0.0 Safari/537.36",
+    });
+    await page.goto("/");
+    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    await expect(page).toHaveURL((u) => u.pathname === "/");
+    await expect(page.locator("html")).toHaveAttribute("lang", "ja");
   });
 });
 
-test("日本語のブラウザでは英語のページの案内を出さない", async ({ page }) => {
+test("日本語のブラウザでは `/` を日本語のまま出す", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-  await expect(page.getByTestId("cta-note").first()).toBeVisible();
-  await expect(page.getByTestId("english-notice")).toHaveCount(0);
+  await expect(page).toHaveURL((u) => u.pathname === "/");
+  await expect(page.locator("html")).toHaveAttribute("lang", "ja");
 });
 
 test.describe("言語 SP", () => {
@@ -690,20 +712,5 @@ test.describe("言語 SP", () => {
     await expect(page.getByText("When you finish, it's typed at the cursor")).toBeVisible();
     await page.evaluate(() => document.fonts.ready);
     await page.screenshot({ path: "e2e/screenshots/sp-390-en.png", fullPage: true });
-  });
-
-  test("スクリーンショット 英語のページの案内 (390px)", async ({ page }) => {
-    await page.emulateMedia({ reducedMotion: "reduce" });
-    await fakeNavigator(page, ENVS.iphone);
-    await page.addInitScript(() => {
-      Object.defineProperty(Navigator.prototype, "languages", {
-        get: () => ["en-US", "en"],
-        configurable: true,
-      });
-    });
-    await page.goto("/");
-    await expect(page.getByTestId("english-notice")).toBeVisible();
-    await page.evaluate(() => document.fonts.ready);
-    await page.screenshot({ path: "e2e/screenshots/sp-390-english-notice.png" });
   });
 });

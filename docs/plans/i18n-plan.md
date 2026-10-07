@@ -27,7 +27,7 @@
 ### web (LP)
 
 - URL: `/` = 日本語 (現状維持)、`/en/` = 英語。両方を事前生成し `hreflang` (ja / en / x-default=`/en/`) と `canonical`・`og:locale` を相互に付ける
-- **自動リダイレクトはしない** (共有されたURLの言語を変えない・クローラーに両方を見せるため)。代わりに `/` をブラウザ言語が日本語以外で開いたら、上部に閉じられる案内「This page is also available in English →」を出す (閉じたら localStorage に記憶)
+- **`/` をブラウザの第一言語が日本語以外で開いたら `/en/` へ移す** (2026-10-07 変更。当初は移さず案内バナーを出していた)。描画前に `<head>` のインライン script で `location.replace` し、クエリ・ハッシュは引き継ぐ。移さないのは、言語の切り替えで日本語を選んだ時 (localStorage に記憶) とサイト内から来た時 (同じ origin の referrer。保存できない時の代わり)、クローラー (isbot。Googlebot は英語の `navigator.language` で JS を実行するため、移すと日本語のページを索引できない)。実装は `apps/web/app/i18n/redirect.ts`
 - ヘッダー右上とフッターに言語切り替え (「日本語 / English」)
 - `/en/` は英語の OG 画像 (現状の og-image.jpg は日本語の文字を含む)
 
@@ -95,7 +95,7 @@
 2. **Rust** (rust-engineer): 設定・言語解決・Rust 辞書・メニュー再構築・カタログ (`base-1.7b-8bit`・`model_order`・`ModelInfo.tunedFor`/`recommended`。HF 公開済み @fc85f8e…)・セットアップで推奨モデルを取得・音声コマンドの言語別既定
 3. **desktop フロントエンド** (frontend-engineer): i18n 基盤・全画面の文言の辞書化・言語 Select (Welcome・一般・認識)・mock の言語切り替え・Playwright のスクリーンショットを ja/en 両方で撮る (英語は文字列が長く崩れやすい)
 4. **バンドル** (macos-release-engineer): CFBundleLocalizations・InfoPlist.strings
-5. **web** (frontend-engineer 相当): ルート・辞書化・言語切り替え・案内バナー・hreflang・英語 OG 画像・e2e を両言語で
+5. **web** (frontend-engineer 相当): ルート・辞書化・言語切り替え・`/` からの英語への移動・hreflang・英語 OG 画像・e2e を両言語で
 6. **ユーザーの確認**: 英訳の校正 (特に LP のコピー)
 7. レビュー (code-reviewer)
 

@@ -1,4 +1,3 @@
-import { useSyncExternalStore, useState } from "react";
 import {
   CtaNote,
   DownloadButton,
@@ -22,6 +21,7 @@ import {
 } from "@/lib/content";
 import { useI18n } from "@/i18n/context";
 import { LOCALES, LOCALE_NAMES, LOCALE_PATHS, type Locale } from "@/i18n/locales";
+import { rememberLocaleChoice } from "@/i18n/redirect";
 import type { Platform } from "@/lib/platform";
 import {
   COMPANY_URL,
@@ -46,7 +46,6 @@ const trackGithub = (location: CtaLocation) => () =>
 
 /** LP の本体。言語ごとのルート (routes/home.tsx・routes/home.en.tsx) が辞書を渡して描く */
 export function HomePage() {
-  const { locale } = useI18n();
   const platform = usePlatform();
   const share = useShareActions();
   // 未判定の間は PC 版の配置では「判定不可の Mac」として出す (デザインの初期値と同じ)
@@ -56,7 +55,6 @@ export function HomePage() {
 
   return (
     <>
-      {locale === "ja" && <EnglishNotice />}
       <Header platform={pcPlatform} />
       <main>
         <Hero platform={platform} pcPlatform={pcPlatform} spShare={spShare} share={share} />
@@ -68,74 +66,6 @@ export function HomePage() {
       </main>
       <Footer />
     </>
-  );
-}
-
-// ---- 英語のページの案内 (日本語のページだけ) ----
-
-/** 閉じたことを覚えておく (閲覧者のブラウザだけに残る。消えていても案内が再び出るだけ) */
-const ENGLISH_NOTICE_KEY = "mukuchi.lp.englishNoticeDismissed";
-
-const noSubscribe = () => () => {};
-
-function englishNoticeDismissed(): boolean {
-  try {
-    return window.localStorage.getItem(ENGLISH_NOTICE_KEY) === "1";
-  } catch {
-    // プライベートブラウズ・サイトデータの拒否では読めない。閉じていない扱いにする
-    return false;
-  }
-}
-
-/** ブラウザの第一言語が日本語以外か (英語の案内を出すか)。言語を取れない時は出さない */
-function prefersNonJapanese(): boolean {
-  const first = (navigator.languages?.[0] ?? navigator.language ?? "").toLowerCase();
-  return first !== "" && first !== "ja" && !first.startsWith("ja-");
-}
-
-/**
- * 日本語のページを日本語以外のブラウザで開いた時の、英語のページの案内。自動では移動しない (共有された URL の言語を
- * 変えない・クローラーに両方のページを見せるため)。事前生成の HTML には出さず (サーバーの値は false)、
- * ハイドレーション後に判定するので HTML と食い違わない。文言は案内の相手に合わせて英語で書く
- */
-function EnglishNotice() {
-  const suggested = useSyncExternalStore(
-    noSubscribe,
-    () => prefersNonJapanese() && !englishNoticeDismissed(),
-    () => false,
-  );
-  const [closed, setClosed] = useState(false);
-  if (!suggested || closed) return null;
-
-  const close = () => {
-    setClosed(true);
-    try {
-      window.localStorage.setItem(ENGLISH_NOTICE_KEY, "1");
-    } catch {
-      // 保存できなくても、このページを開いている間は閉じたままにする
-    }
-  };
-
-  return (
-    <div lang="en" data-testid="english-notice" className="border-b border-line-subtle bg-blue-50">
-      <div
-        className={`${INNER} flex min-h-10 items-center gap-3 py-1.5 pr-2 pl-5 lg:pr-8 lg:pl-12`}
-      >
-        <p className="m-0 flex-1 text-[13px] leading-[1.5] text-strong">
-          <a href={LOCALE_PATHS.en} hrefLang="en" className="text-strong underline">
-            This page is also available in English →
-          </a>
-        </p>
-        <button
-          type="button"
-          aria-label="Close"
-          onClick={close}
-          className="flex size-8 flex-none cursor-pointer items-center justify-center rounded-md border-0 bg-transparent text-muted hover:bg-white"
-        >
-          <Icon name="x" size={16} />
-        </button>
-      </div>
-    </div>
   );
 }
 
@@ -163,7 +93,13 @@ function LanguageSwitch({
               {LOCALE_NAMES[l]}
             </span>
           ) : (
-            <a href={LOCALE_PATHS[l]} hrefLang={l} lang={l} className="text-body hover:underline">
+            <a
+              href={LOCALE_PATHS[l]}
+              hrefLang={l}
+              lang={l}
+              onClick={() => rememberLocaleChoice(l)}
+              className="text-body hover:underline"
+            >
               {LOCALE_NAMES[l]}
             </a>
           )}

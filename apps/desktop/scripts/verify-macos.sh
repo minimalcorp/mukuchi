@@ -73,6 +73,26 @@ pb() { /usr/libexec/PlistBuddy -c "Print :$1" "$plist" 2>/dev/null; }
 [ "$(pb CFBundleIdentifier)" = "$BUNDLE_ID" ] && pass "CFBundleIdentifier = $BUNDLE_ID" || fail "CFBundleIdentifier = $(pb CFBundleIdentifier) (想定 $BUNDLE_ID)"
 [ "$(pb LSMinimumSystemVersion)" = "$MIN_MACOS" ] && pass "LSMinimumSystemVersion = $MIN_MACOS" || fail "LSMinimumSystemVersion = $(pb LSMinimumSystemVersion) (想定 $MIN_MACOS)"
 [ -n "$(pb NSMicrophoneUsageDescription)" ] && pass "NSMicrophoneUsageDescription" || fail "NSMicrophoneUsageDescription がない"
+# 権限ダイアログの説明文の翻訳 (docs/architecture.md「言語」)。宣言 (CFBundleLocalizations) と
+# lproj の同梱がずれると、その言語の macOS で既定 (Info.plist 本体の日本語) が出るため両方を見る
+LOCALIZATIONS="ja en"
+locs="$(pb CFBundleLocalizations | sed -n 's/^ *\([A-Za-z_-]*\)$/\1/p' | tr '\n' ' ' | sed 's/ $//')"
+[ "$locs" = "$LOCALIZATIONS" ] && pass "CFBundleLocalizations = $locs" || fail "CFBundleLocalizations = $locs (想定 $LOCALIZATIONS)"
+for l in $LOCALIZATIONS; do
+  s="$APP/Contents/Resources/$l.lproj/InfoPlist.strings"
+  if [ -f "$s" ] && /usr/bin/plutil -lint -s "$s" &&
+    [ -n "$(/usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$s" 2>/dev/null)" ]; then
+    pass "$l.lproj/InfoPlist.strings: NSMicrophoneUsageDescription"
+  else
+    fail "$l.lproj/InfoPlist.strings がない・読めない・NSMicrophoneUsageDescription がない"
+  fi
+done
+# ja・en に当たらない Mac の行き先。アプリの表示言語の解決 (無ければ en) と揃える
+[ "$(pb CFBundleDevelopmentRegion)" = "en" ] && pass "CFBundleDevelopmentRegion = en" || fail "CFBundleDevelopmentRegion = $(pb CFBundleDevelopmentRegion) (想定 en)"
+en_desc="$(/usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$APP/Contents/Resources/en.lproj/InfoPlist.strings" 2>/dev/null)"
+[ -n "$en_desc" ] && [ "$(pb NSMicrophoneUsageDescription)" = "$en_desc" ] &&
+  pass "NSMicrophoneUsageDescription (既定) = en.lproj の文" ||
+  fail "Info.plist 本体の NSMicrophoneUsageDescription が en.lproj の文と違う"
 
 # 配布物が /nix/store にリンクしていると他の Mac で起動しない
 nix_links=""

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { CTA, detectPlatform, isPlatform, type Platform } from "@/lib/platform";
 import { track, type CtaLocation } from "@/lib/analytics";
-import { DOWNLOAD_URL, SHARE_TEXT, SITE_NAME } from "@/lib/site";
+import { useI18n } from "@/i18n/context";
+import { DOWNLOAD_URL, SITE_NAME } from "@/lib/site";
 import { Button, ButtonLink, Icon, Badge } from "./ui";
 
 const DOWNLOAD_FILE_NAME = DOWNLOAD_URL.slice(DOWNLOAD_URL.lastIndexOf("/") + 1);
@@ -35,6 +36,8 @@ export function usePlatform(): Platform | null {
 
 /** このページの URL (クエリ・ハッシュは除く) をコピー・共有する */
 export function useShareActions() {
+  const { m } = useI18n();
+  const shareText = m.shareText;
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -61,12 +64,12 @@ export function useShareActions() {
       return;
     }
     try {
-      await navigator.share({ title: SITE_NAME, text: SHARE_TEXT, url: pageUrl() });
+      await navigator.share({ title: SITE_NAME, text: shareText, url: pageUrl() });
       track("share", { method: "native" });
     } catch {
       // 共有シートを閉じた場合も reject されるので何もしない
     }
-  }, [copy]);
+  }, [copy, shareText]);
 
   return { copied, copy, share };
 }
@@ -88,8 +91,10 @@ export function DownloadButton({
   short?: boolean;
   className?: string;
 }) {
+  const { m } = useI18n();
   const cta = CTA[platform];
-  const label = short ? cta.short : cta.label;
+  const text = { ...m.cta.download, ...m.cta.states[platform] };
+  const label = short ? text.short : text.label;
   if (cta.kind === "download") {
     return (
       <ButtonLink
@@ -128,6 +133,7 @@ export function DownloadButton({
 }
 
 export function CtaNote({ platform }: { platform: Platform }) {
+  const { m } = useI18n();
   const cta = CTA[platform];
   return (
     <div
@@ -135,13 +141,14 @@ export function CtaNote({ platform }: { platform: Platform }) {
       data-testid="cta-note"
     >
       <Icon name={cta.noteIcon} size={14} />
-      {cta.note}
+      {m.cta.states[platform].note}
     </div>
   );
 }
 
 /** スマホ向け: ダウンロードの代わりに URL のコピーと共有 */
 export function ShareButtons({ actions }: { actions: ShareActions }) {
+  const { m } = useI18n();
   return (
     <div className="grid w-full grid-cols-2 gap-2">
       <Button
@@ -150,10 +157,10 @@ export function ShareButtons({ actions }: { actions: ShareActions }) {
         onClick={actions.copy}
         className="w-full min-w-0"
       >
-        {actions.copied ? "コピーしました" : "URL をコピー"}
+        {actions.copied ? m.cta.copied : m.cta.copyUrl}
       </Button>
       <Button iconLeft="share" onClick={actions.share} className="w-full min-w-0">
-        共有
+        {m.cta.share}
       </Button>
     </div>
   );
@@ -161,9 +168,10 @@ export function ShareButtons({ actions }: { actions: ShareActions }) {
 
 /** 提供状況。PC 版の配置では閲覧中の OS の枠を濃くする (スマホ版のデザインでは強調しない) */
 export function PlatformList({ platform }: { platform: Platform | null }) {
+  const { m } = useI18n();
   const macOk = platform === "mac-arm" || platform === "mac-unknown";
   const items = [
-    { name: "macOS（Apple Silicon）", available: true, current: macOk },
+    { name: m.cta.platforms.mac, available: true, current: macOk },
     { name: "Windows", available: false, current: platform === "windows" },
     { name: "Linux", available: false, current: platform === "linux" },
   ];
@@ -176,7 +184,7 @@ export function PlatformList({ platform }: { platform: Platform | null }) {
         >
           <span className="font-medium text-strong">{p.name}</span>
           <Badge tone={p.available ? "success" : "neutral"}>
-            {p.available ? "提供中" : "準備中"}
+            {p.available ? m.cta.platforms.available : m.cta.platforms.comingSoon}
           </Badge>
         </li>
       ))}

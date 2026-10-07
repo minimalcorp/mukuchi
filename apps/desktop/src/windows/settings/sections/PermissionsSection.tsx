@@ -3,6 +3,7 @@ import { ExternalLink, Keyboard, Mic } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { commands, runCommand, type Permissions } from "@/lib/ipc";
+import { useI18n } from "@/i18n/context";
 import { Card, TitleWithSub } from "./common";
 
 export function PermissionsSection({
@@ -12,6 +13,8 @@ export function PermissionsSection({
   permissions: Permissions | null;
   onChange: (p: Permissions) => void;
 }) {
+  const { t } = useI18n();
+  const ps = t.settings.permissions;
   if (!p) return null;
   const mic = p.microphone;
   return (
@@ -19,29 +22,29 @@ export function PermissionsSection({
       <div className="flex flex-col gap-2.5 border-b border-line-subtle px-4 py-3.5">
         <div className="flex items-center gap-3">
           <Mic size={20} className="flex-none text-fg-muted" aria-hidden />
-          <TitleWithSub title="マイク" sub="発話を聞き取るために使います" />
+          <TitleWithSub title={ps.microphone} sub={ps.microphoneSub} />
           {mic === "granted" ? (
             <Badge tone="success" dot>
-              許可済み
+              {t.common.granted}
             </Badge>
           ) : (
             <Badge tone={mic === "denied" ? "danger" : "warning"} dot>
-              未許可
+              {t.common.notGranted}
             </Badge>
           )}
         </div>
         {mic === "not_determined" ? (
           <Guide
-            text="マイクの使用がまだ許可されていません。許可すると音声入力を使えます。"
+            text={ps.micNotDetermined}
             action={
               <Button size="sm" onClick={() => commands.requestMicrophone().then(onChange, () => {})}>
-                許可する
+                {t.common.allow}
               </Button>
             }
           />
         ) : mic === "denied" ? (
           <Guide
-            text="許可されていないため、音声を聞き取れません。システム設定 > プライバシーとセキュリティ > マイク で mukuchi をオンにしてください。"
+            text={ps.micDenied}
             action={<OpenSettingsButton pane="microphone" />}
           />
         ) : null}
@@ -49,20 +52,20 @@ export function PermissionsSection({
       <div className="flex flex-col gap-2.5 px-4 py-3.5">
         <div className="flex items-center gap-3">
           <Keyboard size={20} className="flex-none text-fg-muted" aria-hidden />
-          <TitleWithSub title="アクセシビリティ" sub="文字とキー操作の入力に使います" />
+          <TitleWithSub title={ps.accessibility} sub={ps.accessibilitySub} />
           {p.accessibility ? (
             <Badge tone="success" dot>
-              許可済み
+              {t.common.granted}
             </Badge>
           ) : (
             <Badge tone="danger" dot>
-              未許可
+              {t.common.notGranted}
             </Badge>
           )}
         </div>
         {!p.accessibility ? (
           <Guide
-            text="許可されていないため、文字起こしはできますが入力できません。システム設定 > プライバシーとセキュリティ > アクセシビリティ で mukuchi をオンにしてください。"
+            text={ps.accessibilityDenied}
             action={<OpenSettingsButton pane="accessibility" />}
           />
         ) : null}
@@ -81,9 +84,10 @@ function Guide({ text, action }: { text: string; action: ReactNode }) {
 }
 
 function OpenSettingsButton({ pane }: { pane: "microphone" | "accessibility" }) {
+  const { t } = useI18n();
   return (
     <Button size="sm" iconRight={ExternalLink} onClick={() => runCommand(commands.openSystemSettings(pane))}>
-      システム設定を開く
+      {t.common.openSystemSettings}
     </Button>
   );
 }

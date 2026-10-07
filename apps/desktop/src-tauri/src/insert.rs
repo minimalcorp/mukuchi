@@ -258,7 +258,7 @@ mod tests {
     fn cfg() -> InsertConfig {
         InsertConfig {
             voice_commands_enabled: true,
-            voice_commands: default_voice_commands(),
+            voice_commands: default_voice_commands(crate::i18n::Locale::Ja),
             excluded_apps: vec![ExcludedApp {
                 bundle_id: "com.example.secret".into(),
                 name: "Secret".into(),

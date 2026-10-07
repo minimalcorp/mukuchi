@@ -19,6 +19,7 @@ use super::{
     failed, lock, model_present, now_secs, Cancel, ModelRecord, Provisioned, RateMeter, StepError,
     EMIT_INTERVAL,
 };
+use crate::i18n::{Locale, ModelText, Msg};
 use crate::paths::DataPaths;
 
 // ---- カタログ ---------------------------------------------------------------
@@ -28,48 +29,60 @@ pub struct CatalogEntry {
     pub repo: &'static str,
     /// commit で固定する (同じ名前で中身が変わらないように)
     pub revision: &'static str,
-    pub name: &'static str,
-    pub description: &'static str,
+    /// 表示名・説明 (表示言語ごとの辞書。i18n)
+    pub text: ModelText,
+    /// 追加学習で特化した言語 (元のモデルは None)
+    pub tuned_for: Option<Locale>,
     /// 取得するファイル (hf.rs の ALLOW_SUFFIXES) の合計。固定した revision の tree API の値
     pub size_bytes: u64,
-    /// 旧候補: 新規には選ばせず、手元にある導入でのみ一覧に出す (docs/architecture.md「モデルの管理」の旧候補)。
-    /// カタログから消さないのは、既に使っている人がそのまま使い続け・削除できるようにするため
-    pub legacy: bool,
 }
 
-/// 既定・推奨。新規のセットアップで取得する
-pub const DEFAULT_MODEL_ID: &str = "ja-8bit";
-
-/// 根拠: spikes/asr-bench/MODEL_DECISION.md
-pub const CATALOG: [CatalogEntry; 2] = [
+/// 根拠: spikes/asr-bench/MODEL_DECISION.md・MODEL_DECISION_I18N.md
+pub const CATALOG: [CatalogEntry; 3] = [
     CatalogEntry {
         id: "ja-8bit",
         repo: "minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit",
         revision: "698eff963b084561b12a045c95bc4a208898337f",
-        name: "日本語 (8bit)",
-        description: "元のモデルと同等の精度で、より速く、メモリの使用量が少ない (約3GB)",
+        text: ModelText::Ja8bit,
+        tuned_for: Some(Locale::Ja),
         size_bytes: 2_185_804_096,
-        legacy: false,
+    },
+    CatalogEntry {
+        id: "base-1.7b-8bit",
+        // 元: Qwen/Qwen3-ASR-1.7B@7278e1e70fe206f11671096ffdd38061171dd6e5 を全層8bit (mukuchi-asr-convert)
+        repo: "minimalcorp/Qwen3-ASR-1.7B-MLX-8bit",
+        revision: "fc85f8e586506b91c707de9561998928f3f5d842",
+        text: ModelText::Base17b8bit,
+        tuned_for: None,
+        size_bytes: 2_174_372_462,
     },
     CatalogEntry {
         id: "ja-bf16",
         repo: "neosophie/Qwen3-ASR-1.7B-JA",
         revision: "987bda160f2dabfa6757550bcff7cdda2ba0648c",
-        name: "日本語 (bf16)",
-        description: "量子化していない元のモデル。容量とメモリの使用量 (約8.5GB) が大きい",
+        text: ModelText::JaBf16,
+        tuned_for: Some(Locale::Ja),
         size_bytes: 4_092_092_275,
-        legacy: true,
     },
 ];
+
+/// 話す言語ごとの並び (docs/architecture.md「モデルの管理」の話す言語ごとの並び)。先頭が推奨。
+/// 言語ごとに明示し、規則 (tuned_for 等) から自動で決めない。
+/// どの言語の並びにも無いモデルは旧候補 (手元にある導入でのみ一覧に出す。`ModelManager::is_listed`)
+pub fn model_order(lang: Locale) -> &'static [&'static str] {
+    match lang {
+        Locale::Ja => &["ja-8bit", "base-1.7b-8bit"],
+        Locale::En => &["base-1.7b-8bit", "ja-8bit"],
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelDef {
     pub id: String,
     pub hf: HfModel,
-    pub name: String,
-    pub description: String,
+    pub text: ModelText,
+    pub tuned_for: Option<Locale>,
     pub size_bytes: u64,
-    pub legacy: bool,
 }
 
 impl ModelDef {
@@ -77,45 +90,95 @@ impl ModelDef {
         Self {
             id: e.id.into(),
             hf: HfModel::hub(e.repo, e.revision),
-            name: e.name.into(),
-            description: e.description.into(),
+            text: e.text,
+            tuned_for: e.tuned_for,
             size_bytes: e.size_bytes,
-            legacy: e.legacy,
         }
+    }
+
+    /// 表示名 (今の表示言語)
+    pub fn name(&self) -> String {
+        Msg::ModelName(self.text).to_string()
+    }
+
+    pub fn description(&self) -> String {
+        Msg::ModelDescription(self.text).to_string()
     }
 }
 
-/// 候補の一覧。先頭が既定 (テストでは別の候補を渡す)
+/// 候補の一覧と、話す言語ごとの並び (テストでは別の候補を渡す)
 #[derive(Debug, Clone)]
 pub struct Catalog {
     models: Vec<ModelDef>,
+    orders: Vec<(Locale, Vec<String>)>,
 }
 
 impl Catalog {
     pub fn distributed() -> Self {
-        let mut models: Vec<ModelDef> = CATALOG.iter().map(ModelDef::from_entry).collect();
-        // 既定を先頭に (表示順もカタログ順のため、定数でも先頭に置いている)
-        models.sort_by_key(|m| m.id != DEFAULT_MODEL_ID);
-        Self { models }
+        let models = CATALOG.iter().map(ModelDef::from_entry).collect();
+        let orders = Locale::ALL
+            .into_iter()
+            .map(|l| (l, model_order(l).iter().map(|s| s.to_string()).collect()))
+            .collect();
+        Self::with_orders(models, orders)
     }
 
-    /// 先頭が既定。空であってはならない
+    /// `orders` は全ての言語について、カタログにある id を1つ以上並べる
+    fn with_orders(models: Vec<ModelDef>, orders: Vec<(Locale, Vec<String>)>) -> Self {
+        for l in Locale::ALL {
+            let order = orders.iter().find(|(o, _)| *o == l).map(|(_, v)| v);
+            assert!(
+                order.is_some_and(
+                    |v| !v.is_empty() && v.iter().all(|id| models.iter().any(|m| &m.id == id))
+                ),
+                "{l:?} の並びが無いか、カタログに無い id を含む"
+            );
+        }
+        Self { models, orders }
+    }
+
     #[cfg(test)]
-    pub fn new(models: Vec<ModelDef>) -> Self {
-        assert!(!models.is_empty(), "カタログが空");
-        Self { models }
+    pub fn new(models: Vec<ModelDef>, orders: Vec<(Locale, Vec<String>)>) -> Self {
+        Self::with_orders(models, orders)
     }
 
-    pub fn default_model(&self) -> &ModelDef {
-        &self.models[0]
+    /// 話す言語の並び (先頭が推奨)
+    pub fn order(&self, lang: Locale) -> &[String] {
+        self.orders
+            .iter()
+            .find(|(l, _)| *l == lang)
+            .map(|(_, v)| v.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// 話す言語の推奨 (並びの先頭)。新規のセットアップで取得するもの
+    pub fn recommended(&self, lang: Locale) -> &ModelDef {
+        self.order(lang)
+            .first()
+            .and_then(|id| self.get(id))
+            .unwrap_or(&self.models[0])
     }
 
     pub fn get(&self, id: &str) -> Option<&ModelDef> {
         self.models.iter().find(|m| m.id == id)
     }
 
+    /// 話す言語の並び → 並びに無いもの (カタログ順) の順
+    pub fn iter_for(&self, lang: Locale) -> impl Iterator<Item = &ModelDef> {
+        let order = self.order(lang);
+        let ordered = order.iter().filter_map(|id| self.get(id));
+        let rest = self.models.iter().filter(move |m| !order.contains(&m.id));
+        ordered.chain(rest)
+    }
+
+    #[cfg(test)]
     pub fn iter(&self) -> impl Iterator<Item = &ModelDef> {
         self.models.iter()
+    }
+
+    /// 話す言語の並びにあるか (無ければその言語では旧候補として扱う)
+    fn in_order(&self, lang: Locale, id: &str) -> bool {
+        self.order(lang).iter().any(|o| o == id)
     }
 }
 
@@ -137,20 +200,23 @@ fn is_usable(rec: &Provisioned, paths: &DataPaths, m: &ModelDef) -> bool {
 }
 
 /// 起動時に選択中のモデルを決める (docs/architecture.md「モデルの管理」の移行)。
-/// 記録の選択が使えればそれ、無ければ既定、既定も無ければ記録のある他のモデル (カタログ順)、どれも無ければ既定
-pub fn resolve_selection(catalog: &Catalog, rec: &Provisioned, paths: &DataPaths) -> String {
+/// 記録の選択が使えればそれ、無ければ既定 (話す言語の推奨)、既定も無ければ記録のある他のモデル
+/// (話す言語の並び → 他)、どれも無ければ既定
+pub fn resolve_selection(
+    catalog: &Catalog,
+    rec: &Provisioned,
+    paths: &DataPaths,
+    lang: Locale,
+) -> String {
     let usable = |m: &ModelDef| is_usable(rec, paths, m);
     if let Some(m) = rec.selected_model.as_deref().and_then(|id| catalog.get(id)) {
         if usable(m) {
             return m.id.clone();
         }
     }
-    let default = catalog.default_model();
-    if usable(default) {
-        return default.id.clone();
-    }
+    let default = catalog.recommended(lang);
     catalog
-        .iter()
+        .iter_for(lang)
         .find(|m| usable(m))
         .unwrap_or(default)
         .id
@@ -173,15 +239,18 @@ pub enum ModelState {
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub id: String,
+    /// 表示名・説明 (作った時点の表示言語。表示言語の変更時は models-changed で送り直す)
     pub name: String,
     pub description: String,
+    pub tuned_for: Option<Locale>,
     pub size_bytes: u64,
     pub recommended: bool,
     pub selected: bool,
     pub state: ModelState,
     pub bytes_done: u64,
     pub eta_seconds: Option<u64>,
-    pub error: Option<String>,
+    /// 表示用 (送る時点の表示言語)
+    pub error: Option<Msg>,
     pub disk_bytes: u64,
 }
 
@@ -195,7 +264,7 @@ struct Progress {
     /// 一覧の取得後に決まる (それまではカタログの値)
     total: u64,
     eta: Option<u64>,
-    error: Option<String>,
+    error: Option<Msg>,
 }
 
 struct Active {
@@ -238,6 +307,8 @@ pub struct ModelManager {
     paths: DataPaths,
     catalog: Catalog,
     http: reqwest::Client,
+    /// 話す言語。一覧の並び・推奨・既定の選択を決める
+    speech: RwLock<Locale>,
     selected: RwLock<String>,
     inner: Mutex<Inner>,
     rate: Mutex<RateMeter>,
@@ -261,10 +332,11 @@ impl ModelManager {
     pub fn new(
         paths: DataPaths,
         catalog: Catalog,
+        speech: Locale,
         emit: impl Fn(&[ModelInfo]) + Send + Sync + 'static,
     ) -> anyhow::Result<Arc<Self>> {
         let rec = Provisioned::load(&paths.provisioned());
-        let selected = resolve_selection(&catalog, &rec, &paths);
+        let selected = resolve_selection(&catalog, &rec, &paths, speech);
         if rec.selected_model.as_deref() != Some(selected.as_str()) {
             log::info!(
                 "選択中のモデルを決めた: {selected} (記録: {:?})",
@@ -275,6 +347,7 @@ impl ModelManager {
             http: hf::http_client()?,
             paths,
             catalog,
+            speech: RwLock::new(speech),
             selected: RwLock::new(selected),
             inner: Mutex::new(Inner::default()),
             rate: Mutex::new(RateMeter::default()),
@@ -296,33 +369,93 @@ impl ModelManager {
         let id = self.selected_id();
         self.catalog
             .get(&id)
-            .unwrap_or_else(|| self.catalog.default_model())
+            .unwrap_or_else(|| self.catalog.recommended(self.speech()))
             .clone()
+    }
+
+    pub fn speech(&self) -> Locale {
+        *self.speech.read().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// 話す言語の変更: 一覧の並び・推奨を変えて送る。選択は変えない (セットアップ中の扱いは
+    /// `select_recommended` を呼び出し側が決める)
+    pub fn set_speech(&self, lang: Locale) {
+        *self.speech.write().unwrap_or_else(|p| p.into_inner()) = lang;
+        self.emit_now();
+    }
+
+    /// 選択を話す言語の推奨にする (セットアップでモデルの取得を始める前の、話す言語の変更)。
+    /// 取得済みかは問わない (セットアップが取得する)。導入の記録があれば選択を書き込む。
+    /// 変えた時は前の選択を返す
+    pub fn select_recommended(&self) -> Option<ModelDef> {
+        let id = self.catalog.recommended(self.speech()).id.clone();
+        let prev = {
+            let mut g = self.selected.write().unwrap_or_else(|p| p.into_inner());
+            std::mem::replace(&mut *g, id.clone())
+        };
+        let prev = (prev != id)
+            .then(|| self.catalog.get(&prev).cloned())
+            .flatten();
+        if prev.is_some() {
+            log::info!("話す言語の推奨に合わせてモデルの選択を変えた: {id}");
+            self.persist_selection();
+        }
+        self.emit_now();
+        prev
+    }
+
+    /// セットアップの途中 (前回の起動) で取得しかけたまま選択から外れたモデルのファイルを消す。
+    /// 消すのは、そのリポジトリの記録がどの revision にも無い (取得を終えたことがない) 時だけ。
+    /// 取得中・削除中・選択中のものは触らない。消したかを返す。
+    /// ブロッキング (ディレクトリの削除。途中のファイルは数個のため短い)
+    pub fn discard_unrecorded(&self, m: &ModelDef) -> anyhow::Result<bool> {
+        let rec = Provisioned::load(&self.paths.provisioned());
+        let dir = self.storage_dir(m);
+        if has_any_record(&rec, m) || !dir.is_dir() || m.id == self.selected_id() {
+            return Ok(false);
+        }
+        {
+            let inner = lock(&self.inner);
+            if inner.suspended
+                || inner.removing.contains(&m.id)
+                || inner
+                    .active
+                    .as_ref()
+                    .is_some_and(|a| a.running() && a.id == m.id)
+            {
+                return Ok(false);
+            }
+        }
+        crate::storage::check_data_dir(self.paths.root())?;
+        std::fs::remove_dir_all(&dir)
+            .with_context(|| format!("削除できません: {}", dir.display()))?;
+        lock(&self.inner).progress.remove(&m.id);
+        log::info!("選択から外れた取得途中のモデルを削除: {}", m.id);
+        self.emit_now();
+        Ok(true)
     }
 
     fn def(&self, id: &str) -> anyhow::Result<&ModelDef> {
         self.catalog
             .get(id)
-            .ok_or_else(|| anyhow!("不明なモデルです"))
+            .ok_or_else(|| anyhow!(Msg::UnknownModel))
     }
 
     /// 一覧に出ているモデル。出ていない旧候補はカタログに無い id と同じに扱う (画面に無いものを操作させない)
     fn listed_def(&self, id: &str) -> anyhow::Result<&ModelDef> {
         let m = self.def(id)?;
-        if m.legacy {
-            let selected = self.selected_id();
-            if !self.is_listed(&lock(&self.inner), &selected, m) {
-                bail!("不明なモデルです");
-            }
+        let selected = self.selected_id();
+        if !self.is_listed(&lock(&self.inner), &selected, m) {
+            bail!(Msg::UnknownModel);
         }
         Ok(m)
     }
 
-    /// 旧候補は、選択中・手元にディレクトリがある (取得済み・途中・古い revision)・
-    /// メモリ上で取得中/進捗がある時だけ出す。旧候補でなければ常に出す。
+    /// 話す言語の並びに無いもの (旧候補) は、選択中・手元にディレクトリがある (取得済み・途中・古い revision)・
+    /// メモリ上で取得中/進捗がある時だけ出す。並びにあれば常に出す。
     /// 記録だけでは出さない (ディレクトリが無いと not_downloaded で出て、約4GBを取り直せてしまうため)
     fn is_listed(&self, inner: &Inner, selected: &str, m: &ModelDef) -> bool {
-        !m.legacy
+        self.catalog.in_order(self.speech(), &m.id)
             || m.id == selected
             || inner.progress.contains_key(&m.id)
             || inner
@@ -354,6 +487,8 @@ impl ModelManager {
     pub fn list(&self) -> Vec<ModelInfo> {
         let rec = Provisioned::load(&self.paths.provisioned());
         let selected = self.selected_id();
+        let speech = self.speech();
+        let recommended = self.catalog.recommended(speech).id.clone();
         let inner = lock(&self.inner);
         let active = inner
             .active
@@ -361,10 +496,9 @@ impl ModelManager {
             .filter(|a| a.running())
             .map(|a| a.id.clone());
         self.catalog
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| self.is_listed(&inner, &selected, m))
-            .map(|(i, m)| {
+            .iter_for(speech)
+            .filter(|m| self.is_listed(&inner, &selected, m))
+            .map(|m| {
                 let storage = self.storage_dir(m);
                 let progress = inner.progress.get(&m.id);
                 let (state, bytes_done, eta_seconds, error) =
@@ -393,10 +527,11 @@ impl ModelManager {
                     };
                 ModelInfo {
                     id: m.id.clone(),
-                    name: m.name.clone(),
-                    description: m.description.clone(),
+                    name: m.name(),
+                    description: m.description(),
+                    tuned_for: m.tuned_for,
                     size_bytes: m.size_bytes,
-                    recommended: i == 0,
+                    recommended: m.id == recommended,
                     selected: m.id == selected,
                     state,
                     bytes_done,
@@ -424,7 +559,7 @@ impl ModelManager {
             &self.paths,
             m,
         ) {
-            bail!("ダウンロードが済んでいないモデルは選べません");
+            bail!(Msg::ModelNotDownloaded);
         }
         Ok(m.clone())
     }
@@ -435,7 +570,10 @@ impl ModelManager {
         Provisioned::update(&self.paths.provisioned(), |r| {
             r.selected_model = Some(id.clone())
         })
-        .context("モデルの選択を保存できません")?;
+        .map_err(|e| {
+            log::error!("モデルの選択を保存できません: {e:#}");
+            Msg::CannotSaveModelSelection
+        })?;
         *self.selected.write().unwrap_or_else(|p| p.into_inner()) = id;
         self.emit_now();
         Ok(())
@@ -452,19 +590,19 @@ impl ModelManager {
             let rec = Provisioned::load(&self.paths.provisioned());
             // 確認と開始を同じロックの中で行う (確認の後に削除されて、出ていない旧候補を取り直さないように)
             if !self.is_listed(&inner, &selected, &m) {
-                bail!("不明なモデルです");
+                bail!(Msg::UnknownModel);
             }
             if inner.suspended {
-                bail!("削除を実行中です");
+                bail!(Msg::DeletionInProgress);
             }
             if inner.removing.contains(&m.id) {
-                bail!("モデルを削除しています");
+                bail!(Msg::RemovingModel);
             }
             if let Some(a) = inner.active.as_ref().filter(|a| a.running()) {
                 if a.id == m.id {
                     return Ok(());
                 }
-                bail!("他のモデルをダウンロード中です");
+                bail!(Msg::OtherModelDownloading);
             }
             if is_installed(&rec, &self.paths, &m) {
                 return Ok(());
@@ -539,7 +677,7 @@ impl ModelManager {
         .await?;
         if !cache.snapshot_complete(&files) {
             return Err(failed(
-                "モデルを保存できません",
+                Msg::ModelSaveFailed,
                 anyhow!("スナップショットが揃っていない"),
             ));
         }
@@ -652,11 +790,11 @@ impl ModelManager {
             &self.paths,
             &m,
         ) {
-            bail!("ダウンロード済みです");
+            bail!(Msg::ModelAlreadyDownloaded);
         }
         if m.id == self.selected_id() {
             // セットアップの取得中のもの (セットアップ完了後に選択中が未取得になることはない)
-            bail!("使用中のモデルは削除できません");
+            bail!(Msg::ModelInUse);
         }
         self.stop_active(Some(id)).await;
         // ディレクトリの削除は数GBになりうるため async ランタイムを塞がない
@@ -664,7 +802,10 @@ impl ModelManager {
         let target = m.clone();
         tauri::async_runtime::spawn_blocking(move || this.remove(&target))
             .await
-            .map_err(|e| anyhow!("削除処理が異常終了しました: {e}"))??;
+            .map_err(|e| {
+                log::error!("削除処理が異常終了しました: {e}");
+                anyhow!(Msg::Internal)
+            })??;
         log::info!("モデルの取得を中止: {}", m.id);
         Ok(())
     }
@@ -673,7 +814,7 @@ impl ModelManager {
     pub fn delete(&self, id: &str) -> anyhow::Result<()> {
         let m = self.listed_def(id)?.clone();
         if m.id == self.selected_id() {
-            bail!("使用中のモデルは削除できません");
+            bail!(Msg::ModelInUse);
         }
         self.remove(&m)?;
         log::info!("モデルを削除: {}", m.id);
@@ -691,24 +832,24 @@ impl ModelManager {
     fn remove_files(&self, m: &ModelDef) -> anyhow::Result<()> {
         let cannot = |e: anyhow::Error| {
             log::error!("モデルを削除できません ({}): {e:#}", m.id);
-            anyhow!("モデルを削除できません")
+            anyhow!(Msg::CannotDeleteModel)
         };
         // 確認と記録の削除はロックの中で行い、取得の開始と重ねない。ディレクトリの削除は時間がかかるため
         // ロックの外で行い (他のモデルの進捗・一覧を止めない)、その間は `removing` で同じモデルの取得を拒む
         let _removing = {
             let mut inner = lock(&self.inner);
             if inner.suspended {
-                bail!("削除を実行中です");
+                bail!(Msg::DeletionInProgress);
             }
             if inner.removing.contains(&m.id) {
-                bail!("モデルを削除しています");
+                bail!(Msg::RemovingModel);
             }
             if inner
                 .active
                 .as_ref()
                 .is_some_and(|a| a.running() && a.id == m.id)
             {
-                bail!("ダウンロード中のモデルは削除できません。中止してください");
+                bail!(Msg::ModelDownloadingCannotDelete);
             }
             crate::storage::check_data_dir(self.paths.root()).map_err(cannot)?;
             let prefix = format!("{}@", m.hf.repo);
@@ -738,7 +879,7 @@ impl ModelManager {
         {
             let mut inner = lock(&self.inner);
             if inner.suspended {
-                bail!("削除を実行中です");
+                bail!(Msg::DeletionInProgress);
             }
             inner.suspended = true;
         }
@@ -757,11 +898,11 @@ impl ModelManager {
             || inner.active.as_ref().is_some_and(|a| a.running())
     }
 
-    /// 全モデルを消した後: 進捗を捨て、選択を既定に戻す (記録ごと消えているため書き込まない)
+    /// 全モデルを消した後: 進捗を捨て、選択を既定 (話す言語の推奨) に戻す (記録ごと消えているため書き込まない)
     pub fn reset(&self) {
         lock(&self.inner).progress.clear();
         *self.selected.write().unwrap_or_else(|p| p.into_inner()) =
-            self.catalog.default_model().id.clone();
+            self.catalog.recommended(self.speech()).id.clone();
         self.emit_now();
     }
 
@@ -861,23 +1002,30 @@ mod tests {
                 revision: C_REV.into(),
                 files: c,
             });
-            let def = |id: &str, repo: &str, rev: &str, size_bytes, legacy| ModelDef {
+            let def = |id: &str, repo: &str, rev: &str, size_bytes, text, tuned_for| ModelDef {
                 id: id.into(),
                 hf: HfModel {
                     endpoint: server.endpoint.clone(),
                     repo: repo.into(),
                     revision: rev.into(),
                 },
-                name: format!("名前 {id}"),
-                description: String::new(),
+                text,
+                tuned_for,
                 size_bytes,
-                legacy,
             };
-            let catalog = Catalog::new(vec![
-                def("a", REPO, REVISION, sa, false),
-                def("b", B_REPO, B_REV, sb, false),
-                def("c", C_REPO, C_REV, sc, true),
-            ]);
+            let ja = Some(Locale::Ja);
+            // a = ja の推奨 (日本語向け)、b = en の推奨、c = 旧候補 (どの並びにも無い)
+            let catalog = Catalog::new(
+                vec![
+                    def("a", REPO, REVISION, sa, ModelText::Ja8bit, ja),
+                    def("b", B_REPO, B_REV, sb, ModelText::Base17b8bit, None),
+                    def("c", C_REPO, C_REV, sc, ModelText::JaBf16, ja),
+                ],
+                vec![
+                    (Locale::Ja, vec!["a".into(), "b".into()]),
+                    (Locale::En, vec!["b".into(), "a".into()]),
+                ],
+            );
             Self {
                 _tmp: tmp,
                 paths,
@@ -888,8 +1036,12 @@ mod tests {
         }
 
         fn manager(&self) -> Arc<ModelManager> {
+            self.manager_for(Locale::Ja)
+        }
+
+        fn manager_for(&self, speech: Locale) -> Arc<ModelManager> {
             let ev = self.events.clone();
-            ModelManager::new(self.paths.clone(), self.catalog.clone(), move |l| {
+            ModelManager::new(self.paths.clone(), self.catalog.clone(), speech, move |l| {
                 ev.lock().unwrap().push(l.to_vec())
             })
             .unwrap()
@@ -951,20 +1103,137 @@ mod tests {
     #[test]
     fn distributed_catalog_is_consistent() {
         let c = Catalog::distributed();
-        assert_eq!(c.default_model().id, DEFAULT_MODEL_ID);
         let ids: Vec<&str> = c.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["ja-8bit", "ja-bf16"]);
-        // 新規に選べるのは既定のみ。既定が旧候補だと新規の導入で一覧が空になりうる
-        let legacy: Vec<bool> = c.iter().map(|m| m.legacy).collect();
-        assert_eq!(legacy, vec![false, true]);
+        assert_eq!(ids, vec!["ja-8bit", "base-1.7b-8bit", "ja-bf16"]);
+        // 話す言語ごとの並び (docs/architecture.md「モデルの管理」)
+        let order = |l| c.iter_for(l).map(|m| m.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(order(Locale::Ja), ["ja-8bit", "base-1.7b-8bit", "ja-bf16"]);
+        assert_eq!(order(Locale::En), ["base-1.7b-8bit", "ja-8bit", "ja-bf16"]);
+        assert_eq!(c.recommended(Locale::Ja).id, "ja-8bit");
+        assert_eq!(c.recommended(Locale::En).id, "base-1.7b-8bit");
+        // ja-bf16 はどの並びにも無い (旧候補)
+        for l in Locale::ALL {
+            assert!(!c.in_order(l, "ja-bf16"));
+            assert_eq!(c.order(l).len(), 2, "{l:?}");
+        }
+        let tuned: Vec<Option<Locale>> = c.iter().map(|m| m.tuned_for).collect();
+        assert_eq!(tuned, vec![Some(Locale::Ja), None, Some(Locale::Ja)]);
         // リポジトリが重なると、削除・古い版の掃除が他のモデルのファイルを消すため
         let mut repos: Vec<&str> = c.iter().map(|m| m.hf.repo.as_str()).collect();
+        repos.sort();
         repos.dedup();
-        assert_eq!(repos.len(), 2);
+        assert_eq!(repos.len(), 3);
         for m in c.iter() {
             assert_eq!(m.hf.revision.len(), 40, "{}: commit で固定する", m.id);
+            assert!(m.hf.revision.chars().all(|c| c.is_ascii_hexdigit()));
             assert!(m.hf.endpoint.starts_with("https://"));
         }
+        // 表示名・説明は表示言語ごと
+        for m in c.iter() {
+            for l in Locale::ALL {
+                assert!(!Msg::ModelName(m.text).text(l).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn list_order_and_recommended_follow_speech_language() {
+        let fx = Fx::new();
+        fx.install("a");
+        let m = fx.manager();
+        let l = m.list();
+        assert_eq!(ids(&l), ["a", "b"]);
+        assert!(l[0].recommended && !l[1].recommended);
+        assert_eq!(l[0].tuned_for, Some(Locale::Ja));
+        m.set_speech(Locale::En);
+        let l = m.list();
+        assert_eq!(ids(&l), ["b", "a"]);
+        assert!(l[0].recommended && !l[1].recommended);
+        assert_eq!(l.iter().filter(|i| i.recommended).count(), 1);
+        // 話す言語を変えても選択は変えない
+        assert_eq!(m.selected_id(), "a");
+        assert!(info(&m, "a").selected);
+        // 旧候補は末尾
+        fx.install("c");
+        assert_eq!(ids(&m.list()), ["b", "a", "c"]);
+        // 変更を送っている
+        assert_eq!(
+            fx.events.lock().unwrap().last().map(|l| ids(l).join(",")),
+            Some("b,a".to_string())
+        );
+    }
+
+    #[test]
+    fn fresh_install_selects_recommended_for_speech_language() {
+        let fx = Fx::new();
+        let m = fx.manager_for(Locale::En);
+        assert_eq!(m.selected_id(), "b");
+        assert!(!fx.paths.provisioned().exists());
+        // セットアップの取得前に話す言語を変えた: 推奨に合わせる (記録が無ければ書かない)
+        m.set_speech(Locale::Ja);
+        assert_eq!(m.select_recommended().map(|p| p.id), Some("b".into()));
+        assert_eq!(m.selected_id(), "a");
+        assert!(m.select_recommended().is_none(), "同じなら変えない");
+        assert!(!fx.paths.provisioned().exists());
+        assert!(info(&m, "a").selected && info(&m, "a").recommended);
+        // 記録 (runtime の途中等) があれば選択を書き込む
+        Provisioned::update(&fx.paths.provisioned(), |r| {
+            r.runtime = Some(super::super::StepRecord {
+                version: "v".into(),
+                completed_at: 1,
+            })
+        })
+        .unwrap();
+        m.set_speech(Locale::En);
+        assert!(m.select_recommended().is_some());
+        assert_eq!(fx.rec().selected_model.as_deref(), Some("b"));
+        // 実行環境とモデルのみ削除の後も話す言語の推奨に戻す
+        m.reset();
+        assert_eq!(m.selected_id(), "b");
+    }
+
+    #[test]
+    fn discard_unrecorded_removes_only_partial_files() {
+        let fx = Fx::new();
+        let m = fx.manager_for(Locale::Ja);
+        // 前回の起動で a を取得しかけた (記録なし・ファイルあり)
+        let a_dir = fx.def("a").hf.storage_dir(&fx.paths.models());
+        std::fs::create_dir_all(a_dir.join("blobs")).unwrap();
+        std::fs::write(a_dir.join("blobs").join("x.incomplete"), b"part").unwrap();
+        // 選択中は消さない
+        assert!(!m.discard_unrecorded(&fx.def("a").clone()).unwrap());
+        m.set_speech(Locale::En);
+        let prev = m.select_recommended().unwrap();
+        assert_eq!(prev.id, "a");
+        assert!(m.discard_unrecorded(&prev).unwrap());
+        assert!(!a_dir.exists());
+        // 取得を終えた記録のあるもの (古い revision を含む) は消さない
+        fx.install("c");
+        let c = fx.def("c").clone();
+        assert!(!m.discard_unrecorded(&c).unwrap());
+        assert!(c.hf.storage_dir(&fx.paths.models()).is_dir());
+        Provisioned::update(&fx.paths.provisioned(), |r| {
+            let v = r.models.remove(&c.hf.version()).unwrap();
+            r.models.insert(format!("{C_REPO}@{}", "9".repeat(40)), v);
+        })
+        .unwrap();
+        assert!(!m.discard_unrecorded(&c).unwrap());
+        // ディレクトリが無ければ何もしない
+        assert!(!m.discard_unrecorded(&fx.def("a").clone()).unwrap());
+    }
+
+    #[test]
+    fn migration_default_is_recommended_for_speech_language() {
+        let fx = Fx::new();
+        fx.install("a");
+        fx.install("b");
+        Provisioned::update(&fx.paths.provisioned(), |r| r.selected_model = None).unwrap();
+        // 両方あれば話す言語の推奨
+        assert_eq!(fx.manager_for(Locale::En).selected_id(), "b");
+        Provisioned::update(&fx.paths.provisioned(), |r| r.selected_model = None).unwrap();
+        assert_eq!(fx.manager_for(Locale::Ja).selected_id(), "a");
+        // 選択の記録があればそれを使う
+        assert_eq!(fx.manager_for(Locale::En).selected_id(), "a");
     }
 
     #[test]
@@ -983,7 +1252,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&l[0]).unwrap(),
             serde_json::json!({
-                "id": "a", "name": "名前 a", "description": "", "sizeBytes": l[0].size_bytes,
+                "id": "a", "name": "日本語 (8bit)", "description": Msg::ModelDescription(ModelText::Ja8bit).text(Locale::Ja),
+                "tunedFor": "ja", "sizeBytes": l[0].size_bytes,
                 "recommended": true, "selected": true, "state": "not_downloaded",
                 "bytesDone": 0, "etaSeconds": null, "error": null, "diskBytes": 0
             })
@@ -1006,7 +1276,7 @@ mod tests {
     #[test]
     fn resolve_selection_rules() {
         let fx = Fx::new();
-        let sel = |rec: &Provisioned| resolve_selection(&fx.catalog, rec, &fx.paths);
+        let sel = |rec: &Provisioned| resolve_selection(&fx.catalog, rec, &fx.paths, Locale::Ja);
         assert_eq!(sel(&Provisioned::default()), "a");
         fx.install("a");
         fx.install("b");
@@ -1201,7 +1471,10 @@ mod tests {
         let l = wait_idle(&m);
         let b = l.iter().find(|i| i.id == "b").unwrap();
         assert_eq!(b.state, ModelState::Error, "{l:?}");
-        assert!(b.error.as_deref().unwrap().contains("中断"), "{b:?}");
+        assert!(
+            b.error.as_ref().unwrap().to_string().contains("中断"),
+            "{b:?}"
+        );
         assert!(b.bytes_done >= 10_000, "{b:?}");
         m.download("b").unwrap();
         let b = wait_idle(&m).into_iter().find(|i| i.id == "b").unwrap();

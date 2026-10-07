@@ -9,6 +9,8 @@ use std::sync::{Mutex, RwLock};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{Locale, Msg, UiLanguage};
+
 pub const VAD_SENSITIVITY_MAX: u32 = 100;
 pub const SILENCE_MS_MIN: u32 = 300;
 pub const SILENCE_MS_MAX: u32 = 3000;
@@ -189,6 +191,19 @@ pub struct Settings {
     pub auto_check_updates: bool,
     /// ON/OFF のグローバルショートカット (`shortcut::parse` の形式)。None は無効
     pub shortcut: Option<String>,
+    /// 表示言語 (docs/architecture.md「言語」)。system は macOS の優先言語から解決する (i18n::UiLanguage::resolve)
+    pub ui_language: UiLanguage,
+    /// 話す言語。ASR の language・推奨モデル・音声コマンドの既定を決める。
+    /// 既存の設定に無ければ ja (それまで日本語だけだったため)。新規は `Settings::new_install` で表示言語に合わせる
+    #[serde(deserialize_with = "lenient_locale")]
+    pub speech_language: Locale,
+}
+
+/// 未知の値・文字列でない値 (null 等) は既定 (ja) として読む (設定全体を捨てない)。
+/// 変更時の不正な値は apply_patch がエラーにする
+fn lenient_locale<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Locale, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_str().and_then(Locale::parse).unwrap_or_default())
 }
 
 impl Default for Settings {
@@ -200,7 +215,7 @@ impl Default for Settings {
             // 言葉を考える間で発話が分割されないよう長め (implementation-plan.md 2.)
             silence_ms: 1300,
             voice_commands_enabled: true,
-            voice_commands: default_voice_commands(),
+            voice_commands: default_voice_commands(Locale::default()),
             asr_context: String::new(),
             excluded_apps: Vec::new(),
             panel_position: None,
@@ -209,24 +224,41 @@ impl Default for Settings {
             input_mode: InputMode::Continuous,
             auto_check_updates: true,
             shortcut: Some(DEFAULT_SHORTCUT.to_string()),
+            ui_language: UiLanguage::System,
+            speech_language: Locale::default(),
         }
     }
 }
 
-pub fn default_voice_commands() -> Vec<VoiceCommand> {
+/// 話す言語ごとの音声コマンドの既定 (docs/architecture.md「言語」の音声コマンドの既定)。
+/// id とキーは言語によらず同じにする (言い方だけが言語ごとに違う)
+pub fn default_voice_commands(lang: Locale) -> Vec<VoiceCommand> {
+    let (enter, newline, send): (&[&str], &[&str], &[&str]) = match lang {
+        Locale::Ja => (&["確定", "エンター"], &["改行"], &["送信"]),
+        Locale::En => (&["enter"], &["new line", "line break"], &["send"]),
+    };
     let cmd = |id: &str, phrases: &[&str], key: Key, modifiers: Vec<Modifier>| VoiceCommand {
         id: id.to_string(),
         phrases: phrases.iter().map(|s| s.to_string()).collect(),
         key: KeyCombo { key, modifiers },
     };
     vec![
-        cmd("enter", &["確定", "エンター"], Key::Enter, vec![]),
-        cmd("newline", &["改行"], Key::Enter, vec![Modifier::Shift]),
-        cmd("send", &["送信"], Key::Enter, vec![Modifier::Cmd]),
+        cmd("enter", enter, Key::Enter, vec![]),
+        cmd("newline", newline, Key::Enter, vec![Modifier::Shift]),
+        cmd("send", send, Key::Enter, vec![Modifier::Cmd]),
     ]
 }
 
 impl Settings {
+    /// 新規 (settings.json が無い) の既定。話す言語は解決した表示言語に合わせる
+    pub fn new_install(display: Locale) -> Self {
+        Self {
+            speech_language: display,
+            voice_commands: default_voice_commands(display),
+            ..Self::default()
+        }
+    }
+
     /// 範囲外の値を丸める。不正な値でアプリが動かなくなるより、近い有効値で動く方がよい。
     pub fn normalized(mut self) -> Self {
         self.vad_sensitivity = self.vad_sensitivity.min(VAD_SENSITIVITY_MAX);
@@ -247,28 +279,43 @@ impl Settings {
 
     /// トップレベルのキー単位で上書きする。未知のキーや型違いはエラー。
     pub fn apply_patch(&self, patch: &serde_json::Value) -> Result<Settings> {
-        let patch = patch
-            .as_object()
-            .context("patch はオブジェクトである必要があります")?;
+        let patch = patch.as_object().ok_or(Msg::SettingsInvalidType)?;
         let mut base = serde_json::to_value(self).context("設定のシリアライズに失敗")?;
         let obj = base
             .as_object_mut()
             .context("設定がオブジェクトではありません")?;
         for (k, v) in patch {
             if !obj.contains_key(k) {
-                anyhow::bail!("未知の設定キー: {k}");
+                anyhow::bail!(Msg::SettingsUnknownKey { key: k.clone() });
             }
-            if k == "panelStyle" && v.as_str().and_then(PanelStyle::parse).is_none() {
-                anyhow::bail!("panelStyle が不正です: {v}");
-            }
-            if k == "inputMode" && v.as_str().and_then(InputMode::parse).is_none() {
-                anyhow::bail!("inputMode が不正です: {v}");
+            // 列挙の値は読み込み時には未知の値を既定として読むため、変更時にここで弾く
+            let valid = match k.as_str() {
+                "panelStyle" => v.as_str().and_then(PanelStyle::parse).is_some(),
+                "inputMode" => v.as_str().and_then(InputMode::parse).is_some(),
+                "uiLanguage" => v.as_str().and_then(UiLanguage::parse).is_some(),
+                "speechLanguage" => v.as_str().and_then(Locale::parse).is_some(),
+                _ => true,
+            };
+            if !valid {
+                log::warn!("設定 {k} の値が不正: {v}");
+                anyhow::bail!(Msg::SettingsInvalidValue { key: k.clone() });
             }
             obj.insert(k.clone(), v.clone());
         }
-        let next: Settings =
-            serde_json::from_value(base).context("設定の値の型が正しくありません")?;
-        let next = next.normalized();
+        // serde の詳細 (英語の技術的な文) は表示せずログにだけ出す
+        let next: Settings = serde_json::from_value(base).map_err(|e| {
+            log::warn!("設定の値の型が正しくありません: {e}");
+            Msg::SettingsInvalidType
+        })?;
+        let mut next = next.normalized();
+        // 話す言語を変えた時、音声コマンドが変更前の言語の既定のまま (編集していない) なら新しい言語の既定にする。
+        // 同じ変更で音声コマンドも渡された場合はそちらを使う
+        if next.speech_language != self.speech_language
+            && !patch.contains_key("voiceCommands")
+            && self.voice_commands == default_voice_commands(self.speech_language)
+        {
+            next.voice_commands = default_voice_commands(next.speech_language);
+        }
         // 保存済みの値は検証しない (古い設定が不正でも他の項目を変更できるように)。変更する時だけ
         if patch.contains_key("voiceCommands") {
             crate::voice_command::validate(&next.voice_commands)?;
@@ -276,7 +323,9 @@ impl Settings {
         if patch.contains_key("asrContext")
             && next.asr_context.chars().count() > ASR_CONTEXT_MAX_CHARS
         {
-            anyhow::bail!("認識のヒントは{ASR_CONTEXT_MAX_CHARS}文字以内にしてください");
+            anyhow::bail!(Msg::AsrContextTooLong {
+                max: ASR_CONTEXT_MAX_CHARS
+            });
         }
         if patch.contains_key("shortcut") {
             if let Some(sc) = &next.shortcut {
@@ -293,8 +342,13 @@ impl Settings {
         let mut value: serde_json::Value =
             serde_json::from_slice(bytes).context("JSON として読めません")?;
         migrate_vocabulary(&mut value);
+        let has_voice_commands = value.get("voiceCommands").is_some();
         let mut s: Settings =
             serde_json::from_value(value).context("設定の値の型が正しくありません")?;
+        if !has_voice_commands {
+            // キーが無ければ話す言語の既定 (struct の既定は ja のため)
+            s.voice_commands = default_voice_commands(s.speech_language);
+        }
         s = s.normalized();
         // 手で編集する等で上限を超えていても起動は止めず、上限で切って使う (normalized と同じく
         // 近い有効値で動かす)。変更時は apply_patch がエラーにして保存させない。
@@ -346,7 +400,8 @@ pub struct SettingsStore {
 
 impl SettingsStore {
     /// 読めない・壊れている場合は既定値で起動する (壊れたファイルは退避して残す)。
-    pub fn load(path: PathBuf) -> Self {
+    /// `system` は macOS の優先言語から求めた表示言語。新規 (と読めない時) の話す言語に使う
+    pub fn load(path: PathBuf, system: Locale) -> Self {
         let settings = match std::fs::read(&path) {
             Ok(bytes) => match Settings::from_saved(&bytes) {
                 Ok(s) => s,
@@ -356,13 +411,13 @@ impl SettingsStore {
                     if let Err(e) = std::fs::rename(&path, &backup) {
                         log::warn!("壊れた settings.json の退避に失敗: {e}");
                     }
-                    Settings::default()
+                    Settings::new_install(system)
                 }
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::new_install(system),
             Err(e) => {
                 log::warn!("settings.json の読み込みに失敗: {e}");
-                Settings::default()
+                Settings::new_install(system)
             }
         };
         Self {
@@ -399,7 +454,9 @@ impl SettingsStore {
         let applied = apply(&before, &next)?;
         if let Err(e) = write_atomic(&self.path, &next) {
             rollback(applied);
-            return Err(e);
+            // 詳細 (パス・OS のエラー) はログにだけ出す
+            log::error!("設定を保存できません: {e:#}");
+            return Err(Msg::SettingsSaveFailed.into());
         }
         match self.current.write() {
             Ok(mut g) => *g = next.clone(),
@@ -585,17 +642,17 @@ mod tests {
             std::env::temp_dir().join(format!("mukuchi-settings-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("settings.json");
-        let store = SettingsStore::load(path.clone());
+        let store = SettingsStore::load(path.clone(), Locale::Ja);
         assert_eq!(store.get(), Settings::default());
         store
             .update(&json!({ "asrContext": " mukuchi の話\n固有名詞 \n", "inputDeviceId": "" }))
             .unwrap();
-        let reloaded = SettingsStore::load(path.clone());
+        let reloaded = SettingsStore::load(path.clone(), Locale::Ja);
         assert_eq!(reloaded.get().asr_context, "mukuchi の話\n固有名詞");
         assert_eq!(reloaded.get().input_device_id, None);
 
         std::fs::write(&path, b"{broken").unwrap();
-        let broken = SettingsStore::load(path.clone());
+        let broken = SettingsStore::load(path.clone(), Locale::Ja);
         assert_eq!(broken.get(), Settings::default());
         assert!(path.with_extension("json.broken").exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -609,7 +666,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let store = SettingsStore::load(dir.join("settings.json"));
+        let store = SettingsStore::load(dir.join("settings.json"), Locale::Ja);
 
         // 検証エラーなら反映しない
         let mut applied = false;
@@ -636,7 +693,7 @@ mod tests {
         // 保存に失敗したら取り消す (保存先にディレクトリを置いて rename を失敗させる)
         let blocked = dir.join("blocked");
         std::fs::create_dir_all(blocked.join("settings.json").join("x")).unwrap();
-        let store = SettingsStore::load(blocked.join("settings.json"));
+        let store = SettingsStore::load(blocked.join("settings.json"), Locale::Ja);
         let mut rolled_back = None;
         let r = store.update_with(
             &json!({ "launchAtLogin": false }),
@@ -712,7 +769,7 @@ mod tests {
             json!({ "vocabulary": ["Tauri", "mukuchi"] }).to_string(),
         )
         .unwrap();
-        let store = SettingsStore::load(path.clone());
+        let store = SettingsStore::load(path.clone(), Locale::Ja);
         assert_eq!(store.get().asr_context, "Tauri mukuchi");
         store.update(&json!({ "silenceMs": 800 })).unwrap();
         let saved: serde_json::Value =
@@ -720,6 +777,169 @@ mod tests {
         assert!(saved.get("vocabulary").is_none());
         assert_eq!(saved["asrContext"], "Tauri mukuchi");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn languages_default_new_install_and_existing() {
+        // 既存の設定 (キーなし) は ja: それまで日本語だけだったため
+        let old = Settings::from_saved(json!({ "silenceMs": 800 }).to_string().as_bytes()).unwrap();
+        assert_eq!(
+            (old.ui_language, old.speech_language),
+            (UiLanguage::System, Locale::Ja)
+        );
+        assert_eq!(old.voice_commands, default_voice_commands(Locale::Ja));
+        // 新規は解決した表示言語
+        let fresh = Settings::new_install(Locale::En);
+        assert_eq!(fresh.ui_language, UiLanguage::System);
+        assert_eq!(fresh.speech_language, Locale::En);
+        assert_eq!(fresh.voice_commands, default_voice_commands(Locale::En));
+        assert_eq!(Settings::new_install(Locale::Ja), Settings::default());
+        let v = serde_json::to_value(&fresh).unwrap();
+        assert_eq!(
+            (v["uiLanguage"].clone(), v["speechLanguage"].clone()),
+            (json!("system"), json!("en"))
+        );
+        // 未知の値は既定として読み、設定全体は捨てない
+        let s = Settings::from_saved(
+            json!({ "uiLanguage": "fr", "speechLanguage": "de", "silenceMs": 800 })
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            (s.ui_language, s.speech_language, s.silence_ms),
+            (UiLanguage::System, Locale::Ja, 800)
+        );
+        // 文字列でない値 (null 等) でも設定全体は捨てない
+        let s = Settings::from_saved(
+            json!({ "uiLanguage": null, "speechLanguage": 3, "silenceMs": 800 })
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            (s.ui_language, s.speech_language, s.silence_ms),
+            (UiLanguage::System, Locale::Ja, 800)
+        );
+        // 音声コマンドが無く話す言語が en なら en の既定
+        let s =
+            Settings::from_saved(json!({ "speechLanguage": "en" }).to_string().as_bytes()).unwrap();
+        assert_eq!(s.voice_commands, default_voice_commands(Locale::En));
+        // 保存された音声コマンドはそのまま
+        let s = Settings::from_saved(
+            json!({ "speechLanguage": "en", "voiceCommands": [] })
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert!(s.voice_commands.is_empty());
+    }
+
+    #[test]
+    fn store_new_install_uses_system_locale() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::load(dir.path().join("settings.json"), Locale::En);
+        assert_eq!(store.get().speech_language, Locale::En);
+        assert_eq!(
+            store.get().voice_commands,
+            default_voice_commands(Locale::En)
+        );
+    }
+
+    #[test]
+    fn type_error_is_reported_without_serde_details() {
+        let e = Settings::default()
+            .apply_patch(&json!({ "silenceMs": "x" }))
+            .unwrap_err();
+        assert_eq!(format!("{e:#}"), Msg::SettingsInvalidType.to_string());
+        assert_eq!(e.downcast_ref::<Msg>(), Some(&Msg::SettingsInvalidType));
+    }
+
+    #[test]
+    fn language_patch_validation() {
+        let s = Settings::default();
+        let next = s
+            .apply_patch(&json!({ "uiLanguage": "en", "speechLanguage": "en" }))
+            .unwrap();
+        assert_eq!(
+            (next.ui_language, next.speech_language),
+            (UiLanguage::En, Locale::En)
+        );
+        assert_eq!(
+            s.apply_patch(&json!({ "uiLanguage": "ja" }))
+                .unwrap()
+                .ui_language,
+            UiLanguage::Ja
+        );
+        for bad in [
+            json!({ "uiLanguage": "fr" }),
+            json!({ "uiLanguage": 1 }),
+            json!({ "speechLanguage": "system" }),
+            json!({ "speechLanguage": "EN" }),
+        ] {
+            assert!(s.apply_patch(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn speech_language_change_swaps_default_voice_commands_only() {
+        let ja = Settings::default();
+        // 既定のままなら新しい言語の既定に入れ替える
+        let en = ja.apply_patch(&json!({ "speechLanguage": "en" })).unwrap();
+        assert_eq!(en.voice_commands, default_voice_commands(Locale::En));
+        let back = en.apply_patch(&json!({ "speechLanguage": "ja" })).unwrap();
+        assert_eq!(back.voice_commands, default_voice_commands(Locale::Ja));
+        // 編集済みなら変えない
+        let mut edited = ja.clone();
+        edited.voice_commands[0].phrases.push("オッケー".into());
+        let next = edited
+            .apply_patch(&json!({ "speechLanguage": "en" }))
+            .unwrap();
+        assert_eq!(next.voice_commands, edited.voice_commands);
+        // 同じ変更で音声コマンドも渡されたらそちら
+        let custom =
+            json!([{ "id": "x", "phrases": ["go"], "key": { "key": "enter", "modifiers": [] } }]);
+        let next = ja
+            .apply_patch(&json!({ "speechLanguage": "en", "voiceCommands": custom }))
+            .unwrap();
+        assert_eq!(next.voice_commands.len(), 1);
+        // 話す言語が変わらなければ何もしない
+        let same = ja.apply_patch(&json!({ "speechLanguage": "ja" })).unwrap();
+        assert_eq!(same.voice_commands, ja.voice_commands);
+    }
+
+    #[test]
+    fn default_voice_commands_per_language() {
+        for l in Locale::ALL {
+            let c = default_voice_commands(l);
+            assert!(crate::voice_command::validate(&c).is_ok(), "{l:?}");
+            let ids: Vec<&str> = c.iter().map(|c| c.id.as_str()).collect();
+            assert_eq!(ids, ["enter", "newline", "send"], "{l:?}");
+        }
+        let en = default_voice_commands(Locale::En);
+        use crate::voice_command::match_command;
+        assert_eq!(match_command("Enter.", &en).unwrap().modifiers, vec![]);
+        assert_eq!(
+            match_command("New line.", &en).unwrap().modifiers,
+            vec![Modifier::Shift]
+        );
+        assert_eq!(
+            match_command("line break", &en).unwrap().modifiers,
+            vec![Modifier::Shift]
+        );
+        assert_eq!(
+            match_command("Send!", &en).unwrap().modifiers,
+            vec![Modifier::Cmd]
+        );
+    }
+
+    #[test]
+    fn save_failure_is_reported_without_details() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("settings.json").join("x")).unwrap();
+        let store = SettingsStore::load(dir.path().join("settings.json"), Locale::Ja);
+        let e = store.update(&json!({ "silenceMs": 800 })).unwrap_err();
+        assert_eq!(e.downcast_ref::<Msg>(), Some(&Msg::SettingsSaveFailed));
     }
 
     #[test]

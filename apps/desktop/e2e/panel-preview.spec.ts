@@ -2,7 +2,8 @@
  * パネルのプレビューが 3 行を超えても最新の文字が見えること (古い行は上に送られる) と、
  * 入力レベルのバーの平滑化 (上がる時は速く、下がる時はゆっくり)。
  */
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, SCREENSHOT, test, TIMING, type Messages } from "./fixtures";
 
 const PANEL = { width: 560, height: 360 };
 // 1 行あたり約 27 文字。5 行以上になる長さ
@@ -10,7 +11,7 @@ const LONG =
   "明日の打ち合わせは十時からに変更してください。資料は前日までに共有しておきます。" +
   "会議室は三階の大会議室を予約しました。参加者は営業部と開発部の全員です。議題は来期の計画と予算についてです。";
 
-async function open(page: Page, query: string) {
+async function open(page: Page, m: Messages, query: string) {
   await page.setViewportSize(PANEL);
   await page.goto(`/?${query}`);
   // 描画されてから待つ (描画前は同梱フォントの読み込みが始まっておらず、fonts.ready がすぐ解決する)
@@ -18,7 +19,7 @@ async function open(page: Page, query: string) {
   await page.evaluate(() => document.fonts.ready);
   await page.waitForFunction(() => "__mukuchiMock" in window);
   // 初期値 (get_status) の表示 = イベントの購読が済んでから流す
-  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
 }
 
 async function mock(page: Page, fn: string) {
@@ -40,8 +41,8 @@ function lastCharVisible(page: Page) {
   });
 }
 
-test("panel: 3 行を超える発話も途中表示・確定のたびに最新の文字が見える", async ({ page }) => {
-  await open(page, "window=panel&mock=idle");
+test("panel: 3 行を超える発話も途中表示・確定のたびに最新の文字が見える", { tag: SCREENSHOT }, async ({ page, m, snap }) => {
+  await open(page, m, "window=panel&mock=idle");
   const preview = page.getByTestId("preview");
   for (const id of [1, 2]) {
     await mock(page, `api.setStatus({ phase: "speaking" }); api.started(${id});`);
@@ -64,11 +65,12 @@ test("panel: 3 行を超える発話も途中表示・確定のたびに最新�
     const height = await preview.evaluate((el) => el.getBoundingClientRect().height);
     expect(height).toBeLessThanOrEqual(14 * 1.6 * 3 + 0.5);
   }
-  await page.screenshot({ path: "e2e/screenshots/panel-preview-long.png" });
+  await snap("panel-preview-long");
 });
 
-test("panel: 入力レベルのバーは上がる時は速く、下がる時はゆっくり追従する", async ({ page }) => {
-  await open(page, "window=panel&mock=idle");
+// 減衰の途中の値を実時間で捉えるため TIMING
+test("panel: 入力レベルのバーは上がる時は速く、下がる時はゆっくり追従する", { tag: TIMING }, async ({ page, m }) => {
+  await open(page, m, "window=panel&mock=idle");
   const bar = page.getByTestId("level-meter-bar");
   const ratio = () =>
     bar.evaluate((el) => el.getBoundingClientRect().width / el.parentElement!.getBoundingClientRect().width);

@@ -50,4 +50,9 @@ CERはNFKC正規化・小文字化・句読点/空白除去後の文字単位編
 
 量子化済みチェックポイントの候補比較は `scripts/make_tts.sh` (複数話者のTTS音声) と `scripts/run_models.sh`。結果と決定は [MODEL_DECISION.md](MODEL_DECISION.md)。
 
+## 話す言語ごとのモデル (i18n)
+
+英語は `corpus.en.tsv` (`scripts/make_tts.sh --lang en` で TTS) と LibriSpeech test-clean の100発話 (`scripts/prep_librispeech.sh`)。
+`scripts/run_i18n.sh` で全モデル × ja/en を計測する (`bench_python.py --language`、`compare.py --corpus --metric wer`)。結果と案は [MODEL_DECISION_I18N.md](MODEL_DECISION_I18N.md)。
+
 `data/` と `results/` はコミットしない(音声は個人の声のため)。`models/` (変換済みモデル) も同様。

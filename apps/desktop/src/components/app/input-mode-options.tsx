@@ -1,6 +1,7 @@
 import { useId } from "react";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { INPUT_MODES } from "@/lib/input-mode";
+import { INPUT_MODE_IDS } from "@/lib/input-mode";
+import { useI18n } from "@/i18n/context";
 import type { InputMode } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 
@@ -17,16 +18,17 @@ export function InputModeRadio({
   className?: string;
 }) {
   const id = useId();
+  const { t } = useI18n();
   return (
     <RadioGroup
-      aria-label="入力モード"
+      aria-label={t.inputMode.groupLabel}
       // 読み込み前 (undefined) も制御された値として渡す (uncontrolled から切り替わると Radix が警告するため)
       value={value ?? ""}
       disabled={disabled}
       onValueChange={(v) => onChange(v as InputMode)}
       className={className}
     >
-      {INPUT_MODES.map((m) => (
+      {INPUT_MODE_IDS.map((mode) => ({ id: mode, ...t.inputMode[mode] })).map((m) => (
         <label
           key={m.id}
           data-testid={`input-mode-${m.id}`}

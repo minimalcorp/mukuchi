@@ -8,6 +8,7 @@ import { TrafficLights, WindowFrame } from "@/components/app/window-frame";
 import { isPermissionsGranted, useAppStatus, usePermissions, useSettings } from "@/lib/hooks";
 import { subscribeEvents } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n/context";
 import { GeneralSection } from "./sections/GeneralSection";
 import { VoiceSection } from "./sections/VoiceSection";
 import { CommandsSection } from "./sections/CommandsSection";
@@ -22,6 +23,7 @@ function initialCategory(): CategoryId {
 }
 
 export function SettingsWindow() {
+  const { t } = useI18n();
   const [category, setCategory] = useState<CategoryId>(initialCategory);
   useEffect(
     () =>
@@ -64,11 +66,11 @@ export function SettingsWindow() {
                   )}
                 >
                   <Icon size={16} className="flex-none" aria-hidden />
-                  <span className="flex-1">{c.label}</span>
+                  <span className="flex-1">{t.settings.categories[c.id]}</span>
                   {c.id === "permissions" && permWarning ? (
                     <span
                       data-testid="permissions-warning"
-                      aria-label="未許可の権限があります"
+                      aria-label={t.settings.permissionsWarning}
                       className="size-1.5 flex-none rounded-full bg-amber-500"
                     />
                   ) : null}
@@ -83,7 +85,7 @@ export function SettingsWindow() {
           data-tauri-drag-region
           className="m-0 flex h-11 flex-none items-center border-b border-line-subtle px-7 text-md font-semibold text-fg-strong"
         >
-          {current.label}
+          {t.settings.categories[current.id]}
         </h1>
         <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-7 py-5">
           {settings ? (

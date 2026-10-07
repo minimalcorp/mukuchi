@@ -7,14 +7,18 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { formatKeyCombo, KEY_LABELS, MODIFIER_LABELS, MODIFIER_ORDER } from "@/lib/format";
-import type { KeyCombo, KeyName, VoiceCommand } from "@/lib/ipc";
+import type { KeyCombo, KeyName, Locale, VoiceCommand } from "@/lib/ipc";
 import { splitPhrases, validatePhrases } from "@/lib/voice-command";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n/context";
+import { COMMAND_PHRASE_EXAMPLES, COMMAND_SENTENCE_EXAMPLES } from "@/i18n/speech";
 import { Card, FieldError, TitleWithSub, type SectionProps } from "./common";
 
 const GRID = "grid grid-cols-[1fr_130px_64px] gap-3";
 
 export function CommandsSection({ settings, update, errors }: SectionProps) {
+  const { t } = useI18n();
+  const c = t.settings.commands;
   // 編集中のコマンド。id が空なら追加
   const [editing, setEditing] = useState<VoiceCommand | null>(null);
   const list = settings.voiceCommands;
@@ -29,11 +33,11 @@ export function CommandsSection({ settings, update, errors }: SectionProps) {
     <>
       <Card className="flex-row items-center gap-3 px-3.5 py-3">
         <TitleWithSub
-          title="音声コマンドを使う"
-          sub="発話全体が登録した言い方と一致したときだけ、キー操作として送ります。"
+          title={c.enable}
+          sub={c.enableSub}
         />
         <Switch
-          aria-label="音声コマンドを使う"
+          aria-label={c.enable}
           checked={settings.voiceCommandsEnabled}
           onCheckedChange={(v) => update({ voiceCommandsEnabled: v })}
         />
@@ -45,8 +49,8 @@ export function CommandsSection({ settings, update, errors }: SectionProps) {
             "rounded-t-lg border-b border-line-default bg-surface-muted px-3.5 py-2 text-xs text-fg-muted",
           )}
         >
-          <span>言い方</span>
-          <span>送るキー</span>
+          <span>{c.phrases}</span>
+          <span>{c.key}</span>
           <span />
         </div>
         {list.map((cmd) => (
@@ -62,12 +66,12 @@ export function CommandsSection({ settings, update, errors }: SectionProps) {
               {formatKeyCombo(cmd.key)}
             </span>
             <div className="flex justify-end gap-0.5">
-              <IconButton icon={Pencil} label="編集" size="sm" onClick={() => setEditing(cmd)} />
+              <IconButton icon={Pencil} label={c.edit} size="sm" onClick={() => setEditing(cmd)} />
               <IconButton
                 icon={Trash2}
-                label="削除"
+                label={c.delete}
                 size="sm"
-                onClick={() => update({ voiceCommands: list.filter((c) => c.id !== cmd.id) })}
+                onClick={() => update({ voiceCommands: list.filter((x) => x.id !== cmd.id) })}
               />
             </div>
           </div>
@@ -79,17 +83,18 @@ export function CommandsSection({ settings, update, errors }: SectionProps) {
             iconLeft={Plus}
             onClick={() => setEditing({ id: "", phrases: [], key: { key: "enter", modifiers: [] } })}
           >
-            コマンドを追加
+            {c.add}
           </Button>
         </div>
       </Card>
       <FieldError message={errors.voiceCommandsEnabled ?? errors.voiceCommands} />
       <p className="m-0 text-xs leading-[1.6] text-fg-muted">
-        「確定してください」のように前後に言葉があると、通常の文字として入力されます。
+        {c.note(COMMAND_SENTENCE_EXAMPLES[settings.speechLanguage] ?? COMMAND_SENTENCE_EXAMPLES.ja)}
       </p>
       <CommandDialog
         command={editing}
-        others={list.filter((c) => c.id !== editing?.id)}
+        others={list.filter((x) => x.id !== editing?.id)}
+        speechLanguage={settings.speechLanguage}
         onCancel={() => setEditing(null)}
         onSave={save}
       />
@@ -100,18 +105,29 @@ export function CommandsSection({ settings, update, errors }: SectionProps) {
 function CommandDialog({
   command,
   others,
+  speechLanguage,
   onCancel,
   onSave,
 }: {
   command: VoiceCommand | null;
   others: VoiceCommand[];
+  speechLanguage: Locale;
   onCancel: () => void;
   onSave: (c: VoiceCommand) => void;
 }) {
   return (
     <Dialog open={command != null} onOpenChange={(open) => !open && onCancel()}>
       {/* key で開くたびにフォームを初期化する */}
-      {command ? <CommandForm key={command.id || "new"} command={command} others={others} onCancel={onCancel} onSave={onSave} /> : null}
+      {command ? (
+        <CommandForm
+          key={command.id || "new"}
+          command={command}
+          others={others}
+          speechLanguage={speechLanguage}
+          onCancel={onCancel}
+          onSave={onSave}
+        />
+      ) : null}
     </Dialog>
   );
 }
@@ -119,19 +135,24 @@ function CommandDialog({
 function CommandForm({
   command,
   others,
+  speechLanguage,
   onCancel,
   onSave,
 }: {
   command: VoiceCommand;
   /** 編集中以外のコマンド (言い方の重複を調べる。他ウィンドウでの変更も反映される) */
   others: VoiceCommand[];
+  /** 言い方の例 (placeholder) を話す言語で出す */
+  speechLanguage: Locale;
   onCancel: () => void;
   onSave: (c: VoiceCommand) => void;
 }) {
-  const [phrases, setPhrases] = useState(command.phrases.join("、"));
+  const { t } = useI18n();
+  const c = t.settings.commands;
+  const [phrases, setPhrases] = useState(command.phrases.join(c.phraseJoiner));
   const [key, setKey] = useState<KeyCombo>(command.key);
   const parsed = splitPhrases(phrases);
-  const error = validatePhrases(parsed, others, (c) => formatKeyCombo(c.key));
+  const error = validatePhrases(parsed, others, (x) => formatKeyCombo(x.key), c.validation);
   // 空欄は保存ボタンを無効にするだけで、エラーとしては出さない (開いた直後に赤字を出さない)
   const shownError = parsed.length === 0 ? null : error;
   const isNew = command.id === "";
@@ -153,21 +174,21 @@ function CommandForm({
       >
         <div className="flex flex-col gap-2 px-5 pt-5">
           <DialogTitle className="m-0 text-lg leading-[1.4] font-semibold text-fg-strong">
-            {isNew ? "コマンドを追加" : "コマンドを編集"}
+            {isNew ? c.addTitle : c.editTitle}
           </DialogTitle>
           <DialogDescription className="m-0 text-sm text-fg-muted">
-            言い方は読点で区切って複数登録できます。
+            {c.dialogDescription}
           </DialogDescription>
         </div>
         <div className="flex flex-col gap-4 px-5 py-4">
           <div className="flex flex-col gap-1.5">
             <label htmlFor="command-phrases" className="text-sm leading-[1.4] font-medium">
-              言い方
+              {c.phrases}
             </label>
             <Input
               id="command-phrases"
               autoFocus
-              placeholder="確定、エンター"
+              placeholder={(COMMAND_PHRASE_EXAMPLES[speechLanguage] ?? COMMAND_PHRASE_EXAMPLES.ja).join(c.phraseJoiner)}
               value={phrases}
               aria-invalid={shownError ? true : undefined}
               aria-describedby={shownError ? "command-phrases-error" : undefined}
@@ -178,9 +199,9 @@ function CommandForm({
             </div>
           </div>
           <div className="flex flex-col gap-1.5">
-            <span className="text-sm leading-[1.4] font-medium">送るキー</span>
+            <span className="text-sm leading-[1.4] font-medium">{c.key}</span>
             <div className="flex items-center gap-2">
-              <div className="flex gap-1" role="group" aria-label="修飾キー">
+              <div className="flex gap-1" role="group" aria-label={c.modifiers}>
                 {MODIFIER_ORDER.map((m) => {
                   const on = key.modifiers.includes(m);
                   return (
@@ -203,7 +224,7 @@ function CommandForm({
               </div>
               <span className="text-fg-muted">+</span>
               <Select
-                aria-label="キー"
+                aria-label={c.keyName}
                 className="flex-1"
                 options={(Object.keys(KEY_LABELS) as KeyName[]).map((k) => ({ value: k, label: KEY_LABELS[k] }))}
                 value={key.key}
@@ -211,14 +232,14 @@ function CommandForm({
               />
             </div>
             <span className="text-xs text-fg-muted">
-              送るキー: <span className="font-mono">{formatKeyCombo(key)}</span>
+              {c.keyPreview} <span className="font-mono">{formatKeyCombo(key)}</span>
             </span>
           </div>
         </div>
         <div className="flex justify-end gap-2 px-5 pb-5">
-          <Button onClick={onCancel}>キャンセル</Button>
+          <Button onClick={onCancel}>{t.common.cancel}</Button>
           <Button type="submit" variant="primary" disabled={error != null}>
-            保存
+            {t.common.save}
           </Button>
         </div>
       </form>

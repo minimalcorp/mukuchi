@@ -27,6 +27,7 @@ export type AppErrorAction =
 
 export type AppError = {
   code: AppErrorCode;
+  /** 表示用 (表示言語。Rust が作る) */
   message: string;
   action: AppErrorAction | null;
 };
@@ -93,7 +94,14 @@ export type Settings = {
    * 登録できなければ (形式の誤り・OS が拒否) update_settings は保存せずに reject する。他アプリと同じキーでも登録は成功しうる (衝突は検出できない)
    */
   shortcut: string | null;
+  /** 表示言語。system は macOS の優先言語から Rust が解決する (get_locale / locale-changed) */
+  uiLanguage: "system" | Locale;
+  /** 話す言語。ASR の language・推奨モデル・音声コマンドの既定を決める */
+  speechLanguage: Locale;
 };
+
+/** 表示言語・話す言語 (docs/architecture.md「言語」)。対応表は src/i18n/locales.ts の LOCALES */
+export type Locale = "ja" | "en";
 
 /** Settings.asrContext の上限 (Rust の検証と同じ値。表示用で、検証の正は Rust) */
 export const ASR_CONTEXT_MAX = 1000;
@@ -101,7 +109,7 @@ export const ASR_CONTEXT_MAX = 1000;
 export type PanelStyle = "full" | "compact";
 /** continuous: ON の間ずっと発話ごとに入力 (常に聞き取る)。oneShot: 1発話を確定したら自動で OFF (1回ずつ聞き取る) */
 export type InputMode = "continuous" | "oneShot";
-/** error: 起動時などに登録できなかった時の表示用 (日本語) */
+/** error: 起動時などに登録できなかった時の表示用 (表示言語) */
 export type ShortcutStatus = { shortcut: string | null; registered: boolean; error: string | null };
 
 export type MicrophonePermission = "granted" | "denied" | "not_determined";
@@ -130,13 +138,20 @@ export type StorageUsage = { runtimeBytes: number; modelBytes: number; otherByte
 
 export type ModelState = "not_downloaded" | "downloading" | "paused" | "error" | "downloaded";
 export type ModelInfo = {
-  /** カタログの id ("ja-8bit" | "ja-bf16")。list_models はカタログ順 (表示もこの順)。旧候補 (ja-bf16) は手元にある時だけ出る */
+  /**
+   * カタログの id ("ja-8bit" | "base-1.7b-8bit" | "ja-bf16")。list_models は話す言語の並び (旧候補は末尾) の順で、表示もこの順。
+   * 旧候補 (ja-bf16) は手元にある時だけ出る
+   */
   id: string;
+  /** 表示名 (表示言語) */
   name: string;
+  /** 説明 (表示言語) */
   description: string;
+  /** 追加学習で特化した言語。元のモデルは null。話す言語と違う時に注記を添える */
+  tunedFor: Locale | null;
   /** 取得するファイルの合計 (固定した revision の値)。進捗の分母・未取得時の容量表示 */
   sizeBytes: number;
-  /** 既定・推奨。ちょうど1つ */
+  /** 話す言語の推奨 (新規のセットアップで取得するもの)。ちょうど1つ */
   recommended: boolean;
   /** 使用中。常にちょうど1つ (セットアップ未完了の間は未取得のことがある) */
   selected: boolean;
@@ -168,7 +183,7 @@ export type UpdateStatus = {
   bytesTotal: number | null;
   /** 最後に確認が成功した時刻 (UNIX 秒。このプロセスでの値) */
   checkedAt: number | null;
-  /** error・unavailable の時の表示用 (日本語) */
+  /** error・unavailable の時の表示用 (表示言語) */
   error: string | null;
 };
 export type UninstallTarget = { path: string; bytes: number };
@@ -180,7 +195,7 @@ export type SettingsCategory = "general" | "voice" | "commands" | "recognition" 
 
 // ---------- エラー ----------
 
-/** Rust は表示用の日本語メッセージ (文字列) で reject する */
+/** Rust は表示用のメッセージ (表示言語の文字列) で reject する */
 export class IpcError extends Error {
   readonly command: string;
   constructor(command: string, message: string) {
@@ -215,6 +230,8 @@ export const commands = {
   getShortcutStatus: () => call<ShortcutStatus>("get_shortcut_status"),
   /** ショートカットの記録中に登録を一時解除する (記録中に押したキーで ON/OFF しないため)。終わったら必ず false で戻す */
   setShortcutSuspended: (suspended: boolean) => call<void>("set_shortcut_suspended", { suspended }),
+  /** 解決した表示言語 (uiLanguage が system なら macOS の優先言語から) */
+  getLocale: () => call<Locale>("get_locale"),
   getSettings: () => call<Settings>("get_settings"),
   updateSettings: (patch: Partial<Settings>) => call<Settings>("update_settings", { patch }),
   listInputDevices: () => call<AudioDevice[]>("list_input_devices"),
@@ -268,6 +285,7 @@ export type EventMap = {
   "utterance-partial": Utterance;
   "utterance-result": UtteranceResult;
   "settings-changed": Settings;
+  "locale-changed": Locale;
   "settings-navigate": { category: SettingsCategory };
   "panel-anchor": PanelAnchor;
   "permissions-changed": Permissions;

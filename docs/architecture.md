@@ -22,6 +22,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 | フレームワーク | Tauri v2 + Rust | 入力送信・常駐の軽さ |
 | フロントエンド | React + TypeScript + Vite + Tailwind + shadcn/ui + lucide-react。色・モーション等は `apps/desktop/src/styles/tokens.css` のCSS変数 (実装で使う値だけを置く)。フォントはIBM Plex Sans JP / Mono を同梱 (オフラインで動くようGoogle Fontsは使わない) | |
 | ダークモード | システム設定に追従。デザインの参考表示(gray 700〜900を面に使用)に従う | |
+| 言語 | **表示言語** (`Settings.uiLanguage`、UI・メニューバー・表示用エラー) と **話す言語** (`Settings.speechLanguage`、ASR の `language`・推奨モデル・音声コマンドの既定) を分けて持つ。どちらも ja・en。詳細は「言語」の節。計画は [docs/plans/i18n-plan.md](plans/i18n-plan.md) | 2026-10-06 決定。macOS を英語にして日本語を話す人を両立させるため。`language` を省いた自動判定は ja-8bit の英語で WER 1.8%→28.3% と崩れる (spikes/asr-bench/MODEL_DECISION_I18N.md) ため常に明示する |
 | 録音 | Rust (cpal) | WebView経由のgetUserMediaは権限ダイアログ二重表示等の既知問題あり |
 | VAD | Silero VAD (`ort`、arm64は静的リンク)。差し替え可能なtraitの背後に置く | 代替: earshot |
 | ASR | Python + MLX (`mlx-qwen3-asr`)。既定のモデルは `neosophie/Qwen3-ASR-1.7B-JA` を全層8bit量子化したもの (自前変換、`minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit`、約2.2GB)。元の bf16 版 (`neosophie/Qwen3-ASR-1.7B-JA`、約4.1GB) は既に手元にある導入でのみ一覧に出る (下の「モデルの管理」)。どちらも revision (commit) を固定して取得 | Rust実装(candle/MLX)は約3倍遅い (spikes/asr-bench)。8bitはfp16と同等精度・約2割速い・メモリ1/3 (spikes/asr-bench/MODEL_DECISION.md) |
@@ -121,12 +122,15 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 
 | id | リポジトリ@revision | 容量 (取得するファイルの合計) | |
 |---|---|---|---|
-| `ja-8bit` | `minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit@698eff963b084561b12a045c95bc4a208898337f` | 2,185,804,096 B (約2.2GB) | 既定・推奨 (`recommended`)。新規のセットアップで取得する |
-| `ja-bf16` | `neosophie/Qwen3-ASR-1.7B-JA@987bda160f2dabfa6757550bcff7cdda2ba0648c` | 4,092,092,275 B (約4.1GB) | 元の bf16 版。**旧候補** (`legacy`): 手元にある導入でのみ出す (下の「旧候補」) |
+| `ja-8bit` | `minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit@698eff963b084561b12a045c95bc4a208898337f` | 2,185,804,096 B (約2.2GB) | 日本語向けに追加学習 (`tunedFor: "ja"`)。英語も認識できる。話す言語 ja の推奨 |
+| `base-1.7b-8bit` | `minimalcorp/Qwen3-ASR-1.7B-MLX-8bit@fc85f8e586506b91c707de9561998928f3f5d842` (元 `Qwen/Qwen3-ASR-1.7B@7278e1e70fe206f11671096ffdd38061171dd6e5` を全層8bit) | 2,174,372,462 B (約2.2GB) | 追加学習なしの元のモデル。話す言語 en の推奨 |
+| `ja-bf16` | `neosophie/Qwen3-ASR-1.7B-JA@987bda160f2dabfa6757550bcff7cdda2ba0648c` | 4,092,092,275 B (約4.1GB) | 元の bf16 版。**旧候補** (どの話す言語の並びにも無いもの): 手元にある導入でのみ出す (下の「旧候補」) |
 
-容量は固定した revision の tree API の値 (取得対象 `*.json *.safetensors *.txt *.model` の合計)。表示名・説明も同じ定数に持ち `list_models` で返す。
+容量は固定した revision の tree API の値 (取得対象 `*.json *.safetensors *.txt *.model` の合計)。表示名・説明は表示言語ごとに持ち `list_models` で返す。
 
-- **旧候補** (2026-10-02 決定): 新規に選べる候補は既定の `ja-8bit` のみ。`legacy` の候補は、選択中か取得中か手元にファイル (そのモデルのディレクトリ。取得済み・途中・古い revision を含む) がある時だけ `list_models` に出し、それ以外 (`not_downloaded` かつ選択中でない) は出さない。出ていない旧候補への `download_model`・`select_model`・`delete_model`・`cancel_model_download` は「不明なモデルです」。既に使っている人はそのまま使い続けられ、削除すると一覧から消える (再取得はできない)。複数モデルの取得・選択・削除の仕組みは残す (今後候補を足すため)。一覧が1件の時は使用中の行に削除ボタンを出さない (切り替え先が無いため)
+- **話す言語ごとの並び** (2026-10-06 決定。`provisioning/models.rs` の `model_order(Locale)`。言語の欠落がコンパイルで落ちるよう match で書く): ja = `ja-8bit` → `base-1.7b-8bit`、en = `base-1.7b-8bit` → `ja-8bit`。先頭が推奨 (`ModelInfo.recommended`)。`list_models` はこの順 (並びに無い旧候補は末尾) で返す。並びは言語ごとに明示し、規則から自動で決めない。候補は 1.7B の 8bit のみ (5bit・0.6B は計測したが出さない)
+
+- **旧候補** (2026-10-02 決定): 新規に選べる候補は `model_order` に載るもの (`ja-8bit`・`base-1.7b-8bit`)。旧候補は、選択中か取得中か手元にファイル (そのモデルのディレクトリ。取得済み・途中・古い revision を含む) がある時だけ `list_models` に出し、それ以外 (`not_downloaded` かつ選択中でない) は出さない。出ていない旧候補への `download_model`・`select_model`・`delete_model`・`cancel_model_download` は「不明なモデルです」。既に使っている人はそのまま使い続けられ、削除すると一覧から消える (再取得はできない)。複数モデルの取得・選択・削除の仕組みは残す (今後候補を足すため)。一覧が1件の時は使用中の行に削除ボタンを出さない (切り替え先が無いため)
 
 - **選択**: 選択中のモデルは `provisioned.json` の `selectedModel` に記録する (`Settings` には置かない。「取得済みのものだけ選べる」は導入の記録と一緒に保つ必要があり、「実行環境とモデルのみ削除」で記録ごと既定に戻るため)。`select_model` は取得済み (現在の revision の記録があり `config.json` がある) のモデルだけ受け付け、ASR サーバーを新しいモデルで起動し直す (音声入力は OFF になり phase は loading を経由)。準備完了 (`/health`) まで待ち、**準備完了してから選択を記録して** 返る (切り替えの途中でアプリが終わっても、読み込めるか分からないモデルを選択中に残さない。その間 `ModelInfo.selected` は元のモデルのまま)。切り替えの起動は自動再起動なしで行い、準備完了したら自動再起動を有効にする
 - **切り替えの失敗**: 新しいモデルでサーバーが準備完了にならなければ (異常終了・読み込みの上限10分)、元のモデル (選択は元のまま) で起動し直し (自動再起動あり)、エラーで reject する (「『<新>』を読み込めませんでした。『<元>』に戻しました」)。新しいモデルの異常終了は `asr_stopped` にしない (元のモデルの読み込み中に停止エラーを出さないため)。準備完了後に選択を記録できなかった場合も元のモデルに戻して reject する。元のモデルでも起動できなければ通常の `asr_stopped`
@@ -134,9 +138,9 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 - **取得**: モデルごとに開始・一時停止・再開・中止。処理はセットアップの model と同じ (`hf.rs`。部分ファイルからの再開・検証・huggingface_hub 互換のレイアウト)。同時に取得するのは1つ (他が取得中なら `download_model` はエラー)。一時停止・失敗で止まったものは複数残ってよい。完了したら `models` に記録する (選択は変えない)。中止 (`cancel_model_download`) は途中のファイルごとそのモデルのディレクトリを消す (削除と同じく、開発ビルドが本番のバンドルIDで動いている時は拒む)
 - **削除**: `delete_model` は選択中・取得中のモデルを拒む。記録を先に消してから `models/hub/models--<org>--<name>/` を消す (データディレクトリの目印を確かめる。開発ビルドが本番のバンドルIDで動いている時は拒む)。ディレクトリの削除中 (中止を含む) はそのモデルの取得・削除を拒む
 - **利用できる時**: モデルの操作 (`select_model`・`download_model`・`delete_model` 等) はセットアップ完了後 (`ProvisioningStatus.stage` が `done`) のみ。それ以外・削除の実行中はエラー。セットアップの取得は `ProvisioningStatus` で表し、`list_models` には手元のファイルの状態だけが出る
-- **移行** (起動時): `selectedModel` が無い・カタログに無い・そのモデルの記録 (どの revision でも) かディレクトリが無い場合は、既定 (`ja-8bit`) が記録ありならそれ、無ければ記録のある他のモデル (カタログ順)、どれも無ければ既定を選ぶ。記録 (runtime・models・verify) があれば `selectedModel` を書き込む。つまり **bf16 だけ導入済みの既存の導入は bf16 を選択中として残し、8bit を自動では取得しない** (2GB 超の取得を利用者の操作なしに始めないため)。8bit への切り替えは設定画面から (取得 → 選択)
+- **移行** (起動時): `selectedModel` が無い・カタログに無い・そのモデルの記録 (どの revision でも) かディレクトリが無い場合は、既定 (話す言語の推奨) が記録ありならそれ、無ければ記録のある他のモデル (カタログ順)、どれも無ければ既定を選ぶ (ここでの既定 = 話す言語の推奨)。記録 (runtime・models・verify) があれば `selectedModel` を書き込む。つまり **bf16 だけ導入済みの既存の導入は bf16 を選択中として残し、8bit を自動では取得しない** (2GB 超の取得を利用者の操作なしに始めないため)。8bit への切り替えは設定画面から (取得 → 選択)
 - **revision が変わった時** (アプリの更新): 選択中のモデルは起動時にセットアップの自動やり直しで取り直す (上記)。選択中でないモデルは記録が合わないため取得済みではなくなり、古いファイルが残っていれば `paused` と表示する (`download_model` で新しい revision を取る。同じファイルは取り直さない。完了時に古い版を消す)
-- **ストレージ**: `StorageUsage.modelBytes` は `models/` 全体 (全モデル・取得途中を含む)。モデルごとの量は `ModelInfo.diskBytes`。「実行環境とモデルのみ削除」は取得中のモデルを止めてから全モデルを消し、選択を既定に戻す (記録ごと消えるため)。アンインストールも取得を止めてから消す
+- **ストレージ**: `StorageUsage.modelBytes` は `models/` 全体 (全モデル・取得途中を含む)。モデルごとの量は `ModelInfo.diskBytes`。「実行環境とモデルのみ削除」は取得中のモデルを止めてから全モデルを消し、選択を既定 (話す言語の推奨) に戻す (記録ごと消えるため)。アンインストールも取得を止めてから消す
 - **開発** (`MUKUCHI_ASR_URL` 使用中): `select_model` は記録の書き換えのみ (外部のサーバーは起動し直さない。使うモデルは process-compose 側で決まる。既定は ja-8bit と同じ版で、`Makefile` の `MUKUCHI_MODEL`・`MUKUCHI_MODEL_REVISION`)。**設定画面の選択・表示は実際に使っているモデルと食い違いうる** (例: 以前に bf16 でセットアップした dev データでは bf16 が選択中のまま)。`make setup` (`apps/desktop/scripts/setup.sh`) は取得したモデルを、アプリのセットアップ済み (`runtime` の記録がある) の dev データに限り `models` に記録する (8bit が「一時停止中」ではなく取得済みに見えるように。選択は変えない。記録が無い・`make reset PROVISION=1` の後はアプリのセットアップが取得・記録する)
 - エラー (reject の文言): 不明な id「不明なモデルです」、セットアップ未完了「セットアップが完了していません」、削除の実行中「削除を実行中です」、他が取得中「他のモデルをダウンロード中です」、未取得を選択「ダウンロードが済んでいないモデルは選べません」、選択中を削除「使用中のモデルは削除できません」、取得中を削除「ダウンロード中のモデルは削除できません。中止してください」、取得済みを中止「ダウンロード済みです」、切り替え中「モデルを切り替え中です」、アップデートのインストール中「アップデートをインストールしています」、ディレクトリの削除中「モデルを削除しています」、開発ビルドが本番のバンドルIDで削除・中止「開発ビルドを本番のバンドルIDで実行しているため削除しません」。取得の失敗は reject せず `ModelInfo.error` (文言はセットアップの model と同じ)
 
@@ -158,8 +162,19 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 - インストール (`install_update`): `ready` の時のみ。`ready` のまま裏で確認・取り直しをしている間はそれが終わるのを待ち、終わった時点で `ready` なら進める (そうでなければ「インストールできるアップデートがありません」)。`ready` でない確認・取得中はエラー (「アップデートを確認しています。しばらくしてからもう一度お試しください」)。セットアップ・モデルの取得・切り替え・削除・アンインストールの実行中はエラー (「ダウンロード・削除の実行中は更新できません」)。インストール中 (`installing`、置き換え後の再起動待ちを含む) は `start_provisioning` を無視し、`download_model`・`select_model`・`delete_model`・`restart_asr`・`delete_runtime_and_model`・`uninstall` をエラーにする (「アップデートをインストールしています」)。音声入力を OFF にしてから updater の install (.app を一時領域に退避して置き換える) → `AppHandle::request_restart` (`RunEvent::Exit` で ASR を止めてから起動し直す)。install に失敗したら `error` にして再起動しない
 - 表示: `ready` の間、メニューバー (とパネルの右クリックメニュー) の「設定…」の上に「再起動してアップデート (v<X.Y.Z>)」を出す (`install_update` と同じ処理。失敗はメニューの通知と同じくログと設定の表示のみ)。設定 > このアプリについて に状態・「アップデートを確認」・「再起動してアップデート」・自動確認の切り替え (`autoCheckUpdates`) を置く。macOS の通知 (通知の許可) は使わない
 - 更新後の起動: 同梱物の版が変わっていれば既存の仕組み (「セットアップ手順」の版の判定) が実行環境を入れ直す
-- 失敗 (確認・取得・インストール) はログに出し `error` (表示用の文言は日本語)。自動の確認での失敗はメニューバーに出さない (設定の「このアプリについて」にだけ出す)
+- 失敗 (確認・取得・インストール) はログに出し `error` (表示用の文言は表示言語)。自動の確認での失敗はメニューバーに出さない (設定の「このアプリについて」にだけ出す)
 - 既知の制約 (tauri-plugin-updater 2.13): インストールにロールバックはなく、最後の置き換えに失敗すると .app が残らないことがある (plugins-workspace#3505)。更新後の .app の権限が 0700 になり他のユーザーが起動できないことがある (#3506)
+
+### 言語
+
+- **表示言語** `Settings.uiLanguage`: `"system"` (既定) | `"ja"` | `"en"`。`system` は macOS の優先言語 (`NSLocale.preferredLanguages`) を先頭から見て最初に ja・en に当たるもの、無ければ en。解決は Rust で行い (`get_locale`・`locale-changed`)、フロントエンドは WebView の `navigator.language` を使わない (.app が宣言するローカライズに左右されるため)。変更は再起動なしで全ウィンドウ・メニューバー (パネルの右クリックメニューを含む) に反映する
+- **話す言語** `Settings.speechLanguage`: `"ja"` | `"en"`。ASR の `language` (ja → `Japanese`、en → `English`) を常に明示して渡す。推奨モデル (「モデルの管理」の並び) と音声コマンドの既定を決める
+- **既定**: 新規 (settings.json が無い) は speechLanguage = 解決した表示言語。既存の settings.json に speechLanguage が無ければ `"ja"` (それまで日本語だけだったため)。未知の値は既定として読む
+- **セットアップ中の話す言語の変更**: provisioning が実行中でなく model が `pending` (取得をまだ始めていない。「実行環境とモデルのみ削除」の後も含む) の間は、speechLanguage の変更で選択中のモデルをその言語の推奨に変える (`models-changed` を送る。取得の開始と重なっても食い違わないよう同じロック内で判定)。それ以外は選択を変えない (取得済みのモデルを勝手に変えない・数GBの取得を勝手に始めない)。設定の「認識」が推奨モデルの取得・切り替えを案内する
+- **音声コマンドの既定**: ja = 確定・エンター → Enter、改行 → ⇧Enter、送信 → ⌘Enter (従来どおり)。en = enter → Enter、new line・line break → ⇧Enter、send → ⌘Enter。speechLanguage を変えた時、`voiceCommands` が変更前の言語の既定と同じ (利用者が編集していない) なら新しい言語の既定に入れ替える。編集済みなら変えない
+- **表示用の文言**: Rust が作る文言 (メニュー・`AppError.message`・各 `error`・reject の文言・モデルの表示名と説明) は Rust 側の辞書 (表示言語ごと。キーの欠落はコンパイルで落ちる) から作った時点の表示言語で作る。表示用エラー (`ProvisioningStatus`・`ModelInfo`・`UpdateStatus`・`ShortcutStatus` の error) は送る時点の表示言語で文字列にする。表示言語の変更時は `status-changed`・`models-changed`・`provisioning-progress`・`shortcut-status-changed`・`update-status-changed` を送り直し、メニューバー・アプリのメニュー (Tauri の既定メニューは使わず `app_menu.rs` で組む。AppKit が自動で足す項目は macOS の言語のまま)・ウィンドウのタイトルを作り直す。想定外の失敗 (ウィンドウの作成等) の reject は操作ごとの短い文言にし、詳細はログへ。セットアップの動作確認 (verify) は検証用の音声が日本語のため話す言語によらず `Japanese` で送る。ログは日本語のまま (開発者向け)
+- **Info.plist**: `CFBundleLocalizations` (ja・en)・`CFBundleDevelopmentRegion` (en。ja・en 以外の言語の macOS で、Rust の表示言語の解決 (en) と権限ダイアログ・AppKit の項目の言語をそろえるため) を置き、`NSMicrophoneUsageDescription` は Info.plist 本体を英語にして `{ja,en}.lproj/InfoPlist.strings` で翻訳する。権限ダイアログ (TCC) の文言は macOS の言語で決まり、アプリの表示言語には連動しない
+- 言語を足す時: 表示言語は フロントエンド・Rust の辞書と対応表、話す言語は `model_order`・音声コマンドの既定・ASR の言語名 (話せる人が検証できる言語に限る)
 
 ## インターフェース
 
@@ -169,7 +184,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 
 - 待受: `127.0.0.1:<port>`。本番はRustが空きポートを選び `--port` で渡し、`--exit-on-stdin-eof` 付きで起動する。開発は `18765` 固定でprocess-composeが起動し、アプリは環境変数 `MUKUCHI_ASR_URL` があればそれに接続する(自分では起動しない)
 - `GET /health` → `200 {"status":"ok","model":"<id>"}`。モデル読み込み完了まで応答しない
-- `POST /transcribe` — body: 16kHz/mono/16bit PCMのWAV (`Content-Type: audio/wav`)。query: `language` (既定 `Japanese`)、`context` (認識のヒント = `Settings.asrContext` をそのまま。任意。Qwen3-ASR のシステムメッセージにそのまま入る) → `200 {"text":"...","elapsed_ms":123}`
+- `POST /transcribe` — body: 16kHz/mono/16bit PCMのWAV (`Content-Type: audio/wav`)。query: `language` (既定 `Japanese`。アプリは `Settings.speechLanguage` から `Japanese` | `English` を常に付ける)、`context` (認識のヒント = `Settings.asrContext` をそのまま。任意。Qwen3-ASR のシステムメッセージにそのまま入る) → `200 {"text":"...","elapsed_ms":123}`
   - `elapsed_ms`: サーバーがbodyを受信し終えてから応答するまでの時間 (WAVデコード + 推論待ち + 推論)。ネットワーク転送は含まない
   - エラー: 不正なWAV/形式違い → `400`、body が 5MiB (約120秒分+余裕) を超える → `413`
 - 開発用 (デバッグビルドのみ): `MUKUCHI_DEV_AUDIO_FILE=<wav>` でマイクの代わりにWAVを実時間で流す (その後は無音)。`MUKUCHI_DEV_AUTO_LISTEN=1` でASR準備完了後に自動でONにする (セットアップ画面は開かない)。`MUKUCHI_ASR_URL` 使用中はセットアップ不要とみなし、起動時にセットアップを開かずpanelを表示する (トレイの「セットアップを開く…」からは開ける)。`MUKUCHI_DEV_SHOW_SETUP=1` でそれをやめ本番と同じ判定にする (セットアップ画面の確認用)。`MUKUCHI_DEV_TARGET_BUNDLE=<bundle id>` でそのアプリが前面の時だけ入力する (自動テストで他のアプリに入力しないため)。`MUKUCHI_DEV_NO_PARTIAL=1` で途中表示を送らない (遅延の比較用)。`MUKUCHI_ASR_URL` もデバッグビルドのみ有効で、ループバックの http のみ受け付ける。`MUKUCHI_DEV_DATA_DIR=<dir>` でデータディレクトリを差し替える (本物のデータ・モデルに触れずに検証するため。受け付ける条件は「識別子・パス」の削除の安全策)。`MUKUCHI_DEV_UV` `MUKUCHI_DEV_ASR_SERVER_DIR` `MUKUCHI_DEV_VERIFY_WAV` で同梱物 (uv・asr-server/・verify.wav) を個別に差し替える。`MUKUCHI_DEV_UNINSTALL_DRY_RUN=1` でアンインストールは何も消さず対象と操作をログに出すだけ (アプリも終了しない)
@@ -198,7 +213,7 @@ type AppError = {
   code: "accessibility_denied" | "microphone_denied" | "microphone_missing"
       | "asr_stopped" | "runtime_missing" | "insert_failed"
       | "vad_failed";   // 発話検出 (VAD) を初期化できない。表示「発話検出を開始できません」、action は null
-  message: string;   // 表示用 (日本語)
+  message: string;   // 表示用 (表示言語)
   // 復旧操作。メニュー・パネルのボタンに対応
   action: "open_accessibility" | "open_microphone" | "select_microphone"
         | "restart_asr" | "start_setup" | null;
@@ -224,7 +239,7 @@ type Settings = {
   vadSensitivity: number;                 // 0..100 既定 60
   silenceMs: number;                      // 300..3000 既定 1300 (話の途中の間で分割しないため長め)
   voiceCommandsEnabled: boolean;          // 既定 true
-  voiceCommands: { id: string; phrases: string[]; key: KeyCombo }[]; // 言い方のないコマンド・正規化(NFKC・記号空白除去・小文字化)後に空/重複する言い方は update_settings がエラーにする
+  voiceCommands: { id: string; phrases: string[]; key: KeyCombo }[]; // 既定は話す言語ごと (「言語」)。言い方のないコマンド・正規化(NFKC・記号空白除去・小文字化)後に空/重複する言い方は update_settings がエラーにする
   asrContext: string;                     // 既定 ""。認識のヒント (自由記述)。前後の空白を除いて ASR の context にそのまま渡す (空なら渡さない)。最大 1000 文字 (Unicode スカラー値で数える。超えたら update_settings は保存せずエラー。context は URL のクエリで送り、uvicorn (h11) のリクエスト行+ヘッダーの上限 16KiB に日本語の URL エンコード (1文字9バイト) で収めるため。長いほど毎回の推論も遅くなる)。旧形式の vocabulary: string[] だけがある設定は、読み込み時に空白区切りでつないで asrContext に移す (それまでと同じ context になる)
   excludedApps: { bundleId: string; name: string }[];
   panelPosition: { x: number; y: number; displayId: string; version: 2 } | null; // null=既定位置。Rust (ドラッグ) だけが書く (フロントエンドは null にするだけ)。x,y はピル (影の余白を除いた描画内容) のアンカー点の、ディスプレイ左下からの位置 (整数pt、y上向き)。アンカー点はアンカー (panel-anchor) に当たるピルの辺・角 (例: 右上なら右上の角、中央下なら下辺の中央) で、アンカーはこの点の visibleFrame 内の位置 (左右3等分・上下2等分) から決まる。displayId は CGDirectDisplayID (ピルの中心があるディスプレイ)。version なし (旧形式: ウィンドウの下端中央) は起動時に Rust が見た目の位置を変えずに移行して保存し直す。大きさの変更で画面に収めるための自動のずれは保存しない
@@ -232,9 +247,12 @@ type Settings = {
   panelStyle: "full" | "compact";         // 既定 "full"。compact はマイクの円形ボタンのみ (プレビュー・文言なし)
   inputMode: "continuous" | "oneShot";    // 既定 "continuous" (「決定事項」の入力モード)。未知の値は既定として読む
   autoCheckUpdates: boolean;              // 既定 true。自動でアップデートを確認・取得する (「アップデート」)。false でも手動の確認はできる
+  uiLanguage: "system" | Locale;          // 既定 "system"。表示言語 (「言語」)
+  speechLanguage: Locale;                 // 話す言語。ASR の language・推奨モデル・音声コマンドの既定を決める (「言語」。既定は新規なら解決した表示言語、既存の設定に無ければ "ja")
   shortcut: string | null;                // 既定 "Alt+Space"。null=無効。形式は「修飾+…+キー」: 修飾は Ctrl・Alt・Shift・Cmd をこの順で1つ以上、キーは KeyboardEvent.code (例 "Space" "KeyM" "Digit1" "F5")。登録できなければ (形式の誤り・OS が拒否) update_settings は保存せずエラー。他アプリが同じキーを使っていても登録は成功しうる (global-hotkey 0.8 は非排他で `RegisterEventHotKey` するため衝突を検出できない。どちらに届くかは未確認)
 };
-type ShortcutStatus = { shortcut: string | null; registered: boolean; error: string | null }; // error: 起動時などに登録できなかった時の表示用 (日本語)
+type Locale = "ja" | "en";
+type ShortcutStatus = { shortcut: string | null; registered: boolean; error: string | null }; // error: 起動時などに登録できなかった時の表示用 (表示言語)
 type KeyCombo = { key: "enter" | "tab" | "escape" | "backspace"; modifiers: ("cmd" | "shift" | "option" | "ctrl")[] };
 
 type Permissions = {
@@ -250,25 +268,26 @@ type ProvisioningStatus = {
   bytesDone: number;          // 全体 = bytesTotal の分かる項目 (model) の合計
   bytesTotal: number | null;
   etaSeconds: number | null;  // model の取得中のみ (直近10秒の速度から。最初の2秒は null)
-  error: string | null;       // stage=error の時の表示用 (日本語)
+  error: string | null;       // stage=error の時の表示用 (表示言語)
 };
 
 type StorageUsage = { runtimeBytes: number; modelBytes: number; otherBytes: number }; // modelBytes は models/ 全体 (全モデル・取得途中を含む)
 
 type ModelState = "not_downloaded" | "downloading" | "paused" | "error" | "downloaded";
 type ModelInfo = {
-  id: string;               // カタログの id ("ja-8bit" | "ja-bf16")。list_models はカタログ順 (表示もこの順)。旧候補 (ja-bf16) は手元にある時だけ出る
-  name: string;             // 表示名
-  description: string;      // 説明 (1文程度)
+  id: string;               // カタログの id ("ja-8bit" | "base-1.7b-8bit" | "ja-bf16")。list_models は話す言語の並び (model_order。旧候補は末尾) の順で、表示もこの順。旧候補 (ja-bf16) は手元にある時だけ出る
+  name: string;             // 表示名 (表示言語)
+  description: string;      // 説明 (1文程度、表示言語)
+  tunedFor: Locale | null;  // 追加学習で特化した言語 (ja-8bit・ja-bf16 は "ja"、元のモデルは null)。話す言語と違う時に「日本語向けに調整」等を添える
   sizeBytes: number;        // 取得するファイルの合計 (固定した revision の値)。進捗の分母・「約 2.2 GB」の表示に使う
-  recommended: boolean;     // 既定・推奨 (新規のセットアップで取得するもの)。ちょうど1つ
+  recommended: boolean;     // 話す言語の推奨 (model_order の先頭。新規のセットアップで取得するもの)。ちょうど1つ
   selected: boolean;        // 使用中。常にちょうど1つ (選択中は downloaded。ただしセットアップ未完了の間は未取得のことがある)
   state: ModelState;
   // downloading・paused・error: 取得済みのバイト数 (起動し直した後の paused は手元のファイルからの目安)。
   // downloaded: sizeBytes。not_downloaded: 0
   bytesDone: number;
   etaSeconds: number | null; // downloading のみ (直近10秒の速度から。最初の2秒は null)
-  error: string | null;      // state=error の時の表示用 (日本語)。再試行は download_model
+  error: string | null;      // state=error の時の表示用 (表示言語)。再試行は download_model
   diskBytes: number;         // このモデルのディスク上の使用量 (取得途中・古い版を含む)
 };
 type AudioDevice = { id: string; name: string; isDefault: boolean };
@@ -282,14 +301,14 @@ type UpdateStatus = {
   bytesDone: number;              // downloading のみ意味がある
   bytesTotal: number | null;      // 大きさが分からなければ null
   checkedAt: number | null;       // 最後に確認が成功した時刻 (UNIX 秒。このプロセスでの値。永続化しない)
-  error: string | null;           // error・unavailable の時の表示用 (日本語)
+  error: string | null;           // error・unavailable の時の表示用 (表示言語)
 };
 type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "permissions" | "storage" | "about";
 ```
 
 #### commands
 
-エラー時は表示用メッセージ(日本語の文字列)で reject する。
+エラー時は表示用メッセージ (表示言語の文字列) で reject する。
 
 | command | 引数 → 戻り値 | 用途 |
 |---|---|---|
@@ -297,6 +316,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `set_listening` | `{ on: boolean }` → `()` | パネル・メニューのON/OFF (oneShot でも同じ。ONにすると1発話で OFF に戻る) |
 | `get_shortcut_status` | → `ShortcutStatus` | ショートカットの登録状態 (設定・セットアップでの警告表示) |
 | `set_shortcut_suspended` | `{ suspended: boolean }` → `()` | ショートカットの記録中に登録を一時解除する (記録中に押したキーで ON/OFF しないため)。記録の終了・取り消し・ウィンドウを閉じた時に false で戻す |
+| `get_locale` | → `Locale` | 解決した表示言語 (`uiLanguage` が system なら macOS の優先言語から。「言語」)。各ウィンドウの読み込み時に呼ぶ |
 | `get_settings` / `update_settings` | → `Settings` / `{ patch: Partial<Settings> }` → `Settings` | 設定の読み書き(即時保存・即時反映。感度・無音時間は録音中も約0.5秒以内に反映、マイクの変更は録音をやり直す) |
 | `list_input_devices` | → `AudioDevice[]` | マイク選択 |
 | `get_permissions` | → `Permissions` | 権限表示(setupでは1秒ごとに再取得) |
@@ -307,7 +327,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `start_provisioning` / `pause_provisioning` | → `()` | ダウンロード開始・再開・失敗後の再試行 (実行中・完了済み・削除やアップデートのインストールの実行中なら何もしない) / 一時停止 (止まるまで待って返る) |
 | `get_storage_usage` | → `StorageUsage` | runtime = python・venv・uv・cache・asr-server、model = models (全モデル)、other = settings.json・provisioned.json・ログ (ディスク上の使用量) |
 | `delete_runtime_and_model` | → `()` | 実行環境とモデルのみ削除 (セットアップ一時停止・モデルの取得の停止・ASR停止の後。全モデルを消す。設定・ログは残す)。以後 provisioning は idle、status は `runtime_missing`、モデルの選択は既定 (`models-changed` を送る) |
-| `list_models` | → `ModelInfo[]` | モデルの一覧 (カタログ順。旧候補は手元にある時だけ。「モデルの管理」の旧候補) |
+| `list_models` | → `ModelInfo[]` | モデルの一覧 (話す言語の並び。旧候補は手元にある時だけ末尾に。「モデルの管理」) |
 | `select_model` | `{ id: string }` → `()` | 使うモデルを切り替える (取得済みのみ)。ASR を新しいモデルで起動し直し、準備完了まで待って選択を記録してから返る。失敗したら元のモデルに戻してエラー (「モデルの管理」)。選んだモデルが既に選択中なら何もしない |
 | `download_model` | `{ id: string }` → `()` | 取得の開始・一時停止からの再開・失敗後の再試行。開始したらすぐ返る (進捗は `models-changed`)。取得済み・取得中なら何もしない。他のモデルが取得中ならエラー |
 | `pause_model_download` | `{ id: string }` → `()` | 一時停止 (止まるまで待って返る)。途中のファイルは残す。取得中でなければ何もしない |
@@ -339,6 +359,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `utterance-partial` | `Utterance` | リアルタイムプレビュー |
 | `utterance-result` | `UtteranceResult` | 最終結果と入力結果 |
 | `settings-changed` | `Settings` | 他ウィンドウからの変更の反映 |
+| `locale-changed` | `Locale` | 解決した表示言語が変わった時 (`uiLanguage` の変更。system の時の macOS の言語の変更は起動時にだけ反映する) |
 | `settings-navigate` | `{ category: SettingsCategory }` | settingsウィンドウ宛。表示中のカテゴリを切り替える |
 | `panel-anchor` | `{ horizontal: "left" \| "center" \| "right"; vertical: "top" \| "bottom" }` | panel宛。大きさが変わる時にウィンドウのどの辺・角を固定して広げるか。フロントエンドは描画内容をこの基準に寄せて配置する (例: top なら上端から下へ広がる、right なら右端から左へ)。ピルの中心が visibleFrame の左1/3なら left・右1/3なら right・他は center、上半分なら top・他は bottom。変わった時 (ドラッグ中を含む) と panel 作成直後に送る。変わる時は新しいフレームを設定する前に送る。読み込み直後は `get_panel_anchor` で取る |
 | `permissions-changed` | `Permissions` | 権限の変化を検知した時 |
@@ -346,4 +367,4 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `input-devices-changed` | `AudioDevice[]` | マイクの接続・取り外し・既定の変更を検知した時 (2秒ごとのポーリング。settings/setup を開いている間か ON の間のみ) |
 | `provisioning-progress` | `ProvisioningStatus` | 実行中は変化があれば約4Hz。段階の変化 (開始・完了・一時停止・失敗) は即時 |
 | `update-status-changed` | `UpdateStatus` | 状態が変わった時は即時。取得中は約4Hz |
-| `models-changed` | `ModelInfo[]` | モデルの状態・選択が変わった時は即時 (取得の開始・完了・一時停止・失敗・中止・削除・選択、セットアップの完了、実行環境とモデルのみ削除)。取得中は変化があれば約4Hz |
+| `models-changed` | `ModelInfo[]` | モデルの状態・選択が変わった時は即時 (取得の開始・完了・一時停止・失敗・中止・削除・選択、セットアップの完了、実行環境とモデルのみ削除、話す言語・表示言語の変更)。取得中は変化があれば約4Hz |

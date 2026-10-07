@@ -1,0 +1,21 @@
+id	text
+cmd01	Enter
+cmd02	New line
+cmd03	Send
+cmd04	Line break
+short01	Got it.
+short02	Thanks, I'll take a look.
+daily01	We have a team meeting at 3 PM this afternoon.
+daily02	It would help if you could share the slides by tomorrow morning.
+daily03	Sorry, I'm running a few minutes late.
+tech01	Could you review this pull request when you get a chance?
+tech02	I'll fix the TypeScript type errors before merging.
+tech03	We're building a desktop app with Rust and Tauri.
+tech04	I added steps to reproduce the bug in the GitHub issue.
+tech05	The speech recognition model is Qwen3 ASR.
+tech06	The API response is slow, so let's add a cache.
+num01	Let's meet at 10 AM on September 30, 2026.
+num02	The budget is about $15,000 and the deadline is in 3 weeks.
+long01	I'm building a tool that runs in the background, toggles voice input with a keyboard shortcut, transcribes only what I say, and types it into whichever app is in focus.
+long02	First, I want to build a quick benchmark that compares accuracy and speed between Python and Rust, and then decide how to ship it based on the results.
+mixed01	Um, so, I mean, you're saying tomorrow works too, right?

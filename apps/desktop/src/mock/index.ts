@@ -6,13 +6,18 @@
  * &style=<full|compact> で panel の表示形式 (Settings.panelStyle) を指定する。
  * &slow=<command,...> で指定した command の応答を 500ms 遅らせる (初期値取得と event の順序の確認用)。
  * window.__mukuchiMock.fail[<command>] = "<メッセージ>" でその command を失敗させられる (エラー表示の確認用)。
+ * &locale=<ja|en> (または読み込み前に window.__MUKUCHI_MOCK_LOCALE__) で OS の言語を指定する (既定 ja)。
+ * uiLanguage が system ならこれが表示言語になり、新規の設定の話す言語もこれになる。
+ * Rust 由来の文言 (エラー・モデル名等) は表示言語、発話・既定の音声コマンドは話す言語で返す (texts.ts)。
  */
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppError,
+  AppErrorCode,
   AppStatus,
+  Locale,
   AudioLevel,
   EventMap,
   PanelAnchor,
@@ -31,23 +36,39 @@ import { formatShortcut } from "@/lib/shortcut";
 import { findScenario } from "./scenarios";
 import {
   createDb,
+  defaultModels,
   model,
+  presentModels,
   provisioning,
+  resolvedLocale,
   updateStatus,
-  visibleModels,
   GB,
+  MODEL_ORDER,
   MODEL_TOTAL,
   UPDATE_TOTAL,
   type MockDb,
   type ModelId,
 } from "./data";
 
+import { MOCK_SPEECH_TEXTS, MOCK_UI_TEXTS } from "./texts";
+
 const HOME = "/Users/you";
-const RUNTIME_MISSING: AppError = {
-  code: "runtime_missing",
-  message: "実行環境とモデルがありません",
-  action: "start_setup",
-};
+
+/** OS の言語。URL の ?locale= を優先し、無ければ Playwright が読み込み前に入れる値 */
+function systemLocale(params: URLSearchParams): Locale {
+  const v = params.get("locale") ?? (window as { __MUKUCHI_MOCK_LOCALE__?: string }).__MUKUCHI_MOCK_LOCALE__;
+  return v === "en" ? "en" : "ja";
+}
+
+/** Rust と同じく AppError の message は表示言語で作る (表示言語の変更時は code から作り直す) */
+function appError(code: AppErrorCode, action: AppError["action"], locale: Locale): AppError {
+  return { code, message: MOCK_UI_TEXTS[locale].errors[code], action };
+}
+
+/** 2 つの音声コマンドの一覧が同じか (利用者が編集していないかの判定。Rust と同じく内容で比べる) */
+function sameCommands(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
 
 /** "top-right" 等を PanelAnchor にする。不正な値は Rust の位置が決まる前と同じ center/bottom */
 function parseAnchor(value: string | null): PanelAnchor {
@@ -65,7 +86,7 @@ function fire<E extends EventName>(event: E, payload: EventMap[E]) {
 export function installMock(params: URLSearchParams) {
   const windowLabel = params.get("window") ?? "settings";
   const scenario = findScenario(windowLabel, params.get("mock") ?? "default");
-  const db = createDb();
+  const db = createDb(systemLocale(params));
   scenario.setup?.(db);
   db.anchor = parseAnchor(params.get("anchor"));
   if (params.get("style") === "compact") db.settings.panelStyle = "compact";
@@ -191,23 +212,25 @@ export function installMock(params: URLSearchParams) {
   let modelTimer: ReturnType<typeof setInterval> | null = null;
   let modelTicks = 0;
   let switching = false;
-  // 未取得・未選択に戻った旧候補は一覧から消える (Rust の list_models と同じ規則)
+  // 一覧は表示言語・話す言語に合わせて返す。未取得・未選択に戻った旧候補は一覧から消える (Rust の list_models と同じ規則)
   const setModels = (next: ModelInfo[]) => {
-    db.models = visibleModels(next);
-    fire("models-changed", db.models);
+    db.models = next;
+    fire("models-changed", presentModels(db));
   };
+  const ui = () => MOCK_UI_TEXTS[resolvedLocale(db)];
   const patchModel = (id: string, patch: Partial<ModelInfo>) =>
     setModels(db.models.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   const resetModel = (id: string) =>
     setModels(db.models.map((m) => (m.id === id ? model(m.id as ModelId, "not_downloaded", { selected: m.selected }) : m)));
   const findModel = (id: unknown): ModelInfo => {
-    const m = db.models.find((x) => x.id === id);
-    if (!m) throw "不明なモデルです";
+    // 一覧に出ていないもの (手元にない旧候補) は Rust と同じく不明なモデル
+    const m = presentModels(db).find((x) => x.id === id);
+    if (!m) throw ui().reject.unknownModel;
     return m;
   };
   // Rust は reject の値に表示用の文字列を返す
   const requireModelOps = () => {
-    if (db.provisioning.stage !== "done") throw "セットアップが完了していません";
+    if (db.provisioning.stage !== "done") throw ui().reject.setupIncomplete;
   };
   const stopModelTicker = () => {
     if (modelTimer) clearInterval(modelTimer);
@@ -279,19 +302,49 @@ export function installMock(params: URLSearchParams) {
         }
         case "get_settings":
           return db.settings;
+        case "get_locale":
+          return resolvedLocale(db);
         case "update_settings": {
           const patch = a.patch as Partial<Settings>;
           // Rust は登録できないショートカット (形式の誤り・OS が拒否) では保存せずに reject する
           if (patch.shortcut != null && db.shortcutRejected.includes(patch.shortcut)) {
-            throw `ショートカット「${formatShortcut(patch.shortcut)}」を登録できませんでした。別のキーに変更してください`;
+            throw ui().reject.shortcut(formatShortcut(patch.shortcut));
           }
           // Rust は前後の空白を除いた認識のヒントが上限 (Unicode スカラー値で数える) を超えると保存せずに reject する
           if (patch.asrContext != null && [...patch.asrContext.trim()].length > ASR_CONTEXT_MAX) {
-            throw `認識のヒントは${ASR_CONTEXT_MAX}文字以内にしてください`;
+            throw ui().reject.asrContextMax(ASR_CONTEXT_MAX);
           }
-          db.settings = { ...db.settings, ...patch };
+          const prev = db.settings;
+          const prevLocale = resolvedLocale(db);
+          const next = { ...prev, ...patch };
+          // 話す言語の変更 (docs/architecture.md「言語」): 既定のままの音声コマンドは新しい言語の既定に入れ替える
+          const speechChanged = patch.speechLanguage != null && patch.speechLanguage !== prev.speechLanguage;
+          if (speechChanged && !("voiceCommands" in patch)) {
+            if (sameCommands(prev.voiceCommands, MOCK_SPEECH_TEXTS[prev.speechLanguage].voiceCommands)) {
+              next.voiceCommands = structuredClone(MOCK_SPEECH_TEXTS[next.speechLanguage].voiceCommands);
+            }
+          }
+          db.settings = next;
+          // 導入が実行中・完了済みでなく、モデルの取得をまだ始めていなければ、選択を新しい言語の推奨にする
+          // (Rust の Provisioning::if_model_not_started と同じ条件)
+          const st = db.provisioning.stage;
+          const modelPending = db.provisioning.items.find((i) => i.id === "model")?.state === "pending";
+          const running = st === "runtime" || st === "model" || st === "verify";
+          if (speechChanged && modelPending && !running && st !== "done") {
+            const rec = MODEL_ORDER[next.speechLanguage][0];
+            db.models = db.models.map((m) => ({ ...m, selected: m.id === rec }));
+          }
           fire("settings-changed", db.settings);
           if ("shortcut" in patch) setShortcutStatus();
+          const locale = resolvedLocale(db);
+          if (locale !== prevLocale) {
+            fire("locale-changed", locale);
+            // 表示用の文言を作り直す (AppError の message は code から)
+            if (db.status.error) {
+              setStatus({ error: appError(db.status.error.code, db.status.error.action, locale) });
+            }
+          }
+          if (locale !== prevLocale || speechChanged) fire("models-changed", presentModels(db));
           return db.settings;
         }
         case "get_shortcut_status":
@@ -356,18 +409,18 @@ export function installMock(params: URLSearchParams) {
           stopProvisioningTicker();
           stopModelTicker();
           setProvisioning(provisioning("idle"));
-          // 全モデルを消し、選択は既定に戻る
-          setModels(db.models.map((m) => model(m.id as ModelId, "not_downloaded", { selected: m.recommended })));
-          setStatus({ phase: "error", loadingProgress: null, error: RUNTIME_MISSING });
+          // 全モデルを消し、選択は既定 (話す言語の推奨) に戻る
+          setModels(defaultModels(db.settings.speechLanguage, "not_downloaded"));
+          setStatus({ phase: "error", loadingProgress: null, error: appError("runtime_missing", "start_setup", resolvedLocale(db)) });
           return null;
         case "list_models":
-          return visibleModels(db.models);
+          return presentModels(db);
         case "select_model": {
           requireModelOps();
           const m = findModel(a.id);
-          if (switching) throw "モデルを切り替え中です";
+          if (switching) throw ui().reject.switching;
           if (m.selected) return null;
-          if (m.state !== "downloaded") throw "ダウンロードが済んでいないモデルは選べません";
+          if (m.state !== "downloaded") throw ui().reject.notDownloaded;
           switching = true;
           // Rust は新しいモデルで ASR を起動し直し (音声入力は OFF、phase は loading を経由)、
           // 準備完了してから選択を記録する。失敗したら選択は元のまま
@@ -386,7 +439,7 @@ export function installMock(params: URLSearchParams) {
           requireModelOps();
           const m = findModel(a.id);
           if (m.state === "downloaded" || m.state === "downloading") return null;
-          if (db.models.some((x) => x.state === "downloading")) throw "他のモデルをダウンロード中です";
+          if (db.models.some((x) => x.state === "downloading")) throw ui().reject.otherDownloading;
           patchModel(m.id, { state: "downloading", etaSeconds: null, error: null });
           startModelTicker(m.id);
           return null;
@@ -404,7 +457,7 @@ export function installMock(params: URLSearchParams) {
         case "cancel_model_download": {
           requireModelOps();
           const m = findModel(a.id);
-          if (m.state === "downloaded") throw "ダウンロード済みです";
+          if (m.state === "downloaded") throw ui().reject.alreadyDownloaded;
           if (m.state === "downloading") stopModelTicker();
           await new Promise((r) => setTimeout(r, 200));
           resetModel(m.id);
@@ -413,9 +466,9 @@ export function installMock(params: URLSearchParams) {
         case "delete_model": {
           requireModelOps();
           const m = findModel(a.id);
-          if (switching) throw "モデルを切り替え中です";
-          if (m.selected) throw "使用中のモデルは削除できません";
-          if (m.state === "downloading") throw "ダウンロード中のモデルは削除できません。中止してください";
+          if (switching) throw ui().reject.switching;
+          if (m.selected) throw ui().reject.inUse;
+          if (m.state === "downloading") throw ui().reject.downloadingCantDelete;
           await new Promise((r) => setTimeout(r, 300));
           resetModel(m.id);
           return null;
@@ -436,9 +489,9 @@ export function installMock(params: URLSearchParams) {
         case "list_running_apps":
           return [
             { bundleId: "com.apple.Safari", name: "Safari" },
-            { bundleId: "com.apple.Notes", name: "メモ" },
+            { bundleId: "com.apple.Notes", name: MOCK_SPEECH_TEXTS[db.systemLocale].notes },
             { bundleId: "com.tinyspeck.slackmacgap", name: "Slack" },
-            { bundleId: "com.apple.Terminal", name: "ターミナル" },
+            { bundleId: "com.apple.Terminal", name: MOCK_SPEECH_TEXTS[db.systemLocale].terminal },
             { bundleId: "com.microsoft.VSCode", name: "Visual Studio Code" },
           ];
         case "open_settings":
@@ -474,7 +527,7 @@ export function installMock(params: URLSearchParams) {
           return db.update;
         }
         case "install_update":
-          if (db.update.state !== "ready") throw "インストールできるアップデートがありません";
+          if (db.update.state !== "ready") throw ui().reject.noUpdate;
           if (db.updateInstallError != null) {
             setUpdate({ state: "error", error: db.updateInstallError });
             throw db.updateInstallError;

@@ -13,6 +13,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::i18n::Locale;
+
 pub const ENV_ASR_URL: &str = "MUKUCHI_ASR_URL";
 
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
@@ -27,8 +29,14 @@ pub struct Transcript {
 
 /// 文字起こしクライアント。テストや別実装に差し替えられるようにtraitにする。
 pub trait AsrClient: Send + Sync {
-    /// 16kHz/mono/16bit の WAV を送り、認識結果を返す。
-    fn transcribe(&self, wav: Vec<u8>, context: Option<String>) -> BoxFuture<Result<Transcript>>;
+    /// 16kHz/mono/16bit の WAV を送り、認識結果を返す。`language` は話す言語 (常に明示する。
+    /// 省くとサーバーの自動判定になり、英語の精度が大きく崩れるため)
+    fn transcribe(
+        &self,
+        wav: Vec<u8>,
+        language: Locale,
+        context: Option<String>,
+    ) -> BoxFuture<Result<Transcript>>;
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,10 +103,16 @@ impl HttpAsrClient {
 }
 
 impl AsrClient for HttpAsrClient {
-    fn transcribe(&self, wav: Vec<u8>, context: Option<String>) -> BoxFuture<Result<Transcript>> {
+    fn transcribe(
+        &self,
+        wav: Vec<u8>,
+        language: Locale,
+        context: Option<String>,
+    ) -> BoxFuture<Result<Transcript>> {
         let this = self.clone();
         Box::pin(async move {
-            let mut query: Vec<(&str, String)> = vec![("language", "Japanese".to_string())];
+            let mut query: Vec<(&str, String)> =
+                vec![("language", language.asr_language().to_string())];
             if let Some(c) = context.filter(|c| !c.is_empty()) {
                 query.push(("context", c));
             }
@@ -217,7 +231,7 @@ mod tests {
             .unwrap();
         let client = HttpAsrClient::new("http://127.0.0.1:9").unwrap();
         let err = rt
-            .block_on(client.transcribe(vec![0; 10], Some("ひみつのヒント".into())))
+            .block_on(client.transcribe(vec![0; 10], Locale::Ja, Some("ひみつのヒント".into())))
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(!msg.contains("127.0.0.1"), "{msg}");

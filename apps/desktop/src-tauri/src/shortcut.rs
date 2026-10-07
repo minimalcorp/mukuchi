@@ -14,36 +14,48 @@ use serde::Serialize;
 use tauri::AppHandle;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
+use crate::i18n::Msg;
+
 /// 修飾キーの名前と並び (docs/architecture.md の `Settings.shortcut`)
 const MODIFIERS: [&str; 4] = ["Ctrl", "Alt", "Shift", "Cmd"];
 
 /// `Settings.shortcut` の形式 ("Ctrl+Alt+Shift+Cmd+<KeyboardEvent.code>" の修飾1つ以上) を検証して解釈する。
 pub fn parse(s: &str) -> Result<Shortcut> {
     let tokens: Vec<&str> = s.split('+').collect();
-    let (key, mods) = tokens
-        .split_last()
-        .ok_or_else(|| anyhow!("ショートカットが空です"))?;
+    let (key, mods) = tokens.split_last().ok_or(Msg::ShortcutEmpty)?;
+    let shortcut_str = || s.to_string();
     if mods.is_empty() {
-        bail!("ショートカットには修飾キー (Ctrl・Alt・Shift・Cmd) が1つ以上必要です: {s}");
+        bail!(Msg::ShortcutNeedsModifier {
+            shortcut: shortcut_str()
+        });
     }
     let mut prev: Option<usize> = None;
     for m in mods {
         let Some(i) = MODIFIERS.iter().position(|x| x == m) else {
-            bail!("ショートカットの修飾キーが不正です: {s}");
+            bail!(Msg::ShortcutInvalidModifier {
+                shortcut: shortcut_str()
+            });
         };
         if prev.is_some_and(|p| i <= p) {
-            bail!("ショートカットの修飾キーは Ctrl・Alt・Shift・Cmd の順に1回ずつ指定します: {s}");
+            bail!(Msg::ShortcutModifierOrder {
+                shortcut: shortcut_str()
+            });
         }
         prev = Some(i);
     }
-    let shortcut: Shortcut = s
-        .parse()
-        .map_err(|e| anyhow!("ショートカットを解釈できません: {s} ({e})"))?;
+    let shortcut: Shortcut = s.parse().map_err(|e| {
+        log::info!("ショートカットを解釈できません: {s} ({e})");
+        Msg::ShortcutUnparsable {
+            shortcut: shortcut_str(),
+        }
+    })?;
     // 解析器は "M" "1" 等の別名や大文字小文字の違いも通すため、KeyboardEvent.code の綴りに限る
     // (保存される文字列を1つに定め、フロントエンドの表示と食い違わないようにする)
     let code = shortcut.key.to_string();
     if code != *key || !supported_key(&code) {
-        bail!("ショートカットのキーに使えません: {key}");
+        bail!(Msg::ShortcutUnsupportedKey {
+            key: key.to_string()
+        });
     }
     Ok(shortcut)
 }
@@ -60,8 +72,8 @@ fn supported_key(code: &str) -> bool {
 pub struct ShortcutStatus {
     pub shortcut: Option<String>,
     pub registered: bool,
-    /// 登録できなかった時の表示用 (日本語)
-    pub error: Option<String>,
+    /// 登録できなかった時の表示用 (送る時点の表示言語)
+    pub error: Option<Msg>,
 }
 
 /// OS への登録・解除 (テストで差し替える)
@@ -97,7 +109,7 @@ struct Inner {
     registered: Option<Shortcut>,
     /// キーの記録中 (`set_shortcut_suspended`)。この間は登録を外す
     suspended: bool,
-    error: Option<String>,
+    error: Option<Msg>,
 }
 
 impl Inner {
@@ -119,11 +131,10 @@ pub struct ShortcutManager {
 }
 
 /// 登録できなかった時の表示。詳細 (OS のエラー) はログにだけ出す
-fn register_error(s: &str) -> String {
-    format!(
-        "ショートカット「{}」を登録できませんでした。別のキーに変更してください",
-        display(s)
-    )
+fn register_error(s: &str) -> Msg {
+    Msg::ShortcutRegisterFailed {
+        shortcut: display(s),
+    }
 }
 
 /// 文章中の表示 ("Alt+Space" → "⌥ Space")。フロントエンドの `formatShortcut`
@@ -315,10 +326,15 @@ impl ShortcutManager {
     pub fn rollback(&self, prev: Option<String>) {
         if let Err(e) = self.change(prev.clone()) {
             log::warn!("ショートカットを元に戻せません: {e:#}");
+            // 表示言語の変更に追従できるよう文言の種類で持つ (Msg でなければ登録できなかったものとして出す)
+            let error = e
+                .downcast_ref::<Msg>()
+                .cloned()
+                .unwrap_or_else(|| register_error(prev.as_deref().unwrap_or_default()));
             let mut g = self.lock();
             let before = g.status();
             g.configured = prev;
-            g.error = Some(format!("{e}"));
+            g.error = Some(error);
             self.finish(before, g);
         }
     }
@@ -409,7 +425,7 @@ mod tests {
         assert_eq!(display("Alt+F5"), "⌥ F5");
         assert_eq!(display("Alt+Backslash"), "⌥ \\");
         assert_eq!(
-            register_error("Alt+Space"),
+            register_error("Alt+Space").to_string(),
             "ショートカット「⌥ Space」を登録できませんでした。別のキーに変更してください"
         );
     }
@@ -428,7 +444,7 @@ mod tests {
         let s = m.status();
         assert_eq!(s.shortcut.as_deref(), Some("Alt+Space"));
         assert!(!s.registered);
-        assert!(s.error.unwrap().contains("⌥ Space"));
+        assert!(s.error.unwrap().to_string().contains("⌥ Space"));
     }
 
     /// 登録を記録し、指定のキーだけ失敗する

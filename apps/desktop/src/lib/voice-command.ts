@@ -3,6 +3,7 @@
  * Rust は先に一致したコマンドを使うため、正規化後に同じになる言い方が複数あると後ろのコマンドは使われない。
  * 保存前にここで重複を弾き、その食い違いを起こさない。
  */
+import type { Messages } from "@/i18n/context";
 import type { VoiceCommand } from "./ipc";
 
 /** Rust の is_punctuation と同じ範囲 (ASCII の記号・一般句読点・CJK 記号と句読点・中黒・全角形の一部) */
@@ -52,18 +53,19 @@ export function validatePhrases(
   phrases: string[],
   others: VoiceCommand[],
   formatKey: (c: VoiceCommand) => string,
+  m: Messages["settings"]["commands"]["validation"],
 ): string | null {
-  if (phrases.length === 0) return "言い方を入力してください";
+  if (phrases.length === 0) return m.empty;
   const seen = new Map<string, string>();
   for (const p of phrases) {
     const n = normalizePhrase(p);
-    if (n === "") return `「${p}」は記号や空白だけのため使えません`;
+    if (n === "") return m.symbolsOnly(p);
     const dup = seen.get(n);
-    if (dup != null) return dup === p ? `「${p}」が重複しています` : `「${dup}」と「${p}」は同じ言い方とみなされます`;
+    if (dup != null) return dup === p ? m.duplicate(p) : m.equivalent(dup, p);
     seen.set(n, p);
     for (const c of others) {
       const hit = c.phrases.find((q) => normalizePhrase(q) === n);
-      if (hit != null) return `「${p}」は他のコマンド（${formatKey(c)}）の「${hit}」と重複しています`;
+      if (hit != null) return m.conflict(p, formatKey(c), hit);
     }
   }
   return null;

@@ -13,6 +13,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
+use crate::i18n::Msg;
+
 pub const EVENT_STATUS_CHANGED: &str = "update-status-changed";
 
 /// 開発用: デバッグビルドでこの URL の latest.json を確認・取得する (インストールは常にしない。UI の確認用)
@@ -31,10 +33,6 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// 取得が止まったとみなす無通信の時間。全体の時間制限は回線の遅さで失敗するため付けない
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
-
-const MSG_NOT_INSTALLABLE: &str = "インストールできるアップデートがありません";
-const MSG_MOVE_TO_APPLICATIONS: &str =
-    "アプリケーションフォルダに移動すると自動でアップデートできます";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -59,7 +57,8 @@ pub struct UpdateStatus {
     pub bytes_done: u64,
     pub bytes_total: Option<u64>,
     pub checked_at: Option<u64>,
-    pub error: Option<String>,
+    /// 表示用 (送る時点の表示言語)
+    pub error: Option<Msg>,
 }
 
 // ---- 実行場所の判定 -------------------------------------------------------------
@@ -72,7 +71,7 @@ pub enum Availability {
     /// 開発 (MUKUCHI_DEV_UPDATE_ENDPOINT): 確認・取得のみ
     DevEndpoint(url::Url),
     /// 扱わない (表示用の理由)
-    Unavailable(String),
+    Unavailable(Msg),
 }
 
 impl Availability {
@@ -84,19 +83,17 @@ impl Availability {
                     Ok(u) => Self::DevEndpoint(u),
                     Err(e) => {
                         log::warn!("{ENV_DEV_UPDATE_ENDPOINT} が不正: {e}");
-                        Self::Unavailable("開発ビルドではアップデートしません".into())
+                        Self::Unavailable(Msg::UpdateDevBuild)
                     }
                 },
-                None => Self::Unavailable("開発ビルドではアップデートしません".into()),
+                None => Self::Unavailable(Msg::UpdateDevBuild),
             };
         }
         let Some(bundle) = bundle else {
-            return Self::Unavailable(
-                "アプリの場所が分からないため自動でアップデートできません".into(),
-            );
+            return Self::Unavailable(Msg::UpdateLocationUnknown);
         };
         if !installable_location(bundle) {
-            return Self::Unavailable(MSG_MOVE_TO_APPLICATIONS.into());
+            return Self::Unavailable(Msg::UpdateMoveToApplications);
         }
         Self::Production
     }
@@ -157,7 +154,7 @@ pub struct Machine<P> {
 }
 
 impl<P: Clone> Machine<P> {
-    pub fn new(current_version: String, unavailable: Option<String>) -> Self {
+    pub fn new(current_version: String, unavailable: Option<Msg>) -> Self {
         Self {
             status: UpdateStatus {
                 state: if unavailable.is_some() {
@@ -255,14 +252,14 @@ impl<P: Clone> Machine<P> {
         }
     }
 
-    pub fn check_failed(&mut self, message: &str) {
+    pub fn check_failed(&mut self, message: Msg) {
         if self.is_unavailable() || self.show_pending() {
             return;
         }
         self.status.state = UpdateState::Error;
         self.status.latest_version = None;
         self.status.notes = None;
-        self.status.error = Some(message.into());
+        self.status.error = Some(message);
     }
 
     pub fn progress(&mut self, chunk: u64, total: Option<u64>) {
@@ -288,20 +285,20 @@ impl<P: Clone> Machine<P> {
     }
 
     /// 取得に失敗した。前に取得済みのものがあればそれに戻す
-    pub fn download_failed(&mut self, message: &str) {
+    pub fn download_failed(&mut self, message: Msg) {
         if self.status.state != UpdateState::Downloading || self.show_pending() {
             return;
         }
         // latest_version は残す (どの版の取得に失敗したかを出す)
         self.status.state = UpdateState::Error;
-        self.status.error = Some(message.into());
+        self.status.error = Some(message);
     }
 
     /// インストールを始める。`ready` でなければエラー
     pub fn begin_install(&mut self) -> Result<P> {
         let p = match (&self.status.state, &self.pending) {
             (UpdateState::Ready, Some(p)) => p.payload.clone(),
-            _ => return Err(anyhow!(MSG_NOT_INSTALLABLE)),
+            _ => return Err(anyhow!(Msg::UpdateNotInstallable)),
         };
         self.status.state = UpdateState::Installing;
         self.status.error = None;
@@ -317,10 +314,10 @@ impl<P: Clone> Machine<P> {
 
     /// インストールに失敗した。.app が途中まで置き換わっている可能性があるため、取得したものは捨てる
     /// (次の確認で取り直す)
-    pub fn install_failed(&mut self, message: &str) {
+    pub fn install_failed(&mut self, message: Msg) {
         self.pending = None;
         self.status.state = UpdateState::Error;
-        self.status.error = Some(message.into());
+        self.status.error = Some(message);
     }
 }
 
@@ -429,6 +426,11 @@ impl UpdateManager {
         status
     }
 
+    /// 表示言語の変更時: 今の状態を送り直す (error は送る時点の表示言語で文字列になる)
+    pub fn emit_status(&self) {
+        let _ = self.app.emit(EVENT_STATUS_CHANGED, self.status());
+    }
+
     /// 自動確認の条件が変わった (設定の autoCheckUpdates・セットアップの完了)
     pub fn wake(&self) {
         self.wake.notify_one();
@@ -498,7 +500,7 @@ impl UpdateManager {
             }
             Err(e) => {
                 log::warn!("アップデートを確認できません: {e:#}");
-                self.update(|m| m.check_failed("アップデートを確認できませんでした"))
+                self.update(|m| m.check_failed(Msg::UpdateCheckFailed))
             }
         }
     }
@@ -544,7 +546,7 @@ impl UpdateManager {
             }
             Err(e) => {
                 log::warn!("アップデートを取得できません: {e}");
-                self.update(|m| m.download_failed("アップデートをダウンロードできませんでした"));
+                self.update(|m| m.download_failed(Msg::UpdateDownloadFailed));
             }
         }
     }
@@ -574,21 +576,15 @@ impl UpdateManager {
     {
         match &self.availability {
             Availability::Production => {}
-            Availability::DevEndpoint(_) => {
-                return Err(anyhow!("開発ビルドではインストールしません"))
-            }
-            Availability::Unavailable(_) => return Err(anyhow!(MSG_NOT_INSTALLABLE)),
+            Availability::DevEndpoint(_) => return Err(anyhow!(Msg::UpdateDevNoInstall)),
+            Availability::Unavailable(_) => return Err(anyhow!(Msg::UpdateNotInstallable)),
         }
         let _guard = match self.op.clone().try_lock_owned() {
             Ok(g) => g,
             // 取得済みのまま裏で確認している (数秒): 終わるのを待つ。新しい版が見つかればその取得も待ち、
             // 終わった時点で ready なら (取り直した版を) インストールする。std の Mutex は持たずに待つ
             Err(_) if self.ready_version().is_some() => self.op.clone().lock_owned().await,
-            Err(_) => {
-                return Err(anyhow!(
-                    "アップデートを確認しています。しばらくしてからもう一度お試しください"
-                ))
-            }
+            Err(_) => return Err(anyhow!(Msg::UpdateChecking)),
         };
         let mut payload = None;
         let mut begin = Ok(());
@@ -598,7 +594,7 @@ impl UpdateManager {
         });
         begin?;
         let Some(payload) = payload else {
-            return Err(anyhow!(MSG_NOT_INSTALLABLE));
+            return Err(anyhow!(Msg::UpdateNotInstallable));
         };
         if let Err(e) = prepare().await {
             self.update(|m| m.install_aborted());
@@ -622,13 +618,13 @@ impl UpdateManager {
             }
             Ok(Err(e)) => {
                 log::error!("アップデートをインストールできません: {e}");
-                self.update(|m| m.install_failed("アップデートをインストールできませんでした"));
-                Err(anyhow!("アップデートをインストールできませんでした"))
+                self.update(|m| m.install_failed(Msg::UpdateInstallFailed));
+                Err(anyhow!(Msg::UpdateInstallFailed))
             }
             Err(e) => {
                 log::error!("アップデートのインストールが異常終了しました: {e}");
-                self.update(|m| m.install_failed("アップデートをインストールできませんでした"));
-                Err(anyhow!("アップデートをインストールできませんでした"))
+                self.update(|m| m.install_failed(Msg::UpdateInstallFailed));
+                Err(anyhow!(Msg::UpdateInstallFailed))
             }
         }
     }
@@ -666,7 +662,7 @@ mod tests {
         ] {
             assert_eq!(
                 Availability::resolve(false, None, Some(Path::new(p))),
-                Availability::Unavailable(MSG_MOVE_TO_APPLICATIONS.into()),
+                Availability::Unavailable(Msg::UpdateMoveToApplications),
                 "{p}"
             );
         }
@@ -713,13 +709,13 @@ mod tests {
 
     #[test]
     fn unavailable_never_changes() {
-        let mut m: Machine<u32> = Machine::new("0.1.4".into(), Some("理由".into()));
+        let mut m: Machine<u32> = Machine::new("0.1.4".into(), Some(Msg::UpdateDevBuild));
         assert_eq!(m.status().state, UpdateState::Unavailable);
-        assert_eq!(m.status().error.as_deref(), Some("理由"));
+        assert_eq!(m.status().error, Some(Msg::UpdateDevBuild));
         m.begin_check();
         assert_eq!(m.found("0.2.0".into(), None, 1), Next::Nothing);
         m.up_to_date(1);
-        m.check_failed("x");
+        m.check_failed(Msg::UpdateCheckFailed);
         assert_eq!(m.status().state, UpdateState::Unavailable);
         assert!(m.begin_install().is_err());
     }
@@ -757,7 +753,7 @@ mod tests {
         m.install_aborted();
         assert_eq!(m.ready_version(), Some("0.1.5"));
         assert_eq!(m.begin_install().unwrap(), 7);
-        m.install_failed("失敗");
+        m.install_failed(Msg::UpdateInstallFailed);
         let s = m.status();
         assert_eq!(s.state, UpdateState::Error);
         assert_eq!(s.latest_version.as_deref(), Some("0.1.5"));
@@ -782,14 +778,14 @@ mod tests {
             (UpdateState::Idle, None, Some(5))
         );
         m.begin_check();
-        m.check_failed("確認できない");
+        m.check_failed(Msg::UpdateCheckFailed);
         let s = m.status();
         assert_eq!(s.state, UpdateState::Error);
-        assert_eq!(s.error.as_deref(), Some("確認できない"));
+        assert_eq!(s.error, Some(Msg::UpdateCheckFailed));
         assert_eq!(s.checked_at, Some(5), "成功した確認の時刻は残す");
         m.begin_check();
         m.found("0.2.0".into(), None, 6);
-        m.download_failed("取得できない");
+        m.download_failed(Msg::UpdateDownloadFailed);
         let s = m.status();
         assert_eq!(s.state, UpdateState::Error);
         assert_eq!(s.latest_version.as_deref(), Some("0.2.0"));
@@ -810,13 +806,13 @@ mod tests {
         assert_eq!(m.status().checked_at, Some(2));
         m.up_to_date(3);
         assert_eq!(m.ready_version(), Some("0.1.5"));
-        m.check_failed("x");
+        m.check_failed(Msg::UpdateCheckFailed);
         assert_eq!(m.ready_version(), Some("0.1.5"));
         assert_eq!(m.status().error, None);
         // さらに新しい版は取り直す。失敗したら前の取得済みに戻る
         assert_eq!(m.found("0.1.6".into(), None, 4), Next::Download);
         assert_eq!(m.status().state, UpdateState::Downloading);
-        m.download_failed("x");
+        m.download_failed(Msg::UpdateDownloadFailed);
         assert_eq!(m.ready_version(), Some("0.1.5"));
         assert_eq!(m.found("0.1.6".into(), None, 5), Next::Download);
         m.downloaded(2);

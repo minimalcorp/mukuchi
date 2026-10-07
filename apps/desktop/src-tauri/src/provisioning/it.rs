@@ -24,7 +24,10 @@ fn env_path(name: &str) -> PathBuf {
 fn real_hf_range_resume() {
     tauri::async_runtime::block_on(async {
         let hf_home = env_path("MUKUCHI_IT_HF_HOME");
-        let model = models::Catalog::distributed().default_model().hf.clone();
+        let model = models::Catalog::distributed()
+            .recommended(crate::i18n::Locale::Ja)
+            .hf
+            .clone();
         let http = hf::http_client().unwrap();
         let (_tx, never) = Cancel::pair();
         let files: Vec<_> = hf::list_files(&http, &model, &never)
@@ -113,7 +116,7 @@ fn real_provision_and_serve() {
         let model = std::env::var("MUKUCHI_IT_MODEL")
             .ok()
             .and_then(|id| catalog.get(&id).cloned())
-            .unwrap_or_else(|| catalog.default_model().clone())
+            .unwrap_or_else(|| catalog.recommended(crate::i18n::Locale::Ja).clone())
             .hf;
         println!("model: {}", model.version());
         let asr = Arc::new(AsrProcess::new());
@@ -191,7 +194,10 @@ fn real_provision_and_serve() {
         let client = HttpAsrClient::new(url.clone()).unwrap();
         println!("health: {}", client.health().await.unwrap());
         let wav = std::fs::read(env_path("MUKUCHI_IT_WAV")).unwrap();
-        let tr = client.transcribe(wav, None).await.unwrap();
+        let tr = client
+            .transcribe(wav, crate::i18n::Locale::Ja, None)
+            .await
+            .unwrap();
         println!(
             "transcribe: {}文字, server {:?}ms",
             tr.text.chars().count(),

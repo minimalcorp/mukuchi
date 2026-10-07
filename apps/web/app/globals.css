@@ -136,3 +136,9 @@ button {
     animation-duration: 0s !important;
   }
 }
+
+/* 英語のページは欧文フォントを先に指定する (和文フォントの欧文より字幅・字形が英文向き) */
+html[lang="en"] body {
+  font-family: var(--font-sans);
+  font-feature-settings: normal;
+}

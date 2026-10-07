@@ -31,7 +31,8 @@ HF_HOME=<モデル置き場> uv run --project asr-server mukuchi-asr-convert --m
 ```
 
 MLX形式の量子化済みチェックポイントを作る(サーバー実行時には使わない)。`--encoder-bits 16` で音声エンコーダを非量子化、`--bits 4 --encoder-bits 8` で4bitデコーダ。
-出力先はそのまま `--model` に渡せる。採用した設定と評価は [spikes/asr-bench/MODEL_DECISION.md](../../../spikes/asr-bench/MODEL_DECISION.md)。
+`--bits 5` は全層5bit (mlx-qwen3-asr 0.4.4 の読み込みが層ごとの5bitを判定できないため、5bit はデコーダが5bitの時だけ。エンコーダだけ5bitは不可)。
+出力先はそのまま `--model` に渡せる。採用した設定と評価は [spikes/asr-bench/MODEL_DECISION.md](../../../spikes/asr-bench/MODEL_DECISION.md)、話す言語ごとのモデルは [MODEL_DECISION_I18N.md](../../../spikes/asr-bench/MODEL_DECISION_I18N.md)。
 
 ## 開発
 

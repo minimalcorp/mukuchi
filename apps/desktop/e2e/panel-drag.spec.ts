@@ -3,7 +3,8 @@
  * 右クリックで show_panel_menu を呼ぶこと (ドラッグ・切り替えにならない)、
  * setup の動作テストで show_panel を呼ぶことの確認。
  */
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 const PANEL = { width: 560, height: 260 };
 const SETUP = { width: 640, height: 520 };
@@ -60,38 +61,9 @@ async function pressMoveWith(page: Page, target: Locator, dx: number, key: strin
 }
 
 const STATES = [
-  { name: "OFF", query: "window=panel&mock=off", button: "音声入力をオン", on: true },
-  { name: "ON", query: "window=panel&mock=idle", button: "音声入力をオフ", on: false },
+  { name: "OFF", query: "window=panel&mock=off", button: "turnOn" as const, on: true },
+  { name: "ON", query: "window=panel&mock=idle", button: "turnOff" as const, on: false },
 ];
-
-for (const s of STATES) {
-  test(`panel ${s.name}: ボタン上から 4px 以上動かすとドラッグになり、切り替えない`, async ({ page }) => {
-    await open(page, s.query, PANEL);
-    const button = page.getByRole("button", { name: s.button });
-    await pressMove(page, button, 12);
-    await expect.poll(() => dragCalls(page)).toBe(1);
-    expect(await calls(page, "set_listening")).toHaveLength(0);
-    await expect(button).toBeVisible();
-  });
-
-  test(`panel ${s.name}: 動かさずに離すとクリック (切り替え) になり、ドラッグしない`, async ({ page }) => {
-    await open(page, s.query, PANEL);
-    // 閾値未満の手ぶれもクリックとして扱う
-    await pressMove(page, page.getByRole("button", { name: s.button }), 2);
-    await expect.poll(async () => (await calls(page, "set_listening")).map((c) => c.args)).toEqual([{ on: s.on }]);
-    expect(await dragCalls(page)).toBe(0);
-  });
-
-  test(`panel ${s.name}: ドラッグの後もキーボードで切り替えられる`, async ({ page }) => {
-    await open(page, s.query, PANEL);
-    const button = page.getByRole("button", { name: s.button });
-    await pressMove(page, button, 12);
-    await expect.poll(() => dragCalls(page)).toBe(1);
-    await button.focus();
-    await page.keyboard.press("Enter");
-    await expect.poll(async () => (await calls(page, "set_listening")).map((c) => c.args)).toEqual([{ on: s.on }]);
-  });
-}
 
 /** 要素の中央 (ページ座標) */
 async function center(target: Locator) {
@@ -101,9 +73,29 @@ async function center(target: Locator) {
 }
 
 for (const s of STATES) {
-  test(`panel ${s.name}: ボタン上の右クリックで show_panel_menu を呼び、切り替え・ドラッグしない`, async ({ page }) => {
+  test(`panel ${s.name}: ボタン上から 4px 以上動かすとドラッグになり切り替えず、その後もキーボードで切り替えられる`, async ({ page, m }) => {
     await open(page, s.query, PANEL);
-    const button = page.getByRole("button", { name: s.button });
+    const button = page.getByRole("button", { name: m.panel[s.button] });
+    await pressMove(page, button, 12);
+    await expect.poll(() => dragCalls(page)).toBe(1);
+    expect(await calls(page, "set_listening")).toHaveLength(0);
+    await expect(button).toBeVisible();
+    await button.focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await calls(page, "set_listening")).map((c) => c.args)).toEqual([{ on: s.on }]);
+  });
+
+  test(`panel ${s.name}: 動かさずに離すとクリック (切り替え) になり、ドラッグしない`, async ({ page, m }) => {
+    await open(page, s.query, PANEL);
+    // 閾値未満の手ぶれもクリックとして扱う
+    await pressMove(page, page.getByRole("button", { name: m.panel[s.button] }), 2);
+    await expect.poll(async () => (await calls(page, "set_listening")).map((c) => c.args)).toEqual([{ on: s.on }]);
+    expect(await dragCalls(page)).toBe(0);
+  });
+
+  test(`panel ${s.name}: ボタン上の右クリックで show_panel_menu を呼び、右クリック・control + クリックは切り替え・ドラッグしない`, async ({ page, m }) => {
+    await open(page, s.query, PANEL);
+    const button = page.getByRole("button", { name: m.panel[s.button] });
     const { x, y } = await center(button);
     // 押したまま動かしてもドラッグにしない
     await page.mouse.move(x, y);
@@ -113,14 +105,11 @@ for (const s of STATES) {
     await expect.poll(async () => (await calls(page, "show_panel_menu")).length).toBe(1);
     const [menu] = await calls(page, "show_panel_menu");
     // ビューポート = panel ウィンドウなので clientX/Y はページ座標と一致する
-    expect(menu.args).toEqual({ x: Math.round(x), y: Math.round(y) });
-    expect(await calls(page, "set_listening")).toHaveLength(0);
-    expect(await dragCalls(page)).toBe(0);
-  });
-
-  test(`panel ${s.name}: control + クリックは切り替え・ドラッグしない`, async ({ page }) => {
-    await open(page, s.query, PANEL);
-    const button = page.getByRole("button", { name: s.button });
+    // 押した位置が端数 (ボタンの幅が奇数) の時、clientX/Y の丸めは WebKit 次第のため 1px までの差は許す
+    const args = menu.args as { x: number; y: number };
+    expect(Math.abs(args.x - x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(args.y - y)).toBeLessThanOrEqual(1);
+    // control + クリック (macOS の副クリック) も切り替え・ドラッグしない
     await button.click({ modifiers: ["Control"] });
     await pressMoveWith(page, button, 12, "Control");
     expect(await calls(page, "set_listening")).toHaveLength(0);
@@ -161,15 +150,15 @@ test("panel: 余白ではドラッグしない", async ({ page }) => {
   await expect(page.getByTestId("panel-frame")).toHaveCSS("pointer-events", "none");
 });
 
-test("setup: 動作テストのステップに入ると show_panel を呼ぶ", async ({ page }) => {
+test("setup: 動作テストのステップに入ると show_panel を呼ぶ", async ({ page, m }) => {
   await open(page, "window=setup&mock=download-done", SETUP);
-  await expect(page.getByText("試しに話してみてください")).toHaveCount(0);
+  await expect(page.getByText(m.setup.test.title)).toHaveCount(0);
   expect(await calls(page, "show_panel")).toHaveLength(0);
-  await page.getByRole("button", { name: "次へ" }).click();
+  await page.getByRole("button", { name: m.common.next }).click();
   // 入力モードのステップでは出さない
-  await expect(page.getByText("入力のしかたを選んでください")).toBeVisible();
+  await expect(page.getByText(m.setup.inputMode.title)).toBeVisible();
   expect(await calls(page, "show_panel")).toHaveLength(0);
-  await page.getByRole("button", { name: "次へ" }).click();
-  await expect(page.getByText("試しに話してみてください")).toBeVisible();
+  await page.getByRole("button", { name: m.common.next }).click();
+  await expect(page.getByText(m.setup.test.title)).toBeVisible();
   await expect.poll(async () => (await calls(page, "show_panel")).length).toBeGreaterThan(0);
 });

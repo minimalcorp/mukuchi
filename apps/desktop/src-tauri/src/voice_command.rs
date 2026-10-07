@@ -3,6 +3,7 @@
 
 use unicode_normalization::UnicodeNormalization;
 
+use crate::i18n::Msg;
 use crate::settings::{KeyCombo, VoiceCommand};
 
 /// NFKC で全角・半角を揃え、句読点・記号・空白を除き、英字を小文字にする。
@@ -43,15 +44,18 @@ pub fn validate(commands: &[VoiceCommand]) -> anyhow::Result<()> {
     let mut seen = std::collections::HashMap::<String, &str>::new();
     for c in commands {
         if c.phrases.is_empty() {
-            anyhow::bail!("言い方が入力されていない音声コマンドがあります");
+            anyhow::bail!(Msg::VoiceCommandNoPhrase);
         }
         for p in &c.phrases {
             let n = normalize(p);
             if n.is_empty() {
-                anyhow::bail!("「{p}」は記号や空白だけのため言い方に使えません");
+                anyhow::bail!(Msg::VoiceCommandSymbolsOnly { phrase: p.clone() });
             }
             if let Some(prev) = seen.insert(n, p) {
-                anyhow::bail!("言い方「{p}」が「{prev}」と重複しています");
+                anyhow::bail!(Msg::VoiceCommandDuplicate {
+                    phrase: p.clone(),
+                    other: prev.to_string(),
+                });
             }
         }
     }
@@ -101,13 +105,13 @@ mod tests {
                 modifiers: vec![],
             },
         };
-        assert!(validate(&default_voice_commands()).is_ok());
+        assert!(validate(&default_voice_commands(crate::i18n::Locale::Ja)).is_ok());
         assert!(validate(&[cmd(&["。"])]).is_err());
         assert!(validate(&[cmd(&[])]).is_err());
         // 正規化後に同じ (全角・句読点・大文字小文字の違い)
         assert!(validate(&[cmd(&["Enter"]), cmd(&["ＥＮＴＥＲ。"])]).is_err());
         assert!(validate(&[cmd(&["確定", "確定!"])]).is_err());
-        let mut cmds = default_voice_commands();
+        let mut cmds = default_voice_commands(crate::i18n::Locale::Ja);
         cmds.push(cmd(&["エンター"]));
         let e = validate(&cmds).unwrap_err().to_string();
         assert!(e.contains("重複"), "{e}");
@@ -115,7 +119,7 @@ mod tests {
 
     #[test]
     fn exact_match_only() {
-        let cmds = default_voice_commands();
+        let cmds = default_voice_commands(crate::i18n::Locale::Ja);
         let enter = match_command("確定。", &cmds).unwrap();
         assert_eq!(enter.key, Key::Enter);
         assert!(enter.modifiers.is_empty());

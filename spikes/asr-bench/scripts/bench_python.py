@@ -5,6 +5,8 @@
 """ベースライン: Python + MLX (mlx-qwen3-asr、tsunagiのwhisper-serverと同じ実装)。
 
 使い方: uv run scripts/bench_python.py --model <HFリポジトリID or ローカルパス> --label <名前> [--quantize 8]
+        [--language Japanese|English]
+language は asr-server と同じく Qwen3-ASR の言語名で明示する (アプリは話す言語から渡す)。
 既定のdtypeはfloat16(tsunagiと同じ)。
 結果は $RESULTS_DIR (既定: results/) の <label>.json に書き出す(形式はRust版と共通)。
 """
@@ -37,7 +39,9 @@ def main() -> None:
     parser.add_argument("--label", required=True)
     parser.add_argument("--quantize", type=int, choices=[4, 8], help="読み込み後にメモリ上で量子化する(配布時の8bit版の目安)")
     parser.add_argument("--audio-dir", default=str(ROOT / "data" / "audio"))
+    parser.add_argument("--language", default="Japanese", help="auto で指定しない (モデルの自動判定)")
     args = parser.parse_args()
+    language = None if args.language == "auto" else args.language
 
     files = sorted(Path(args.audio_dir).glob("*.wav"))
     if not files:
@@ -51,13 +55,13 @@ def main() -> None:
     load_ms = (time.perf_counter() - t0) * 1000
 
     # 初回推論はMetalカーネルのコンパイル等で遅いため、計測から除外する。
-    session.transcribe(load_wav(files[0]), language="Japanese")
+    session.transcribe(load_wav(files[0]), language=language)
 
     results = []
     for f in files:
         audio = load_wav(f)
         t = time.perf_counter()
-        text = session.transcribe(audio, language="Japanese").text
+        text = session.transcribe(audio, language=language).text
         latency_ms = (time.perf_counter() - t) * 1000
         results.append({"id": f.stem, "text": text, "latency_ms": latency_ms, "audio_sec": len(audio) / 16000})
         print(f"{f.stem}\t{latency_ms:7.0f}ms\t{text}")
@@ -65,6 +69,7 @@ def main() -> None:
     out = Path(os.environ.get("RESULTS_DIR", ROOT / "results")) / f"{args.label}.json"
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps({"label": args.label, "impl": "python-mlx", "model": args.model, "quantize": args.quantize,
+                               "language": args.language,
                                "load_ms": load_ms, "results": results}, ensure_ascii=False, indent=1))
     print(f"-> {out}")
 

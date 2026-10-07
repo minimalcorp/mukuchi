@@ -1,10 +1,22 @@
 /*
  * モックのシナリオ。URL の ?window=<panel|settings|setup>&mock=<名前> で選ぶ。
- * setup は &step=<1-6>、settings は &category=<カテゴリ> も併用できる。
+ * setup は &step=<1-6>、settings は &category=<カテゴリ> も併用できる。&locale=<ja|en> で OS の言語 (index.ts)。
+ * 発話・アプリ名は話す言語 (MOCK_SPEECH_TEXTS)、Rust の文言は表示言語 (MOCK_UI_TEXTS) で作る。
  */
-import type { AppError, AppStatus } from "@/lib/ipc";
+import type { AppError, AppErrorAction, AppErrorCode, AppStatus, Locale } from "@/lib/ipc";
 import type { MockApi } from "./index";
-import { GB, UPDATE_TOTAL, model, provisioning, updateStatus, type MockDb } from "./data";
+import {
+  GB,
+  MODEL_ORDER,
+  UPDATE_TOTAL,
+  defaultModels,
+  model,
+  provisioning,
+  resolvedLocale,
+  updateStatus,
+  type MockDb,
+} from "./data";
+import { MOCK_SPEECH_TEXTS, MOCK_UI_TEXTS } from "./texts";
 
 export type Scenario = {
   name: string;
@@ -17,8 +29,14 @@ export type Scenario = {
   script?: (api: MockApi) => void;
 };
 
-const TEXT = "明日の打ち合わせは十時からに変更してください。";
 const THRESHOLD = 0.55;
+
+/** 話す言語の発話・アプリ名 */
+const sp = (db: MockDb) => MOCK_SPEECH_TEXTS[db.settings.speechLanguage] ?? MOCK_SPEECH_TEXTS.ja;
+/** 表示言語の Rust の文言 */
+const ui = (db: MockDb) => MOCK_UI_TEXTS[resolvedLocale(db)];
+/** もう一方の言語 (話す言語と推奨モデルが食い違う状態を作る) */
+const otherLocale = (l: Locale): Locale => (l === "ja" ? "en" : "ja");
 
 /** シナリオの初期状態。Rust と同じく状態を変えるたびに seq を増やす */
 const setStatus = (db: MockDb, s: Omit<AppStatus, "seq">) => {
@@ -30,32 +48,32 @@ const listening = (db: MockDb, level = 0.18) => {
   db.level = { level, threshold: THRESHOLD, speech: level >= THRESHOLD };
 };
 
-const ERRORS: Record<string, AppError> = {
-  accessibility: {
-    code: "accessibility_denied",
-    message: "アクセシビリティが許可されていません",
-    action: "open_accessibility",
-  },
-  asr: { code: "asr_stopped", message: "文字起こしサーバーが停止しました", action: "restart_asr" },
-  mic: { code: "microphone_missing", message: "マイクが見つかりません", action: "select_microphone" },
-  "mic-denied": { code: "microphone_denied", message: "マイクが許可されていません", action: "open_microphone" },
-  runtime: { code: "runtime_missing", message: "実行環境とモデルがありません", action: "start_setup" },
+const ERRORS: Record<string, { code: AppErrorCode; action: AppErrorAction }> = {
+  accessibility: { code: "accessibility_denied", action: "open_accessibility" },
+  asr: { code: "asr_stopped", action: "restart_asr" },
+  mic: { code: "microphone_missing", action: "select_microphone" },
+  "mic-denied": { code: "microphone_denied", action: "open_microphone" },
+  runtime: { code: "runtime_missing", action: "start_setup" },
 };
+
+/** Rust と同じく message は表示言語 */
+const errorOf = (db: MockDb, key: string): AppError => ({ ...ERRORS[key], message: ui(db).errors[ERRORS[key].code] });
 
 const errorScenario = (key: string): Scenario => ({
   name: `error-${key}`,
   description: `エラー: ${ERRORS[key].code}`,
   setup: (db) => {
-    setStatus(db, { phase: "error", loadingProgress: null, error: ERRORS[key] });
+    setStatus(db, { phase: "error", loadingProgress: null, error: errorOf(db, key) });
   },
 });
 
 /** 発話 → 途中表示 → 確定 → 入力 を繰り返す (live) */
 function liveLoop(api: MockApi) {
+  const t = sp(api.db);
   const sentences = [
-    { text: TEXT, app: "メモ" },
-    { text: "確定", command: "Enter" },
-    { text: "資料は前日までに共有しておきます。", app: "Slack" },
+    { text: t.text, app: t.notes },
+    { text: t.command, command: "Enter" },
+    { text: t.second, app: "Slack" },
   ];
   let id = 100;
   let i = 0;
@@ -82,7 +100,7 @@ function liveLoop(api: MockApi) {
     }, endAt);
     setTimeout(() => {
       if (s.command) api.result({ kind: "command", id: myId, text: s.text, key: s.command });
-      else api.result({ kind: "inserted", id: myId, text: s.text, appName: s.app ?? "メモ" });
+      else api.result({ kind: "inserted", id: myId, text: s.text, appName: s.app ?? t.notes });
       api.setLevel(0.12);
       api.setStatus({ phase: "listening" });
     }, endAt + 700);
@@ -131,7 +149,7 @@ function previewDiffLoop(api: MockApi) {
     }, endAt - STEP_MS / 2);
     setTimeout(() => {
       const text = PREVIEW_DIFF_STEPS[PREVIEW_DIFF_STEPS.length - 1];
-      api.result({ kind: "inserted", id: myId, text, appName: "メモ" });
+      api.result({ kind: "inserted", id: myId, text, appName: sp(api.db).notes });
       api.setLevel(0.12);
       api.setStatus({ phase: "listening" });
     }, endAt);
@@ -188,7 +206,8 @@ const PANEL: Scenario[] = [
     },
     script: (api) => {
       api.started(1);
-      api.partial({ id: 1, text: "明日の打ち合わせは十時からに変更して", stableLength: 13 });
+      const t = sp(api.db);
+      api.partial({ id: 1, text: t.partial, stableLength: Math.max(0, t.partial.length - 5) });
     },
   },
   {
@@ -200,7 +219,8 @@ const PANEL: Scenario[] = [
     },
     script: (api) => {
       api.started(1);
-      api.partial({ id: 1, text: TEXT, stableLength: TEXT.length });
+      const { text } = sp(api.db);
+      api.partial({ id: 1, text, stableLength: text.length });
       api.setStatus({ phase: "finalizing" });
     },
   },
@@ -210,7 +230,7 @@ const PANEL: Scenario[] = [
     setup: (db) => listening(db, 0.06),
     script: (api) => {
       api.started(1);
-      api.result({ kind: "inserted", id: 1, text: TEXT, appName: "メモ" });
+      api.result({ kind: "inserted", id: 1, text: sp(api.db).text, appName: sp(api.db).notes });
     },
   },
   {
@@ -219,7 +239,7 @@ const PANEL: Scenario[] = [
     setup: (db) => listening(db, 0.06),
     script: (api) => {
       api.started(1);
-      api.result({ kind: "command", id: 1, text: "確定", key: "Enter" });
+      api.result({ kind: "command", id: 1, text: sp(api.db).command, key: "Enter" });
     },
   },
   {
@@ -228,7 +248,7 @@ const PANEL: Scenario[] = [
     setup: (db) => listening(db, 0.06),
     script: (api) => {
       api.started(1);
-      api.result({ kind: "skipped_excluded", id: 1, text: TEXT, appName: "1Password" });
+      api.result({ kind: "skipped_excluded", id: 1, text: sp(api.db).text, appName: "1Password" });
     },
   },
   {
@@ -240,10 +260,10 @@ const PANEL: Scenario[] = [
       api.result({
         kind: "failed",
         id: 1,
-        text: TEXT,
+        text: sp(api.db).text,
         error: {
           code: "accessibility_denied",
-          message: "アクセシビリティが未許可のため入力できません",
+          message: ui(api.db).insertFailedNoAccessibility,
           action: "open_accessibility",
         },
       });
@@ -257,10 +277,11 @@ const PANEL: Scenario[] = [
       db.status.phase = "speaking";
     },
     script: (api) => {
+      const t = sp(api.db);
       api.started(1);
-      api.partial({ id: 1, text: TEXT, stableLength: TEXT.length });
+      api.partial({ id: 1, text: t.text, stableLength: t.text.length });
       api.started(2);
-      api.partial({ id: 2, text: "資料は前日までに共有して", stableLength: 8 });
+      api.partial({ id: 2, text: t.secondPartial, stableLength: 8 });
     },
   },
   {
@@ -271,14 +292,11 @@ const PANEL: Scenario[] = [
       db.status.phase = "speaking";
     },
     script: (api) => {
+      const t = sp(api.db);
       api.started(1);
-      api.result({ kind: "inserted", id: 1, text: "一行目: " + TEXT, appName: "メモ" });
+      api.result({ kind: "inserted", id: 1, text: "1: " + t.text, appName: t.notes });
       api.started(2);
-      api.partial({
-        id: 2,
-        text: "二行目以降: 会議室は三階の大会議室に変更になりました。参加者には別途連絡しますので、資料は前日までに共有してください",
-        stableLength: 48,
-      });
+      api.partial({ id: 2, text: t.long, stableLength: 48 });
     },
   },
   errorScenario("accessibility"),
@@ -293,8 +311,15 @@ function shortcutConflict(db: MockDb) {
   db.shortcut = {
     shortcut: db.settings.shortcut,
     registered: false,
-    error: "ショートカット「⌥ Space」を登録できませんでした。別のキーに変更してください",
+    error: ui(db).shortcutConflict("⌥ Space"),
   };
+}
+
+/** セットアップ前の状態: モデルは話す言語の推奨を選択中・未取得 (取得前は話す言語の変更で選択が変わる) */
+function freshSetup(db: MockDb) {
+  db.provisioning = provisioning("idle");
+  db.settings.setupCompleted = false;
+  db.models = defaultModels(db.settings.speechLanguage, "not_downloaded");
 }
 
 const SETUP: Scenario[] = [
@@ -304,8 +329,25 @@ const SETUP: Scenario[] = [
     live: true,
     setup: (db) => {
       db.permissions = { microphone: "not_determined", accessibility: false };
-      db.provisioning = provisioning("idle");
-      db.settings.setupCompleted = false;
+      freshSetup(db);
+    },
+  },
+  {
+    name: "welcome-running",
+    step: 1,
+    description: "ようこそ (実行環境の準備中に開き直した。話す言語は変えられない)",
+    setup: (db) => {
+      freshSetup(db);
+      db.provisioning = provisioning("runtime");
+    },
+  },
+  {
+    name: "welcome-locked",
+    step: 1,
+    description: "ようこそ (モデルの取得を始めた後。話す言語は変えられない)",
+    setup: (db) => {
+      freshSetup(db);
+      db.provisioning = provisioning("paused", { modelDone: 0.9 * GB });
     },
   },
   {
@@ -372,7 +414,7 @@ const SETUP: Scenario[] = [
     step: 3,
     description: "モデルのダウンロード失敗 (取得済みの分から再開できる)",
     setup: (db) => {
-      db.provisioning = provisioning("error", { modelDone: 0.9 * GB });
+      db.provisioning = provisioning("error", { modelDone: 0.9 * GB, locale: resolvedLocale(db) });
     },
   },
   {
@@ -380,7 +422,7 @@ const SETUP: Scenario[] = [
     step: 3,
     description: "実行環境の導入失敗",
     setup: (db) => {
-      db.provisioning = provisioning("error", { stoppedAt: "runtime" });
+      db.provisioning = provisioning("error", { stoppedAt: "runtime", locale: resolvedLocale(db) });
     },
   },
   {
@@ -423,15 +465,16 @@ const SETUP: Scenario[] = [
       listening(db, 0.46);
     },
     script: (api) => {
+      const t = sp(api.db);
       setTimeout(() => {
         api.started(1);
-        api.typeIntoFocused("君は無口だね。");
-        api.result({ kind: "inserted", id: 1, text: "君は無口だね。", appName: "mukuchi" });
+        api.typeIntoFocused(t.testSentence);
+        api.result({ kind: "inserted", id: 1, text: t.testSentence, appName: "mukuchi" });
       }, 300);
       setTimeout(() => {
         api.started(2);
         api.typeIntoFocused("\n");
-        api.result({ kind: "command", id: 2, text: "確定", key: "Enter" });
+        api.result({ kind: "command", id: 2, text: t.command, key: "Enter" });
       }, 600);
     },
   },
@@ -483,52 +526,53 @@ const SETTINGS: Scenario[] = [
     name: "asr-stopped",
     description: "文字起こしサーバー停止",
     setup: (db) => {
-      setStatus(db, { phase: "error", loadingProgress: null, error: ERRORS.asr });
+      setStatus(db, { phase: "error", loadingProgress: null, error: errorOf(db, "asr") });
     },
   },
   {
     name: "runtime-missing",
     description: "実行環境とモデルなし",
     setup: (db) => {
-      setStatus(db, { phase: "error", loadingProgress: null, error: ERRORS.runtime });
+      setStatus(db, { phase: "error", loadingProgress: null, error: errorOf(db, "runtime") });
       db.provisioning = provisioning("idle");
     },
   },
   // ---- モデルの管理 (認識) ----
-  // bf16 を含むものは旧版から bf16 を使っていた人の状態 (旧候補は手元にある時だけ出る)
+  // bf16 を含むものは旧版から bf16 を使っていた人の状態 (旧候補は手元にある時だけ出る)。
+  // 話す言語の推奨 (先頭) が使用中で、もう一方は未取得の一覧に bf16 を足す。en では推奨が base-1.7b-8bit
   {
     name: "models-both",
-    description: "モデル: 両方取得済み (bf16 を使用中)",
+    description: "モデル: 8bit と bf16 を取得済み (bf16 を使用中)",
     setup: (db) => {
-      db.models = [model("ja-8bit", "downloaded"), model("ja-bf16", "downloaded", { selected: true })];
+      db.models = [model("ja-8bit", "downloaded"), model("base-1.7b-8bit", "not_downloaded"), model("ja-bf16", "downloaded", { selected: true })];
     },
   },
   {
     name: "models-legacy",
-    description: "モデル: 両方取得済み (8bit を使用中、bf16 は旧候補)",
+    description: "モデル: 推奨を使用中、bf16 (旧候補) も取得済み",
     setup: (db) => {
-      db.models = [model("ja-8bit", "downloaded", { selected: true }), model("ja-bf16", "downloaded")];
+      db.models = [...defaultModels(db.settings.speechLanguage), model("ja-bf16", "downloaded")];
     },
   },
   {
     name: "models-downloading",
     description: "モデル: bf16 を取得中 (進捗は止まったまま)",
     setup: (db) => {
-      db.models = [model("ja-8bit", "downloaded", { selected: true }), model("ja-bf16", "downloading", { bytesDone: 1.5 * GB })];
+      db.models = [...defaultModels(db.settings.speechLanguage), model("ja-bf16", "downloading", { bytesDone: 1.5 * GB })];
     },
   },
   {
     name: "models-paused",
     description: "モデル: bf16 を一時停止",
     setup: (db) => {
-      db.models = [model("ja-8bit", "downloaded", { selected: true }), model("ja-bf16", "paused", { bytesDone: 1.5 * GB })];
+      db.models = [...defaultModels(db.settings.speechLanguage), model("ja-bf16", "paused", { bytesDone: 1.5 * GB })];
     },
   },
   {
     name: "models-error",
     description: "モデル: bf16 の取得に失敗",
     setup: (db) => {
-      db.models = [model("ja-8bit", "downloaded", { selected: true }), model("ja-bf16", "error", { bytesDone: 1.5 * GB })];
+      db.models = [...defaultModels(db.settings.speechLanguage), model("ja-bf16", "error", { bytesDone: 1.5 * GB })];
     },
   },
   {
@@ -536,7 +580,23 @@ const SETTINGS: Scenario[] = [
     description: "モデル: セットアップ未完了 (操作不可)",
     setup: (db) => {
       db.provisioning = provisioning("paused");
-      db.models = [model("ja-8bit", "paused", { selected: true })];
+      db.models = defaultModels(db.settings.speechLanguage, "paused");
+    },
+  },
+  {
+    name: "models-not-recommended",
+    description: "モデル: 話す言語の推奨を使っていない (推奨は未取得。取得を案内する)",
+    setup: (db) => {
+      // もう一方の言語の推奨を使っている (話す言語を変えた後)
+      db.models = defaultModels(otherLocale(db.settings.speechLanguage));
+    },
+  },
+  {
+    name: "models-not-recommended-downloaded",
+    description: "モデル: 話す言語の推奨を取得済みだが使っていない (切り替えを案内する)",
+    setup: (db) => {
+      const [selected, rec] = MODEL_ORDER[otherLocale(db.settings.speechLanguage)];
+      db.models = [model(selected, "downloaded", { selected: true }), model(rec, "downloaded")];
     },
   },
   // ---- アップデート (このアプリについて) ----
@@ -559,7 +619,7 @@ const SETTINGS: Scenario[] = [
     name: "update-unavailable",
     description: "アップデート: dmg から起動 (確認できない)",
     setup: (db) => {
-      db.update = updateStatus("unavailable", { error: "アプリケーションフォルダに移動すると自動でアップデートできます" });
+      db.update = updateStatus("unavailable", { error: ui(db).updateUnavailable });
     },
   },
   { name: "update-checking", description: "アップデート: 確認中", setup: (db) => { db.update = updateStatus("checking"); } },
@@ -576,7 +636,7 @@ const SETTINGS: Scenario[] = [
     setup: (db) => {
       db.update = updateStatus("ready", {
         bytesDone: UPDATE_TOTAL,
-        notes: "- 自動アップデートに対応しました\n- 入力モードの切り替えを改善しました",
+        notes: ui(db).updateNotes,
       });
     },
   },
@@ -585,7 +645,7 @@ const SETTINGS: Scenario[] = [
     name: "update-error",
     description: "アップデート: 確認に失敗",
     setup: (db) => {
-      db.update = updateStatus("error", { error: "サーバーに接続できませんでした。ネットワーク接続を確認してください" });
+      db.update = updateStatus("error", { error: ui(db).updateError });
     },
   },
 ];

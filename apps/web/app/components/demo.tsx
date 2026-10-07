@@ -1,12 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import {
-  DEMO_MODE_META,
-  DEMO_SCRIPTS,
-  DEMO_STILL_STEP,
-  INPUT_MODES,
-  MODE_NAMES,
-  type InputMode,
-} from "@/lib/content";
+import { useI18n } from "@/i18n/context";
+import { DEMO_STILL_STEP, INPUT_MODES, type InputMode } from "@/lib/content";
 import { Icon } from "./ui";
 
 const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
@@ -63,16 +57,18 @@ interface Playback {
  * 場面やモードが切り替わってもページが上下に揺れないよう、各部の高さはどの場面の中身も収まる値に固定する
  */
 export function Demo() {
+  const { m } = useI18n();
+  const scripts = m.demo.scripts;
   const reduced = usePrefersReducedMotion();
   const forced = useDevHeroMode();
   const [play, setPlay] = useState<Playback>({ mode: "always", step: 0, locked: false });
   const [level, setLevel] = useState(8);
 
   const mode = play.locked ? play.mode : (forced ?? play.mode);
-  const script = DEMO_SCRIPTS[mode];
+  const script = scripts[mode];
   const stepIndex = reduced ? DEMO_STILL_STEP[mode] : Math.min(play.step, script.length - 1);
   const s = script[stepIndex];
-  const meta = DEMO_MODE_META[mode];
+  const meta = m.demo.modeMeta[mode];
   const speaking = !!s.speak;
   const meterKind = speaking ? "speak" : s.noise ? "noise" : "idle";
   const micOn = !!s.on || speaking;
@@ -81,14 +77,14 @@ export function Demo() {
     if (reduced) return;
     const t = setTimeout(() => {
       setPlay((p) => {
-        if (p.step + 1 < DEMO_SCRIPTS[mode].length) return { ...p, mode, step: p.step + 1 };
+        if (p.step + 1 < scripts[mode].length) return { ...p, mode, step: p.step + 1 };
         // 最後まで進んだら、タブで選んでいない (開発時の固定もない) 時だけもう一方のモードに替える
         const alternate = !p.locked && forced === null;
         return { ...p, mode: alternate ? otherMode(mode) : mode, step: 0 };
       });
     }, s.ms);
     return () => clearTimeout(t);
-  }, [play, mode, forced, reduced, s.ms]);
+  }, [play, mode, forced, reduced, s.ms, scripts]);
 
   // 音量のメーター。話している場面は大きく、オフの間の周りの音は中くらいに振れる
   useEffect(() => {
@@ -107,7 +103,7 @@ export function Demo() {
   }, [meterKind, reduced]);
 
   const shownLevel = reduced ? 8 : level;
-  const inputFocused = speaking || s.status === "入力しました";
+  const inputFocused = speaking || s.phase === "inserted";
 
   return (
     <div
@@ -119,20 +115,20 @@ export function Demo() {
       <div className="flex w-full items-center justify-between gap-3">
         <div
           role="group"
-          aria-label="デモの聞き取り方"
+          aria-label={m.demo.tabsLabel}
           className="grid w-full grid-cols-2 gap-0.5 rounded-md border border-line-subtle bg-gray-100 p-0.5 lg:flex lg:w-auto"
         >
-          {INPUT_MODES.map((m) => {
-            const selected = m === mode;
+          {INPUT_MODES.map((tab) => {
+            const selected = tab === mode;
             return (
               <button
-                key={m}
+                key={tab}
                 type="button"
                 aria-pressed={selected}
-                onClick={() => setPlay({ mode: m, step: 0, locked: true })}
+                onClick={() => setPlay({ mode: tab, step: 0, locked: true })}
                 className={`h-8 cursor-pointer rounded-sm border-0 text-[13px] font-medium lg:h-7 lg:px-3 ${selected ? "bg-white text-strong shadow-xs" : "bg-transparent text-muted"}`}
               >
-                {MODE_NAMES[m]}
+                {m.modes.names[tab]}
               </button>
             );
           })}
@@ -214,7 +210,7 @@ export function Demo() {
                 data-testid="demo-status"
                 className="text-xs font-medium whitespace-nowrap text-muted"
               >
-                {s.status}
+                {m.demo.status[s.phase]}
               </span>
             </div>
           </div>

@@ -1,0 +1,5 @@
+/*
+  Info.plist の権限の説明文 (英語)。ja.lproj と意味を揃える。
+  UTF-8 で置く (理由は ja.lproj/InfoPlist.strings)。
+*/
+"NSMicrophoneUsageDescription" = "mukuchi uses the microphone to transcribe what you say and type it for you.";

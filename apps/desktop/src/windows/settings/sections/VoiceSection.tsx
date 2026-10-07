@@ -14,10 +14,11 @@ import {
 import { useAudioLevel } from "@/lib/audio-level";
 import { LevelMeter } from "@/components/app/level-meter";
 import { InputModeRadio } from "@/components/app/input-mode-options";
-import { SHORTCUT_HINT } from "@/lib/input-mode";
 import { ShortcutRecorder } from "@/components/app/shortcut-recorder";
 import { errorMessage, useDebouncedCommit } from "@/lib/hooks";
 import { commands, subscribeEvents, type AppStatus, type AudioDevice, type RunningApp } from "@/lib/ipc";
+import { formatSeconds } from "@/lib/format";
+import { useI18n } from "@/i18n/context";
 import { Card, FieldError, FieldHeading, type SectionProps } from "./common";
 
 const ON_PHASES: AppStatus["phase"][] = ["listening", "speaking", "finalizing", "done"];
@@ -78,6 +79,8 @@ function useInputDevices(): { devices: AudioDevice[] | null; error: string | nul
 }
 
 export function VoiceSection({ settings, update, errors, status }: SectionProps & { status: AppStatus | null }) {
+  const { locale, t } = useI18n();
+  const v = t.settings.voice;
   const { devices, error: devicesError } = useInputDevices();
   const sensitivity = useDebouncedCommit(settings.vadSensitivity, (v) => update({ vadSensitivity: v }));
   // スライダーは 0.1 秒刻み (3〜30) で扱う
@@ -87,12 +90,12 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
   const defaultDevice = list.find((d) => d.isDefault);
   const selected = settings.inputDeviceId;
   const options = [
-    { value: "", label: defaultDevice ? `システムの既定（${defaultDevice.name}）` : "システムの既定" },
+    { value: "", label: defaultDevice ? v.systemDefaultWith(defaultDevice.name) : v.systemDefault },
     ...list.map((d) => ({ value: d.id, label: d.name })),
   ];
   // 選んだマイクが外れている間も選択を残す (Rust はつながるまで既定のマイクを使う想定)。一覧の取得前は出さない
   if (selected && devices && !list.some((d) => d.id === selected)) {
-    options.push({ value: selected, label: "選択中のマイク（接続されていません）" });
+    options.push({ value: selected, label: v.disconnected });
   }
   const isOn = status != null && ON_PHASES.includes(status.phase);
 
@@ -100,8 +103,8 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
     <>
       <div className="flex flex-col gap-2">
         <FieldHeading
-          label="入力モード"
-          help="周りに人がいる・会話が聞こえる場所では、1回ずつ聞き取るにすると関係のない声を入力しません"
+          label={t.inputMode.groupLabel}
+          help={v.inputModeHelp}
         />
         <InputModeRadio
           value={settings.inputMode}
@@ -110,17 +113,17 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
         <FieldError message={errors.inputMode} />
       </div>
       <div className="flex flex-col gap-2">
-        <FieldHeading label="ショートカット" help="どのアプリを使っていても押せます。他のアプリと同じキーだと動かないことがあります" />
+        <FieldHeading label={t.shortcut.label} help={t.shortcut.help} />
         <ShortcutRecorder
           shortcut={settings.shortcut}
           onChange={(shortcut) => update({ shortcut })}
           error={errors.shortcut}
-          hint={SHORTCUT_HINT[settings.inputMode]}
+          hint={t.inputMode.shortcutHint[settings.inputMode]}
         />
       </div>
       <div className="flex flex-col gap-1.5">
         <Select
-          label="マイク"
+          label={v.microphone}
           options={options}
           value={selected ?? ""}
           onValueChange={(v) => update({ inputDeviceId: v === "" ? null : v })}
@@ -134,12 +137,12 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
       />
       <div className="flex flex-col gap-2">
         <FieldHeading
-          label="発話検出の感度"
-          help="高くすると小さな声も拾います。周囲がうるさい場合は下げてください。入力レベルのトラックが薄い青に変わる位置が検出のしきい値です"
+          label={v.sensitivity}
+          help={v.sensitivityHelp}
           value={sensitivity.value}
         />
         <Slider
-          aria-label="発話検出の感度"
+          aria-label={v.sensitivity}
           min={0}
           max={100}
           value={sensitivity.value}
@@ -149,19 +152,19 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
           onBlur={sensitivity.flush}
         />
         <div className="flex justify-between text-2xs text-fg-subtle">
-          <span>低い</span>
-          <span>高い</span>
+          <span>{v.low}</span>
+          <span>{v.high}</span>
         </div>
         <FieldError message={errors.vadSensitivity} />
       </div>
       <div className="flex flex-col gap-2">
         <FieldHeading
-          label="話し終わりと判定するまでの無音"
-          help="短くすると早く入力されますが、息継ぎで文が途切れやすくなります"
-          value={`${(silence.value / 10).toFixed(1)} 秒`}
+          label={v.silence}
+          help={v.silenceHelp}
+          value={formatSeconds(silence.value / 10, locale, t)}
         />
         <Slider
-          aria-label="話し終わりと判定するまでの無音"
+          aria-label={v.silence}
           min={3}
           max={30}
           value={silence.value}
@@ -171,8 +174,8 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
           onBlur={silence.flush}
         />
         <div className="flex justify-between text-2xs text-fg-subtle">
-          <span>0.3 秒</span>
-          <span>3.0 秒</span>
+          <span>{formatSeconds(0.3, locale, t)}</span>
+          <span>{formatSeconds(3, locale, t)}</span>
         </div>
         <FieldError message={errors.silenceMs} />
       </div>
@@ -186,6 +189,7 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
  * トラックの塗り分け位置 (しきい値) は audio-level の threshold を使い、届く前・オフの間・感度の操作中 (保存前) は感度から求めた位置に置く
  */
 function InputLevel({ isOn, sensitivity, editing }: { isOn: boolean; sensitivity: number; editing: boolean }) {
+  const { t } = useI18n();
   const { level, threshold, received } = useAudioLevel();
   const split = isOn && received && !editing ? threshold : thresholdFromSensitivity(sensitivity);
   const shown = isOn ? level : 0;
@@ -194,13 +198,15 @@ function InputLevel({ isOn, sensitivity, editing }: { isOn: boolean; sensitivity
       <AudioLines size={14} className="flex-none text-fg-muted" aria-hidden />
       {/* パネルと同じく、表示中の塗り分け位置を超えたら青にする (感度の操作中も見た目の境目と一致させる) */}
       <LevelMeter testId="input-level-meter" level={shown} threshold={split} active={isOn && shown >= split} />
-      <span className="text-xs text-fg-muted">入力レベル</span>
+      <span className="text-xs text-fg-muted">{t.settings.voice.inputLevel}</span>
     </div>
   );
 }
 
 /** 入力しないアプリ (デザイン 07-A) */
 function ExcludedApps({ settings, update, errors }: SectionProps) {
+  const { t } = useI18n();
+  const v = t.settings.voice;
   const [running, setRunning] = useState<RunningApp[] | null>(null);
   const [runningError, setRunningError] = useState<string | null>(null);
   const excluded = settings.excludedApps;
@@ -209,8 +215,8 @@ function ExcludedApps({ settings, update, errors }: SectionProps) {
   return (
     <div className="flex flex-col gap-2">
       <FieldHeading
-        label="入力しないアプリ"
-        help="パスワード管理アプリやターミナルなど、誤入力を避けたいアプリを登録します。前面にある間は入力せず、パネルに「このアプリには入力しません」と表示します"
+        label={v.excludedApps}
+        help={v.excludedAppsHelp}
       />
       <Card className="text-sm">
         {excluded.map((app) => (
@@ -219,14 +225,14 @@ function ExcludedApps({ settings, update, errors }: SectionProps) {
             <span className="flex-1">{app.name}</span>
             <IconButton
               icon={X}
-              label={`${app.name} を削除`}
+              label={v.removeApp(app.name)}
               size="sm"
               onClick={() => update({ excludedApps: excluded.filter((e) => e.bundleId !== app.bundleId) })}
             />
           </div>
         ))}
         {excluded.length === 0 ? (
-          <div className="border-b border-line-subtle px-3.5 py-2.5 text-fg-muted">登録したアプリはありません</div>
+          <div className="border-b border-line-subtle px-3.5 py-2.5 text-fg-muted">{v.noApps}</div>
         ) : null}
         <div className="px-2.5 py-2">
           <DropdownMenu
@@ -243,15 +249,15 @@ function ExcludedApps({ settings, update, errors }: SectionProps) {
           >
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="sm" iconLeft={Plus}>
-                アプリを追加
+                {v.addApp}
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
-              <DropdownMenuLabel>起動中のアプリ</DropdownMenuLabel>
-              {running === null ? <DropdownMenuLabel>読み込んでいます…</DropdownMenuLabel> : null}
+              <DropdownMenuLabel>{v.runningApps}</DropdownMenuLabel>
+              {running === null ? <DropdownMenuLabel>{v.loadingApps}</DropdownMenuLabel> : null}
               {runningError ? <DropdownMenuLabel className="text-fg-danger">{runningError}</DropdownMenuLabel> : null}
               {running !== null && !runningError && candidates.length === 0 ? (
-                <DropdownMenuLabel>追加できるアプリはありません</DropdownMenuLabel>
+                <DropdownMenuLabel>{v.noCandidates}</DropdownMenuLabel>
               ) : null}
               {candidates.map((app) => (
                 <DropdownMenuItem key={app.bundleId} onSelect={() => update({ excludedApps: [...excluded, app] })}>

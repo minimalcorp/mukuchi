@@ -26,6 +26,7 @@ use sha1::Digest;
 use tokio::io::AsyncWriteExt;
 
 use super::{failed, Cancel, StepError};
+use crate::i18n::Msg;
 
 pub const HF_ENDPOINT: &str = "https://huggingface.co";
 // 取得するモデル (リポジトリと revision) は models.rs の CATALOG で固定する
@@ -155,10 +156,7 @@ pub fn http_client() -> anyhow::Result<reqwest::Client> {
 }
 
 fn network_error(e: reqwest::Error) -> StepError {
-    failed(
-        "モデルを取得できません。ネットワーク接続を確認して再試行してください",
-        e.without_url(),
-    )
+    failed(Msg::FetchNetwork, e.without_url())
 }
 
 /// 固定した revision のファイル一覧を API から取得する (取得対象のみ)。
@@ -178,7 +176,9 @@ pub async fn list_files(
         let status = res.status();
         if !status.is_success() {
             return Err(failed(
-                format!("モデルの一覧を取得できません (HTTP {})", status.as_u16()),
+                Msg::FetchListHttp {
+                    status: status.as_u16(),
+                },
                 anyhow!("tree API: {status}"),
             ));
         }
@@ -196,7 +196,7 @@ pub async fn list_files(
     Ok(out)
 }
 
-const MODEL_ERROR: &str = "モデルの情報が不正です";
+const MODEL_ERROR: Msg = Msg::ModelInfoInvalid;
 
 fn to_remote_file(e: TreeEntry) -> anyhow::Result<Option<RemoteFile>> {
     if e.kind != "file" || !ALLOW_SUFFIXES.iter().any(|s| e.path.ends_with(s)) {
@@ -443,10 +443,7 @@ impl Downloader<'_> {
                     retries += 1;
                     log::warn!("モデルの取得が中断 ({}, {retries}回目): {e:#}", f.path);
                     if retries > RETRIES {
-                        return Err(failed(
-                            "モデルの取得が中断されました。ネットワーク接続を確認して再試行してください",
-                            e,
-                        ));
+                        return Err(failed(Msg::FetchInterrupted, e));
                     }
                     let wait = RETRY_BASE * (1 << (retries - 1));
                     tokio::select! {
@@ -510,7 +507,9 @@ impl Downloader<'_> {
             }
             _ => {
                 return Err(failed(
-                    format!("モデルを取得できません (HTTP {})", status.as_u16()),
+                    Msg::FetchHttp {
+                        status: status.as_u16(),
+                    },
                     anyhow!("{}: HTTP {status}", f.path),
                 ))
             }
@@ -583,7 +582,7 @@ impl Downloader<'_> {
             // 壊れた部分から再開しても直らないため捨てる
             self.truncate(incomplete, f.size)?;
             return Err(failed(
-                "ダウンロードしたモデルが壊れています。再試行してください",
+                Msg::ModelCorrupted,
                 anyhow!("{} のハッシュが一致しない", f.path),
             ));
         }
@@ -591,11 +590,11 @@ impl Downloader<'_> {
     }
 }
 
-const DISK_ERROR: &str = "モデルを保存できません";
+const DISK_ERROR: Msg = Msg::ModelSaveFailed;
 
 fn disk_error(e: std::io::Error) -> StepError {
     if e.kind() == std::io::ErrorKind::StorageFull {
-        failed("ディスクの空き容量が足りません", e)
+        failed(Msg::DiskFull, e)
     } else {
         failed(DISK_ERROR, e)
     }

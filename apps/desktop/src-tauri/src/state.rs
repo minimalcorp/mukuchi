@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::i18n::Msg;
+
 /// 入力完了後に「完了」表示を保つ時間 (implementation-plan.md 2. 確定結果の表示)。
 pub const DONE_DISPLAY: Duration = Duration::from_secs(2);
 
@@ -37,6 +39,21 @@ pub enum ErrorCode {
     VadFailed,
 }
 
+impl ErrorCode {
+    /// 表示用の文言。message は code だけから決まる (表示言語の変更時に code から作り直す)
+    pub fn message(self) -> Msg {
+        match self {
+            Self::AccessibilityDenied => Msg::ErrAccessibilityDenied,
+            Self::MicrophoneDenied => Msg::ErrMicrophoneDenied,
+            Self::MicrophoneMissing => Msg::ErrMicrophoneMissing,
+            Self::AsrStopped => Msg::ErrAsrStopped,
+            Self::RuntimeMissing => Msg::ErrRuntimeMissing,
+            Self::InsertFailed => Msg::ErrInsertFailed,
+            Self::VadFailed => Msg::ErrVadFailed,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorAction {
@@ -51,65 +68,54 @@ pub enum ErrorAction {
 #[serde(rename_all = "camelCase")]
 pub struct AppError {
     pub code: ErrorCode,
+    /// 表示用 (作った時点の表示言語)。表示言語の変更時は `StateManager::relocalize` が code から作り直す
     pub message: String,
     pub action: Option<ErrorAction>,
 }
 
 impl AppError {
-    pub fn accessibility_denied() -> Self {
+    fn new(code: ErrorCode, action: Option<ErrorAction>) -> Self {
         Self {
-            code: ErrorCode::AccessibilityDenied,
-            message: "アクセシビリティが許可されていないため入力できません".into(),
-            action: Some(ErrorAction::OpenAccessibility),
+            code,
+            message: code.message().to_string(),
+            action,
         }
     }
+    pub fn accessibility_denied() -> Self {
+        Self::new(
+            ErrorCode::AccessibilityDenied,
+            Some(ErrorAction::OpenAccessibility),
+        )
+    }
     pub fn microphone_denied() -> Self {
-        Self {
-            code: ErrorCode::MicrophoneDenied,
-            message: "マイクが許可されていません".into(),
-            action: Some(ErrorAction::OpenMicrophone),
-        }
+        Self::new(
+            ErrorCode::MicrophoneDenied,
+            Some(ErrorAction::OpenMicrophone),
+        )
     }
     // 以下の detail (技術的な詳細・英語のエラー文) は表示せずログにだけ残す。
     // 表示はメニューの1行・パネルのピルに収まる短い文言にする (デザイン 06)
     pub fn microphone_missing(detail: impl std::fmt::Display) -> Self {
         log::warn!("マイクを使用できない: {detail}");
-        Self {
-            code: ErrorCode::MicrophoneMissing,
-            message: "マイクが見つかりません".into(),
-            action: Some(ErrorAction::SelectMicrophone),
-        }
+        Self::new(
+            ErrorCode::MicrophoneMissing,
+            Some(ErrorAction::SelectMicrophone),
+        )
     }
     pub fn asr_stopped(detail: impl std::fmt::Display) -> Self {
         log::warn!("文字起こしサーバーの停止: {detail}");
-        Self {
-            code: ErrorCode::AsrStopped,
-            message: "文字起こしサーバーが停止しました".into(),
-            action: Some(ErrorAction::RestartAsr),
-        }
+        Self::new(ErrorCode::AsrStopped, Some(ErrorAction::RestartAsr))
     }
     pub fn runtime_missing() -> Self {
-        Self {
-            code: ErrorCode::RuntimeMissing,
-            message: "実行環境とモデルが導入されていません".into(),
-            action: Some(ErrorAction::StartSetup),
-        }
+        Self::new(ErrorCode::RuntimeMissing, Some(ErrorAction::StartSetup))
     }
     pub fn vad_failed(detail: impl std::fmt::Display) -> Self {
         log::warn!("発話検出の初期化の失敗: {detail}");
-        Self {
-            code: ErrorCode::VadFailed,
-            message: "発話検出を開始できません".into(),
-            action: None,
-        }
+        Self::new(ErrorCode::VadFailed, None)
     }
     pub fn insert_failed(detail: impl std::fmt::Display) -> Self {
         log::warn!("入力の失敗: {detail}");
-        Self {
-            code: ErrorCode::InsertFailed,
-            message: "入力に失敗しました".into(),
-            action: None,
-        }
+        Self::new(ErrorCode::InsertFailed, None)
     }
 }
 
@@ -283,6 +289,15 @@ impl StateManager {
 
     pub fn clear_error(&self) {
         self.mutate(|f| f.error = None);
+    }
+
+    /// 表示言語の変更時: エラーの文言を今の表示言語で作り直す (変われば status-changed が送られる)
+    pub fn relocalize(&self) {
+        self.mutate(|f| {
+            if let Some(e) = f.error.as_mut() {
+                e.message = e.code.message().to_string();
+            }
+        });
     }
 
     /// 時間経過で変わる状態 (完了表示の終了) を反映する。
@@ -531,6 +546,29 @@ mod tests {
             assert!(seen.windows(2).all(|w| w[0] < w[1]), "round {round}");
             assert_eq!(seen.last(), Some(&latest), "round {round}");
         }
+    }
+
+    #[test]
+    fn relocalize_rebuilds_message_from_code() {
+        let s = StateManager::new();
+        s.set_error(AppError {
+            code: ErrorCode::AsrStopped,
+            message: "stale".into(),
+            action: Some(ErrorAction::RestartAsr),
+        });
+        let seq = s.status().seq;
+        s.relocalize();
+        let st = s.status();
+        let e = st.error.unwrap();
+        assert_eq!(e.message, Msg::ErrAsrStopped.to_string());
+        assert_eq!(e.action, Some(ErrorAction::RestartAsr));
+        assert_eq!(st.seq, seq + 1, "変われば status-changed を送る");
+        s.relocalize();
+        assert_eq!(s.status().seq, seq + 1, "同じなら送らない");
+        // エラーが無ければ何もしない
+        let s = StateManager::new();
+        s.relocalize();
+        assert_eq!(s.status().seq, 0);
     }
 
     #[test]

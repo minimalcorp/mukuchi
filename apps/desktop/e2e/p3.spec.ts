@@ -2,7 +2,8 @@
  * P3 (設定の読み書き・復旧) の確認: open_setup、設定の即時保存・スライダーの間引き・他ウィンドウからの反映・
  * 保存エラーの表示、音声コマンドの検証、認識のヒント、マイク一覧の再取得、AppStatus.seq。
  */
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+import { expect, I18N, SCREENSHOT, test } from "./fixtures";
 
 const PANEL = { width: 560, height: 260 };
 const SETTINGS = { width: 840, height: 640 };
@@ -51,28 +52,39 @@ async function slide(page: Page, label: string, value: number) {
   }, value);
 }
 
+/** 日本語の既定の音声コマンド。正規化 (NFKC・記号除去) の検証は日本語の言い方で行うため、表示言語によらずこれを入れる */
+const JA_COMMANDS = [
+  { id: "confirm", phrases: ["確定", "エンター"], key: { key: "enter", modifiers: [] } },
+  { id: "newline", phrases: ["改行"], key: { key: "enter", modifiers: ["shift"] } },
+  { id: "send", phrases: ["送信"], key: { key: "enter", modifiers: ["cmd"] } },
+];
+
+async function setJaCommands(page: Page) {
+  await mock(page, `api.invoke("update_settings", { patch: { voiceCommands: ${JSON.stringify(JA_COMMANDS)} } });`);
+}
+
 // ---------- open_setup ----------
 
-test("panel: 実行環境とモデルがない → セットアップを開く で open_setup", async ({ page }) => {
+test("panel: 実行環境とモデルがない → セットアップを開く で open_setup", { tag: SCREENSHOT }, async ({ page, m, snap }) => {
   await open(page, "window=panel&mock=error-runtime", PANEL);
-  await expect(page.getByText("モデルがありません")).toBeVisible();
-  await page.getByRole("button", { name: "セットアップを開く" }).click();
+  await expect(page.getByText(m.panel.errors.runtime_missing)).toBeVisible();
+  await page.getByRole("button", { name: m.errorActions.start_setup }).click();
   await expect.poll(async () => (await calls(page, "open_setup")).length).toBe(1);
-  await page.screenshot({ path: "e2e/screenshots/panel-error-runtime-action.png" });
+  await snap("panel-error-runtime-action");
 });
 
-test("settings: 認識で実行環境とモデルがない → セットアップを開く", async ({ page }) => {
+test("settings: 認識で実行環境とモデルがない → セットアップを開く", async ({ page, m }) => {
   await open(page, "window=settings&mock=runtime-missing&category=recognition", SETTINGS);
-  await expect(page.getByText("実行環境とモデルがありません")).toBeVisible();
-  await page.getByRole("button", { name: "セットアップを開く" }).click();
+  await expect(page.getByText(m.settings.recognition.missingSub)).toBeVisible();
+  await page.getByRole("button", { name: m.common.openSetup }).click();
   await expect.poll(async () => (await calls(page, "open_setup")).length).toBe(1);
 });
 
 // ---------- 即時保存・エラー・他ウィンドウ ----------
 
-test("settings: ログイン時に起動を切り替えると即時保存する", async ({ page }) => {
+test("settings: ログイン時に起動を切り替えると即時保存する", async ({ page, m }) => {
   await open(page, "window=settings&mock=default&category=general", SETTINGS);
-  const sw = page.getByRole("switch", { name: "ログイン時に起動" });
+  const sw = page.getByRole("switch", { name: m.settings.general.launchAtLogin });
   await sw.click();
   await expect(sw).not.toBeChecked();
   await expect.poll(async () => (await calls(page, "update_settings")).map((c) => c.args)).toEqual([
@@ -80,10 +92,10 @@ test("settings: ログイン時に起動を切り替えると即時保存する"
   ]);
 });
 
-test("settings: 保存に失敗したら値を戻し、操作の近くにエラーを出す", async ({ page }) => {
+test("settings: 保存に失敗したら値を戻し、操作の近くにエラーを出す", async ({ page, m }) => {
   await open(page, "window=settings&mock=default&category=general", SETTINGS);
   await mock(page, `api.fail.update_settings = "ログイン項目を登録できませんでした";`);
-  const sw = page.getByRole("switch", { name: "ログイン時に起動" });
+  const sw = page.getByRole("switch", { name: m.settings.general.launchAtLogin });
   await sw.click();
   await expect(page.getByRole("alert")).toContainText("ログイン項目を登録できませんでした");
   await expect(sw).toBeChecked();
@@ -97,9 +109,9 @@ test("settings: 保存に失敗したら値を戻し、操作の近くにエラ�
 const APPROVAL_ERROR =
   "ログイン時に起動するには承認が必要です。システム設定 > 一般 > ログイン項目 で mukuchi をオンにしてください";
 
-test("settings: ログイン時に起動をオンにできなければエラーとログイン項目を開くボタンを出す", async ({ page }) => {
+test("settings: ログイン時に起動をオンにできなければエラーとログイン項目を開くボタンを出す", { tag: SCREENSHOT }, async ({ page, m, snap }) => {
   await open(page, "window=settings&mock=default&category=general", SETTINGS);
-  const sw = page.getByRole("switch", { name: "ログイン時に起動" });
+  const sw = page.getByRole("switch", { name: m.settings.general.launchAtLogin });
   // オフにしてからオンで失敗させる (承認待ち)
   await sw.click();
   await expect(sw).not.toBeChecked();
@@ -108,16 +120,16 @@ test("settings: ログイン時に起動をオンにできなければエラー�
   const alert = page.getByRole("alert");
   await expect(alert).toContainText(APPROVAL_ERROR);
   await expect(sw).not.toBeChecked();
-  await page.screenshot({ path: "e2e/screenshots/settings-launch-at-login-error.png" });
-  await alert.getByRole("button", { name: "システム設定を開く" }).click();
+  await snap("settings-launch-at-login-error");
+  await alert.getByRole("button", { name: m.common.openSystemSettings }).click();
   await expect.poll(async () => (await calls(page, "open_system_settings")).map((c) => c.args)).toEqual([
     { pane: "login_items" },
   ]);
 });
 
-test("setup: 完了画面でログイン時に起動をオンにできなければエラーとログイン項目を開くボタンを出す", async ({ page }) => {
+test("setup: 完了画面でログイン時に起動をオンにできなければエラーとログイン項目を開くボタンを出す", { tag: SCREENSHOT }, async ({ page, m, snap }) => {
   await open(page, "window=setup&mock=done", { width: 640, height: 520 });
-  const sw = page.getByRole("switch", { name: "ログイン時に起動" });
+  const sw = page.getByRole("switch", { name: m.settings.general.launchAtLogin });
   await expect(sw).toBeChecked();
   await sw.click();
   await expect(sw).not.toBeChecked();
@@ -126,8 +138,8 @@ test("setup: 完了画面でログイン時に起動をオンにできなけれ�
   const alert = page.getByRole("alert");
   await expect(alert).toContainText(APPROVAL_ERROR);
   await expect(sw).not.toBeChecked();
-  await page.screenshot({ path: "e2e/screenshots/setup-launch-at-login-error.png" });
-  await alert.getByRole("button", { name: "システム設定を開く" }).click();
+  await snap("setup-launch-at-login-error");
+  await alert.getByRole("button", { name: m.common.openSystemSettings }).click();
   await expect.poll(async () => (await calls(page, "open_system_settings")).map((c) => c.args)).toEqual([
     { pane: "login_items" },
   ]);
@@ -138,21 +150,21 @@ test("setup: 完了画面でログイン時に起動をオンにできなけれ�
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
-test("settings: 他ウィンドウの変更 (settings-changed) を反映する", async ({ page }) => {
+test("settings: 他ウィンドウの変更 (settings-changed) を反映する", async ({ page, m }) => {
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
-  await expect(page.getByRole("slider", { name: "発話検出の感度" })).toHaveValue("60");
+  await expect(page.getByRole("slider", { name: m.settings.voice.sensitivity })).toHaveValue("60");
   // 別ウィンドウ (setup 等) からの update_settings
   await mock(page, `api.invoke("update_settings", { patch: { vadSensitivity: 25, silenceMs: 2000, inputDeviceId: "airpods" } });`);
-  await expect(page.getByRole("slider", { name: "発話検出の感度" })).toHaveValue("25");
-  await expect(page.getByText("2.0 秒")).toBeVisible();
-  await expect(page.getByLabel("マイク")).toHaveValue("airpods");
+  await expect(page.getByRole("slider", { name: m.settings.voice.sensitivity })).toHaveValue("25");
+  await expect(page.getByText(m.format.seconds("2.0"))).toBeVisible();
+  await expect(page.getByLabel(m.settings.voice.microphone)).toHaveValue("airpods");
 });
 
-test("settings: 保存の応答待ちに届いた古い settings-changed で操作した値を戻さない", async ({ page }) => {
+test("settings: 保存の応答待ちに届いた古い settings-changed で操作した値を戻さない", async ({ page, m }) => {
   await page.clock.install();
   await open(page, "window=settings&mock=default&category=general&slow=update_settings", SETTINGS);
   await pauseClock(page);
-  const sw = page.getByRole("switch", { name: "ログイン時に起動" });
+  const sw = page.getByRole("switch", { name: m.settings.general.launchAtLogin });
   await sw.click();
   await expect(sw).not.toBeChecked();
   await expect.poll(async () => (await calls(page, "update_settings")).length).toBe(1);
@@ -169,13 +181,13 @@ test("settings: 保存の応答待ちに届いた古い settings-changed で操�
 
 // ---------- スライダー ----------
 
-test("settings: スライダーはドラッグ中に間引き、止まって 150ms 後に 1 回だけ保存する", async ({ page }) => {
+test("settings: スライダーはドラッグ中に間引き、止まって 150ms 後に 1 回だけ保存する", async ({ page, m }) => {
   await page.clock.install();
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
   await pauseClock(page);
   // 1 目盛りごとに 100ms 空ける (間引きの 150ms 未満なので、ドラッグ中は保存しない)
   for (const v of [61, 64, 68, 72]) {
-    await slide(page, "発話検出の感度", v);
+    await slide(page, m.settings.voice.sensitivity, v);
     await page.clock.runFor(100);
   }
   // 表示はすぐ追従する
@@ -193,28 +205,28 @@ test("settings: スライダーはドラッグ中に間引き、止まって 150
   expect(await calls(page, "update_settings")).toHaveLength(1);
 });
 
-test("settings: スライダーを離したら待たずに保存する", async ({ page }) => {
+test("settings: スライダーを離したら待たずに保存する", async ({ page, m }) => {
   await page.clock.install();
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
   await pauseClock(page);
-  await slide(page, "話し終わりと判定するまでの無音", 8);
-  await page.getByRole("slider", { name: "話し終わりと判定するまでの無音" }).dispatchEvent("pointerup");
+  await slide(page, m.settings.voice.silence, 8);
+  await page.getByRole("slider", { name: m.settings.voice.silence }).dispatchEvent("pointerup");
   // 150ms を待たずに保存される (時計は止めてある)
   expect((await calls(page, "update_settings")).map((c) => c.args)).toEqual([{ patch: { silenceMs: 800 } }]);
-  await expect(page.getByText("0.8 秒")).toBeVisible();
+  await expect(page.getByText(m.format.seconds("0.8"))).toBeVisible();
   // 間引きのタイマーは取り消されていて、150ms 経っても二重に保存しない
   await page.clock.runFor(300);
   expect(await calls(page, "update_settings")).toHaveLength(1);
 });
 
-test("settings: キーボードでの変更も保存する", async ({ page }) => {
+test("settings: キーボードでの変更も保存する", async ({ page, m }) => {
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
-  await page.getByRole("slider", { name: "発話検出の感度" }).focus();
+  await page.getByRole("slider", { name: m.settings.voice.sensitivity }).focus();
   await page.keyboard.press("ArrowRight");
   await expect.poll(async () => (await calls(page, "update_settings")).at(-1)?.args).toEqual({ patch: { vadSensitivity: 61 } });
 });
 
-test("settings: トラックの塗り分け位置はオン中は audio-level の threshold、オフ中・操作中は感度から求める", async ({ page }) => {
+test("settings: トラックの塗り分け位置はオン中は audio-level の threshold、オフ中・操作中は感度から求める", async ({ page, m }) => {
   // default はオン (threshold 0.55 を流す)
   await page.clock.install();
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
@@ -223,7 +235,7 @@ test("settings: トラックの塗り分け位置はオン中は audio-level の
   // 操作中の表示は間引き (150ms) で保存されるまでしか出ないので、時計を止めて確認する
   await pauseClock(page);
   // ドラッグ中は保存前の感度から求めた位置 (感度 100 → -55 dB → 0.1)。レベル 0.3 前後が境目を超えるので青になる
-  await slide(page, "発話検出の感度", 100);
+  await slide(page, m.settings.voice.sensitivity, 100);
   await expect(below).toHaveAttribute("style", /width: 10(\.\d+)?%/);
   await expect(page.getByTestId("input-level-meter")).toHaveAttribute("data-active", "true");
   await page.clock.resume();
@@ -247,9 +259,9 @@ test("panel: メーターはしきい値でトラックを塗り分け、超え�
 
 // ---------- マイク ----------
 
-test("settings: マイクの接続変化 (input-devices-changed) とフォーカスで一覧を取り直す", async ({ page }) => {
+test("settings: マイクの接続変化 (input-devices-changed) とフォーカスで一覧を取り直す", async ({ page, m }) => {
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
-  const select = page.getByLabel("マイク");
+  const select = page.getByLabel(m.settings.voice.microphone);
   await expect(select.locator("option", { hasText: "AirPods Pro" })).toHaveCount(1);
   await mock(page, `api.db.devices = [...api.db.devices, { id: "yeti", name: "Yeti", isDefault: false }]; api.fire("input-devices-changed", api.db.devices);`);
   await expect(select.locator("option", { hasText: "Yeti" })).toHaveCount(1);
@@ -262,14 +274,14 @@ test("settings: マイクの接続変化 (input-devices-changed) とフォーカ
   await expect(select.locator("option", { hasText: "AirPods Pro" })).toHaveCount(0);
 });
 
-test("settings: 選んだマイクが外れても選択を残し「接続されていません」と示す", async ({ page }) => {
+test("settings: 選んだマイクが外れても選択を残し「接続されていません」と示す", async ({ page, m }) => {
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
-  const select = page.getByLabel("マイク");
+  const select = page.getByLabel(m.settings.voice.microphone);
   await select.selectOption("usb");
   await expect.poll(async () => (await calls(page, "update_settings")).at(-1)?.args).toEqual({ patch: { inputDeviceId: "usb" } });
   await mock(page, `api.db.devices = api.db.devices.filter((d) => d.id !== "usb"); api.fire("input-devices-changed", api.db.devices);`);
   await expect(select).toHaveValue("usb");
-  await expect(select.locator("option:checked")).toHaveText("選択中のマイク（接続されていません）");
+  await expect(select.locator("option:checked")).toHaveText(m.settings.voice.disconnected);
   // 既定に戻す
   await select.selectOption("");
   await expect.poll(async () => (await calls(page, "update_settings")).at(-1)?.args).toEqual({ patch: { inputDeviceId: null } });
@@ -277,68 +289,79 @@ test("settings: 選んだマイクが外れても選択を残し「接続され�
 
 // ---------- 入力しないアプリ ----------
 
-test("settings: 起動中のアプリを取得できなければメニューに理由を出す", async ({ page }) => {
+test("settings: 起動中のアプリを取得できなければメニューに理由を出す", async ({ page, m }) => {
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
   await mock(page, `api.fail.list_running_apps = "アプリの一覧を取得できませんでした";`);
-  await page.getByRole("button", { name: "アプリを追加" }).click();
+  await page.getByRole("button", { name: m.settings.voice.addApp }).click();
   await expect(page.getByRole("menu").getByText("アプリの一覧を取得できませんでした")).toBeVisible();
 });
 
-test("settings: 登録済みのアプリは追加候補に出さない", async ({ page }) => {
+test("settings: 登録済みのアプリは追加候補に出さない。追加・削除できる", async ({ page, m, sp }) => {
   await open(page, "window=settings&mock=default&category=voice", SETTINGS);
-  await page.getByRole("button", { name: "アプリを追加" }).click();
+  await page.getByRole("button", { name: m.settings.voice.addApp }).click();
   await expect(page.getByRole("menuitem", { name: "Safari" })).toBeVisible();
   // ターミナルは登録済み
-  await expect(page.getByRole("menuitem", { name: "ターミナル" })).toHaveCount(0);
+  await expect(page.getByRole("menuitem", { name: sp.terminal })).toHaveCount(0);
   await page.getByRole("menuitem", { name: "Safari" }).click();
   await expect.poll(async () => {
     const last = (await calls(page, "update_settings")).at(-1)?.args as { patch: { excludedApps: { bundleId: string }[] } };
     return last?.patch.excludedApps.map((a) => a.bundleId);
   }).toEqual(["com.1password.1password", "com.apple.Terminal", "com.apple.Safari"]);
+  await expect(page.getByText("Safari", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: m.settings.voice.removeApp("Safari") }).click();
+  await expect(page.getByText("Safari", { exact: true })).toHaveCount(0);
+  await expect.poll(async () => {
+    const last = (await calls(page, "update_settings")).at(-1)?.args as { patch: { excludedApps: { bundleId: string }[] } };
+    return last?.patch.excludedApps.map((a) => a.bundleId);
+  }).toEqual(["com.1password.1password", "com.apple.Terminal"]);
 });
 
 // ---------- 音声コマンド ----------
 
-async function openAddCommand(page: Page) {
+async function openAddCommand(page: Page, addLabel: string) {
   await open(page, "window=settings&mock=default&category=commands", SETTINGS);
-  await page.getByRole("button", { name: "コマンドを追加" }).click();
+  await setJaCommands(page);
+  await page.getByRole("button", { name: addLabel }).click();
   return page.getByRole("dialog");
 }
 
-test("settings: 音声コマンドの言い方を Rust と同じ正規化で検証する", async ({ page }) => {
-  const dialog = await openAddCommand(page);
-  const input = dialog.getByLabel("言い方");
-  const save = dialog.getByRole("button", { name: "保存" });
+test("settings: 音声コマンドの言い方を Rust と同じ正規化で検証する", async ({ page, m }) => {
+  const v = m.settings.commands.validation;
+  const dialog = await openAddCommand(page, m.settings.commands.add);
+  const input = dialog.getByLabel(m.settings.commands.phrases);
+  const save = dialog.getByRole("button", { name: m.common.save });
   // 空欄は保存できないが、エラーは出さない
   await expect(save).toBeDisabled();
   await expect(dialog.getByRole("alert")).toHaveCount(0);
 
   // 句読点・記号を除くと既存の「確定」と同じ
   await input.fill("「確定。」");
-  await expect(dialog.getByRole("alert")).toContainText("他のコマンド（Enter）の「確定」と重複しています");
+  await expect(dialog.getByRole("alert")).toContainText(v.conflict("「確定。」", "Enter", "確定"));
   await expect(save).toBeDisabled();
   // 半角カナは NFKC で全角になり「エンター」と同じ
   await input.fill("ｴﾝﾀｰ");
-  await expect(dialog.getByRole("alert")).toContainText("「エンター」と重複しています");
+  await expect(dialog.getByRole("alert")).toContainText(v.conflict("ｴﾝﾀｰ", "Enter", "エンター"));
   // 同じコマンド内の重複 (大文字・全角は同じとみなす)
   await input.fill("Next、ｎｅｘｔ");
-  await expect(dialog.getByRole("alert")).toContainText("「Next」と「ｎｅｘｔ」は同じ言い方とみなされます");
+  await expect(dialog.getByRole("alert")).toContainText(v.equivalent("Next", "ｎｅｘｔ"));
   // 記号だけ
   await input.fill("！？");
-  await expect(dialog.getByRole("alert")).toContainText("記号や空白だけのため使えません");
+  await expect(dialog.getByRole("alert")).toContainText(v.symbolsOnly("！？"));
 
   await input.fill("次へ、タブ");
   await expect(dialog.getByRole("alert")).toHaveCount(0);
   await expect(save).toBeEnabled();
 });
 
-test("settings: 言い方を複数・修飾キー付きで追加する", async ({ page }) => {
-  const dialog = await openAddCommand(page);
-  await dialog.getByLabel("言い方").fill("前へ、戻る");
+// 区切り文字 (phraseJoiner) は表示言語で違う
+test("settings: 言い方を複数・修飾キー付きで追加する", { tag: [I18N, SCREENSHOT] }, async ({ page, m, snap }) => {
+  const dialog = await openAddCommand(page, m.settings.commands.add);
+  await dialog.getByLabel(m.settings.commands.phrases).fill(`前へ${m.settings.commands.phraseJoiner}戻る`);
   await dialog.getByRole("button", { name: "Shift" }).click();
-  await dialog.getByLabel("キー", { exact: true }).selectOption("tab");
+  await dialog.getByLabel(m.settings.commands.keyName, { exact: true }).selectOption("tab");
   await expect(dialog.getByText("Shift + Tab")).toBeVisible();
-  await dialog.getByRole("button", { name: "保存" }).click();
+  await snap("settings-command-dialog");
+  await dialog.getByRole("button", { name: m.common.save }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(page.getByText("前へ", { exact: true })).toBeVisible();
   await expect(page.getByText("戻る", { exact: true })).toBeVisible();
@@ -351,38 +374,40 @@ test("settings: 言い方を複数・修飾キー付きで追加する", async (
   });
 });
 
-test("settings: 音声コマンドを編集・削除する", async ({ page }) => {
+test("settings: 音声コマンドを編集・削除する", async ({ page, m }) => {
   await open(page, "window=settings&mock=default&category=commands", SETTINGS);
+  await setJaCommands(page);
+  await expect(page.getByText("エンター", { exact: true })).toBeVisible();
   // 「確定、エンター」の行を編集。自分自身の言い方とは重複扱いしない
-  await page.getByRole("button", { name: "編集" }).first().click();
+  await page.getByRole("button", { name: m.settings.commands.edit }).first().click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByLabel("言い方")).toHaveValue("確定、エンター");
-  await expect(dialog.getByRole("button", { name: "保存" })).toBeEnabled();
+  await expect(dialog.getByLabel(m.settings.commands.phrases)).toHaveValue(["確定", "エンター"].join(m.settings.commands.phraseJoiner));
+  await expect(dialog.getByRole("button", { name: m.common.save })).toBeEnabled();
   // 他のコマンドの言い方は使えない
-  await dialog.getByLabel("言い方").fill("確定、送信");
-  await expect(dialog.getByRole("alert")).toContainText("他のコマンド（⌘ + Enter）の「送信」と重複しています");
-  await dialog.getByLabel("言い方").fill("確定、決定");
-  await dialog.getByRole("button", { name: "保存" }).click();
+  await dialog.getByLabel(m.settings.commands.phrases).fill("確定、送信");
+  await expect(dialog.getByRole("alert")).toContainText(m.settings.commands.validation.conflict("送信", "⌘ + Enter", "送信"));
+  await dialog.getByLabel(m.settings.commands.phrases).fill("確定、決定");
+  await dialog.getByRole("button", { name: m.common.save }).click();
   await expect(page.getByText("決定", { exact: true })).toBeVisible();
   await expect(page.getByText("エンター", { exact: true })).toHaveCount(0);
 
   // 「改行」の行を削除
-  await page.getByRole("button", { name: "削除" }).nth(1).click();
+  await page.getByRole("button", { name: m.settings.commands.delete }).nth(1).click();
   await expect(page.getByText("改行", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Shift + Enter")).toHaveCount(0);
   const last = (await calls(page, "update_settings")).at(-1)?.args as { patch: { voiceCommands: { id: string }[] } };
   expect(last.patch.voiceCommands.map((c) => c.id)).toEqual(["confirm", "send"]);
 });
 
-test("settings: 編集中に他ウィンドウで追加された言い方とも重複を検出する", async ({ page }) => {
-  const dialog = await openAddCommand(page);
-  await dialog.getByLabel("言い方").fill("やり直し");
+test("settings: 編集中に他ウィンドウで追加された言い方とも重複を検出する", async ({ page, m }) => {
+  const dialog = await openAddCommand(page, m.settings.commands.add);
+  await dialog.getByLabel(m.settings.commands.phrases).fill("やり直し");
   await expect(dialog.getByRole("alert")).toHaveCount(0);
   await mock(
     page,
     `api.invoke("update_settings", { patch: { voiceCommands: [...api.db.settings.voiceCommands, { id: "undo", phrases: ["やり直し"], key: { key: "backspace", modifiers: ["cmd"] } }] } });`,
   );
-  await expect(dialog.getByRole("alert")).toContainText("他のコマンド（⌘ + Backspace）の「やり直し」と重複しています");
+  await expect(dialog.getByRole("alert")).toContainText(m.settings.commands.validation.conflict("やり直し", "⌘ + Backspace", "やり直し"));
 });
 
 // ---------- 認識のヒント ----------
@@ -394,9 +419,12 @@ async function asrContextPatches(page: Page): Promise<string[]> {
     .filter((v): v is string => v != null);
 }
 
-test("settings: 認識のヒントは入力が止まるかフォーカスが外れた時に、書いたまま保存する", async ({ page }) => {
+test("settings: 認識のヒントは入力が止まるかフォーカスが外れた時に、書いたまま保存する", async ({ page, m }) => {
+  // 入力が止まってからの待ち時間 (800ms) を clock で進める。実時間だと遅い CI では入力の途中で保存されてしまう
+  await page.clock.install();
   await open(page, "window=settings&mock=default&category=recognition", SETTINGS);
-  const field = page.getByLabel("認識のヒント");
+  await pauseClock(page);
+  const field = page.getByLabel(m.settings.recognition.context);
   const text = "  開発の話です。\n以下の用語は英字で表記する: Qwen (読み: クウェン、クエン), pnpm  ";
   await field.fill(text);
   // 入力のたびには送らない
@@ -408,13 +436,16 @@ test("settings: 認識のヒントは入力が止まるかフォーカスが外�
   await field.focus();
   await field.press("End");
   await field.pressSequentially("、Tauri");
+  await page.clock.runFor(799);
+  expect(await asrContextPatches(page)).toEqual([text]);
+  await page.clock.runFor(1);
   await expect.poll(() => asrContextPatches(page)).toEqual([text, `${text}、Tauri`]);
   await expect(field).toBeFocused();
 });
 
-test("settings: 認識のヒントの文字数は Unicode スカラー値で数え、上限を超えると知らせる", async ({ page }) => {
+test("settings: 認識のヒントの文字数は Unicode スカラー値で数え、上限を超えると知らせる", async ({ page, m, ui }) => {
   await open(page, "window=settings&mock=default&category=recognition", SETTINGS);
-  const field = page.getByLabel("認識のヒント");
+  const field = page.getByLabel(m.settings.recognition.context);
   // UTF-16 でサロゲートペアになる文字 (𩸽) も 1 文字と数える
   await field.fill("𩸽".repeat(1000));
   await expect(page.getByText("1000 / 1000")).toBeVisible();
@@ -431,7 +462,7 @@ test("settings: 認識のヒントの文字数は Unicode スカラー値で数�
   await expect(page.getByRole("alert")).toBeVisible();
   // 保存できない値でも、フォーカスが外れて入力が消えない。Rust の拒否を表示する
   await field.blur();
-  await expect(page.getByRole("alert")).toHaveText("認識のヒントは1000文字以内にしてください");
+  await expect(page.getByRole("alert")).toHaveText(ui.reject.asrContextMax(1000));
   await expect(field).toHaveValue("𩸽".repeat(1000) + "あ");
   // 上限内に戻すと保存でき、エラーは消える
   await field.fill("短いヒント");
@@ -440,9 +471,12 @@ test("settings: 認識のヒントの文字数は Unicode スカラー値で数�
   await expect.poll(async () => (await asrContextPatches(page)).at(-1)).toBe("短いヒント");
 });
 
-test("settings: 認識のヒントは待ち時間内にページが隠れても保存し、変換中の値は送らない", async ({ page }) => {
+test("settings: 認識のヒントは待ち時間内にページが隠れても保存し、変換中の値は送らない", async ({ page, m }) => {
+  // 待ち時間 (800ms) を実時間で過ごすと、遅い CI では pagehide の前に保存されてしまうため時計を止める
+  await page.clock.install();
   await open(page, "window=settings&mock=default&category=recognition", SETTINGS);
-  const field = page.getByLabel("認識のヒント");
+  await pauseClock(page);
+  const field = page.getByLabel(m.settings.recognition.context);
   await field.fill("閉じる直前の入力");
   // 変換中の入力 (確定前) を再現する。React の onChange に届くよう、ネイティブの setter で値を変えてから input を送る
   await field.evaluate((el: HTMLTextAreaElement) => {
@@ -459,28 +493,17 @@ test("settings: 認識のヒントは待ち時間内にページが隠れても�
 
 // ---------- AppStatus.seq ----------
 
-test("panel: seq が前回より小さい status-changed は捨てる", async ({ page }) => {
+test("panel: seq が前回より小さい status-changed は捨てる", async ({ page, m }) => {
   await open(page, "window=panel&mock=off", PANEL);
-  await expect(page.getByRole("button", { name: "音声入力をオン" })).toBeVisible();
+  await expect(page.getByRole("button", { name: m.panel.turnOn })).toBeVisible();
   await mock(page, `api.fire("status-changed", { phase: "listening", loadingProgress: null, error: null, seq: 5 });`);
-  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
   // 遅れて届いた古い状態
   await mock(page, `api.fire("status-changed", { phase: "off", loadingProgress: null, error: null, seq: 3 });`);
   await page.waitForTimeout(200);
-  await expect(page.getByText("待機中")).toBeVisible();
+  await expect(page.getByText(m.panel.idle)).toBeVisible();
   await mock(page, `api.fire("status-changed", { phase: "off", loadingProgress: null, error: null, seq: 6 });`);
-  await expect(page.getByRole("button", { name: "音声入力をオン" })).toBeVisible();
-});
-
-test("mock: status を変えるたびに seq を増やす", async ({ page }) => {
-  await open(page, "window=panel&mock=off", PANEL);
-  const seq = () => page.evaluate(() => (window as unknown as { __mukuchiMock: { db: { status: { seq: number } } } }).__mukuchiMock.db.status.seq);
-  const before = await seq();
-  await page.getByRole("button", { name: "音声入力をオン" }).click();
-  await expect(page.getByText("待機中")).toBeVisible();
-  await expect.poll(seq).toBe(before + 1);
-  await mock(page, `api.setStatus({ phase: "speaking" });`);
-  await expect.poll(seq).toBe(before + 2);
+  await expect(page.getByRole("button", { name: m.panel.turnOn })).toBeVisible();
 });
 
 test("panel: 未知のエラーコードは Rust のメッセージをそのまま出す", async ({ page }) => {

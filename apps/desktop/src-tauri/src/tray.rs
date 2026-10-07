@@ -23,6 +23,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
 
 use crate::core::Core;
+use crate::i18n::{self, Locale, Msg};
 use crate::macos::status_icon::{self, IconPng, StatusIcon};
 use crate::permissions::{self, Pane};
 use crate::settings::PanelStyle;
@@ -100,6 +101,8 @@ enum MenuVariant {
 /// メニューの内容。変わった時だけ作り直す
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MenuModel {
+    /// 文言の言語。表示言語が変わったら作り直す
+    locale: Locale,
     status: String,
     recover: Option<ErrorAction>,
     listening: bool,
@@ -114,6 +117,7 @@ impl MenuModel {
     fn of(s: &AppStatus, listening: bool, setup_completed: bool, update: Option<String>) -> Self {
         let recover = s.error.as_ref().and_then(|e| e.action);
         Self {
+            locale: i18n::current(),
             // 復旧の項目が同じ操作なら重ねて出さない
             setup_item: !setup_completed && recover != Some(ErrorAction::StartSetup),
             status: status_text(s),
@@ -128,36 +132,37 @@ impl MenuModel {
 
 pub fn status_text(s: &AppStatus) -> String {
     match s.phase {
-        Phase::Loading => match s.loading_progress {
-            Some(p) => format!("モデルを読み込んでいます… {}%", (p * 100.0).round() as i64),
-            None => "モデルを読み込んでいます…".into(),
-        },
-        Phase::Off => "オフ・モデル読み込み済み".into(),
+        Phase::Loading => Msg::MenuLoading(
+            s.loading_progress
+                .map(|p| (p * 100.0).round().clamp(0.0, 100.0) as u32),
+        )
+        .to_string(),
+        Phase::Off => Msg::MenuOffReady.to_string(),
         Phase::Listening | Phase::Speaking | Phase::Finalizing | Phase::Done => {
-            "聞いています".into()
+            Msg::MenuListening.to_string()
         }
         Phase::Error => s
             .error
             .as_ref()
             .map(|e| e.message.clone())
-            .unwrap_or_else(|| "エラー".into()),
+            .unwrap_or_else(|| Msg::MenuError.to_string()),
     }
 }
 
-fn recover_text(a: ErrorAction) -> &'static str {
+fn recover_text(a: ErrorAction) -> Msg {
     match a {
-        ErrorAction::OpenAccessibility | ErrorAction::OpenMicrophone => "システム設定を開く…",
-        ErrorAction::SelectMicrophone => "マイクを選択…",
-        ErrorAction::RestartAsr => "文字起こしサーバーを再起動",
-        ErrorAction::StartSetup => "セットアップを開く…",
+        ErrorAction::OpenAccessibility | ErrorAction::OpenMicrophone => Msg::MenuOpenSystemSettings,
+        ErrorAction::SelectMicrophone => Msg::MenuSelectMicrophone,
+        ErrorAction::RestartAsr => Msg::MenuRestartAsr,
+        ErrorAction::StartSetup => Msg::MenuOpenSetup,
     }
 }
 
-fn toggle_text(listening: bool) -> &'static str {
+fn toggle_text(listening: bool) -> Msg {
     if listening {
-        "音声入力をオフ"
+        Msg::MenuTurnOff
     } else {
-        "音声入力をオン"
+        Msg::MenuTurnOn
     }
 }
 
@@ -319,7 +324,7 @@ enum Entry {
     },
     Check {
         id: &'static str,
-        text: &'static str,
+        text: String,
         checked: bool,
     },
     Separator,
@@ -334,7 +339,9 @@ fn item(id: &'static str, text: impl Into<String>) -> Entry {
     }
 }
 
+/// 文言は `m.locale` で作る (MenuModel の比較で言語の変化を作り直しに含めるため)
 fn menu_entries(m: &MenuModel, variant: MenuVariant) -> Vec<Entry> {
+    let t = |msg: Msg| msg.text(m.locale);
     let mut v = vec![Entry::Item {
         id: ID_STATUS,
         text: m.status.clone(),
@@ -342,42 +349,44 @@ fn menu_entries(m: &MenuModel, variant: MenuVariant) -> Vec<Entry> {
         accelerator: None,
     }];
     if let Some(a) = m.recover {
-        v.push(item(ID_RECOVER, recover_text(a)));
+        v.push(item(ID_RECOVER, t(recover_text(a))));
     }
     v.push(Entry::Separator);
     v.push(match variant {
         MenuVariant::Tray => Entry::Item {
             id: ID_TOGGLE,
-            text: toggle_text(m.listening).into(),
+            text: t(toggle_text(m.listening)),
             enabled: m.toggle_enabled,
             accelerator: None,
         },
         MenuVariant::Panel { compact } => Entry::Check {
             id: ID_COMPACT,
-            text: "コンパクト表示",
+            text: t(Msg::MenuCompact),
             checked: compact,
         },
     });
     v.push(Entry::Separator);
     if m.setup_item {
-        v.push(item(ID_SETUP, "セットアップを開く…"));
+        v.push(item(ID_SETUP, t(Msg::MenuOpenSetup)));
     }
     if let Some(version) = &m.update {
         v.push(item(
             ID_UPDATE,
-            format!("再起動してアップデート (v{version})"),
+            t(Msg::MenuRestartToUpdate {
+                version: version.clone(),
+            }),
         ));
     }
     v.push(Entry::Item {
         id: ID_SETTINGS,
-        text: "設定を開く…".into(),
+        text: t(Msg::MenuSettings),
         enabled: true,
         accelerator: Some("CmdOrCtrl+,"),
     });
     v.push(Entry::Separator);
     v.push(Entry::Item {
         id: ID_QUIT,
-        text: "mukuchi を終了".into(),
+        text: t(Msg::MenuQuit),
         enabled: true,
         accelerator: Some("CmdOrCtrl+Q"),
     });
@@ -544,7 +553,7 @@ mod tests {
             assert_eq!(ids(&panel), [ID_STATUS, ID_COMPACT, ID_SETTINGS, ID_QUIT]);
             assert!(panel.contains(&Entry::Check {
                 id: ID_COMPACT,
-                text: "コンパクト表示",
+                text: "コンパクト表示".into(),
                 checked: compact,
             }));
         }
@@ -591,6 +600,44 @@ mod tests {
         assert_ne!(
             m,
             MenuModel::of(&s.status(), false, false, Some("0.1.6".into()))
+        );
+    }
+
+    #[test]
+    fn menu_entries_use_model_locale() {
+        let s = StateManager::new();
+        s.set_asr_ready(true);
+        let mut m = MenuModel::of(&s.status(), false, false, Some("0.1.5".into()));
+        assert_eq!(m.locale, Locale::Ja);
+        let en = MenuModel {
+            locale: Locale::En,
+            ..m.clone()
+        };
+        assert_ne!(m, en, "言語が変われば作り直す");
+        m.locale = Locale::En;
+        let texts: Vec<String> = menu_entries(&m, MenuVariant::Tray)
+            .into_iter()
+            .filter_map(|e| match e {
+                Entry::Item { id, text, .. } if id != ID_STATUS => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Turn On Voice Input",
+                "Open Setup…",
+                "Restart to Update (v0.1.5)",
+                "Settings…",
+                "Quit mukuchi"
+            ]
+        );
+        assert!(
+            menu_entries(&m, MenuVariant::Panel { compact: true }).contains(&Entry::Check {
+                id: ID_COMPACT,
+                text: "Compact View".into(),
+                checked: true,
+            })
         );
     }
 

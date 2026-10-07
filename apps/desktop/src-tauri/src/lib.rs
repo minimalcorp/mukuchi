@@ -1,9 +1,11 @@
+mod app_menu;
 mod asr;
 mod asr_process;
 mod audio;
 mod autostart;
 mod commands;
 mod core;
+mod i18n;
 mod insert;
 mod launch;
 mod macos;
@@ -86,6 +88,8 @@ pub fn run() {
         std::process::exit(code);
     }
     let app = tauri::Builder::default()
+        // アプリのメニューバーは表示言語で自分で組む (app_menu.rs)。既定のメニューは英語に固定のため使わない
+        .enable_macos_default_menu(false)
         // 最初に登録する (プラグインの指定)。2つ目のプロセスは既存のプロセスに知らせて、ここで終了する。
         // Finder 等からの起動は LaunchServices が既存のプロセスに Reopen を送るだけだが、
         // 実行ファイルの直接起動や `open -n` では別プロセスが立つため (ASR サーバー・パネルが二重になる)
@@ -185,6 +189,8 @@ pub fn run() {
             let log_dir = app.path().app_log_dir()?;
             let core = Core::new(app.handle().clone(), data_paths, log_dir, resources)?;
             app.manage(core.clone());
+            // Core::new で表示言語が決まった後に組む
+            app_menu::refresh(app.handle());
             let settings = core.settings.get();
             app.manage(Arc::new(windows::Windows::new(
                 settings.panel_position.clone(),
@@ -224,6 +230,7 @@ pub fn run() {
             commands::get_status,
             commands::set_listening,
             commands::get_shortcut_status,
+            commands::get_locale,
             commands::set_shortcut_suspended,
             commands::get_settings,
             commands::update_settings,

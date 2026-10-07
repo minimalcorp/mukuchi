@@ -76,6 +76,7 @@ jobs:
             '^apps/desktop/scripts/(prepare-bundle-resources|fetch-uv|make-verify-wav)\.sh$'
             # tauri.conf.json の bundle.resources (tauri-build が要求する)
             '^apps/desktop/THIRD_PARTY_NOTICES$'
+            '^(LICENSE|NOTICE)$'
           )
           FRONTEND=(
             '^apps/desktop/src/'
@@ -83,7 +84,7 @@ jobs:
             # package.json・vite/tsconfig/eslint/playwright の設定・index.html・components.json 等
             '^apps/desktop/[^/]+$'
             # AboutSection.tsx が ?raw で import する
-            '^LICENSE$'
+            '^(LICENSE|NOTICE)$'
             # workspace 全体の依存
             '^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml)$'
           )

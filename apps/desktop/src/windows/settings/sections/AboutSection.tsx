@@ -10,6 +10,8 @@ import { commands, runCommand, type AppInfo, type UpdateStatus } from "@/lib/ipc
 // アプリ本体のライセンス (リポジトリ直下の LICENSE)。オフラインで表示できるようバンドルに含める。
 // dev サーバーは pnpm-workspace.yaml のあるリポジトリ直下を server.fs.allow の既定に含めるため読める
 import licenseText from "../../../../../../LICENSE?raw";
+// Apache 2.0 の原文は著作権者の欄 (APPENDIX) が空欄のままのため、著作権表示は NOTICE を先頭に添えて示す
+import noticeText from "../../../../../../NOTICE?raw";
 import { useI18n } from "@/i18n/context";
 import { Card, FieldError, Row, TitleWithSub, type SectionProps } from "./common";
 
@@ -59,7 +61,7 @@ export function AboutSection({ settings, update, errors }: SectionProps) {
             <DialogDescription className="m-0 text-sm text-fg-muted">Apache License 2.0</DialogDescription>
           </div>
           <pre className="mx-5 my-3.5 max-h-[300px] overflow-auto rounded-md border border-line-default p-3 font-mono text-2xs leading-[1.5] whitespace-pre-wrap text-fg-body select-text">
-            {licenseText}
+            {`${noticeText.trimEnd()}\n\n${licenseText}`}
           </pre>
           <div className="flex justify-end px-5 pb-5">
             <Button onClick={() => setLicense(false)}>{t.common.close}</Button>

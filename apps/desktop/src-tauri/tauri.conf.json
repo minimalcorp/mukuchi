@@ -28,6 +28,8 @@
       "icons/icon.icns"
     ],
     "resources": {
+      "../../../LICENSE": "LICENSE",
+      "../../../NOTICE": "NOTICE",
       "../THIRD_PARTY_NOTICES": "THIRD_PARTY_NOTICES",
       "resources/silero/LICENSE": "licenses/silero-vad-LICENSE",
       "bundle-resources/asr-server": "asr-server",

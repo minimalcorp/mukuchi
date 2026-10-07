@@ -77,7 +77,8 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 | `Contents/Helpers/uv` | uv の単一バイナリ (aarch64-apple-darwin。版は devShell の uv と揃え、sha256 を固定して `apps/desktop/scripts/fetch-uv.sh` が取得)。公式リリースは開発元の Developer ID 署名 (0.12.17 は `OpenAI OpCo, LLC (2DC432GLL2)`)・Hardened Runtime・タイムスタンプ付きで公証済みのため、再署名せずそのまま同梱する。Resources ではなく Helpers に置くのは、Apple の "Placing content in a bundle" で helper tool (Mach-O) の置き場所が `Contents/MacOS/` か `Contents/Helpers/` とされ、それ以外に置くと公証で問題になりうるため。`bundle.macOS.files` でコピーするので Tauri は再署名しない (externalBin にすると Tauri が自分の証明書と本体の entitlements で再署名する) |
 | `Contents/Resources/asr-server/` | `pyproject.toml` `uv.lock` `.python-version` `src/` (テスト・キャッシュは除く) |
 | `Contents/Resources/verify.wav` | 検証用音声 (「確認します。」、Kyoko の合成音声、16kHz/mono/s16、約1.1秒)。リポジトリには置かず、`apps/desktop/scripts/prepare-bundle-resources.sh` がビルド時に `apps/desktop/scripts/make-verify-wav.sh` (`say` + python) で `apps/desktop/.build-cache/` に一度だけ作り `apps/desktop/src-tauri/bundle-resources/` にコピーする |
-| `Contents/Resources/THIRD_PARTY_NOTICES`, `licenses/` | ライセンス |
+| `Contents/Resources/LICENSE`, `NOTICE` | 本体のライセンス (Apache-2.0) と著作権表示 (リポジトリ直下のもの。Apache-2.0 §4(a)(d) で再配布物に含める) |
+| `Contents/Resources/THIRD_PARTY_NOTICES`, `licenses/` | 同梱する第三者のライセンス |
 
 - uv と `apps/desktop/asr-server/` は `apps/desktop/scripts/prepare-bundle-resources.sh` が `apps/desktop/src-tauri/bundle-resources/` (gitignore) に用意する。tauri-build は dev でも resources を要求するため `make setup` と `make build*` から呼ぶ
 - Rust からの解決:

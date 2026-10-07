@@ -1,6 +1,6 @@
 /*
  * 設定 > このアプリについて のアップデートの確認: 手動の確認 (最新・新しい版の取得から再起動まで)、
- * unavailable での無効化、自動確認の切り替え、command の失敗の表示。
+ * unavailable での無効化、自動確認の切り替え、command の失敗の表示。ライセンスの表示。
  */
 import type { Page } from "@playwright/test";
 import { expect, I18N, test } from "./fixtures";
@@ -95,4 +95,12 @@ test("about: インストールに失敗して error になったら、失敗の
   await expect(page.getByText(m.settings.about.failed("v0.2.0"))).toBeVisible();
   await expect(page.getByText("アップデートをインストールできませんでした")).toHaveCount(1);
   await expect(page.getByTestId("update-status").getByText("アップデートをインストールできませんでした")).toBeVisible();
+});
+
+test("about: ライセンスに NOTICE の著作権表示と Apache License の原文を出す", async ({ page, m }) => {
+  await open(page, "default");
+  await page.getByRole("button", { name: m.settings.about.show }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("Copyright 2026 Minimal, K.K.")).toBeVisible();
+  await expect(dialog.getByText("Apache License", { exact: false }).first()).toBeVisible();
 });

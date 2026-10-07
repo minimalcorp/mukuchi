@@ -13,6 +13,7 @@ import "./globals.css";
 import { ANALYTICS_ENABLED, GTAG_INIT_SCRIPT } from "./lib/analytics";
 import { GA_MEASUREMENT_ID } from "./lib/site";
 import { isLocale, type Locale } from "./i18n/locales";
+import { LOCALE_REDIRECT_SCRIPT } from "./i18n/redirect";
 
 /** 表示中のページの言語 (ルートの handle.locale)。404 など言語のないページは日本語 (`/` と同じ) */
 function usePageLocale(): Locale {
@@ -32,6 +33,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {/* CSS・計測より先に置き、英語のブラウザを日本語のページの描画・計測の前に `/en/` へ移す */}
+        {locale === "ja" && <script dangerouslySetInnerHTML={{ __html: LOCALE_REDIRECT_SCRIPT }} />}
         <meta name="theme-color" content="#ffffff" />
         <link rel="icon" href="/favicon.ico" sizes="any" />
         <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />

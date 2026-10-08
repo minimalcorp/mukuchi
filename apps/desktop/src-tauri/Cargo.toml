@@ -1,6 +1,6 @@
 [package]
 name = "mukuchi"
-version = "0.4.1"
+version = "0.4.2"
 description = "macOS voice input app"
 authors = ["minimalcorp"]
 edition = "2021"

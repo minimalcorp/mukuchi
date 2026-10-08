@@ -100,7 +100,7 @@ function liveLoop(api: MockApi) {
     }, endAt);
     setTimeout(() => {
       if (s.command) api.result({ kind: "command", id: myId, text: s.text, key: s.command });
-      else api.result({ kind: "inserted", id: myId, text: s.text, appName: s.app ?? t.notes });
+      else api.result({ kind: "inserted", id: myId, text: s.text, appName: s.app ?? t.notes, submitted: false });
       api.setLevel(0.12);
       api.setStatus({ phase: "listening" });
     }, endAt + 700);
@@ -149,7 +149,7 @@ function previewDiffLoop(api: MockApi) {
     }, endAt - STEP_MS / 2);
     setTimeout(() => {
       const text = PREVIEW_DIFF_STEPS[PREVIEW_DIFF_STEPS.length - 1];
-      api.result({ kind: "inserted", id: myId, text, appName: sp(api.db).notes });
+      api.result({ kind: "inserted", id: myId, text, appName: sp(api.db).notes, submitted: false });
       api.setLevel(0.12);
       api.setStatus({ phase: "listening" });
     }, endAt);
@@ -230,7 +230,7 @@ const PANEL: Scenario[] = [
     setup: (db) => listening(db, 0.06),
     script: (api) => {
       api.started(1);
-      api.result({ kind: "inserted", id: 1, text: sp(api.db).text, appName: sp(api.db).notes });
+      api.result({ kind: "inserted", id: 1, text: sp(api.db).text, appName: sp(api.db).notes, submitted: false });
     },
   },
   {
@@ -294,7 +294,7 @@ const PANEL: Scenario[] = [
     script: (api) => {
       const t = sp(api.db);
       api.started(1);
-      api.result({ kind: "inserted", id: 1, text: "1: " + t.text, appName: t.notes });
+      api.result({ kind: "inserted", id: 1, text: "1: " + t.text, appName: t.notes, submitted: false });
       api.started(2);
       api.partial({ id: 2, text: t.long, stableLength: 48 });
     },
@@ -469,7 +469,7 @@ const SETUP: Scenario[] = [
       setTimeout(() => {
         api.started(1);
         api.typeIntoFocused(t.testSentence);
-        api.result({ kind: "inserted", id: 1, text: t.testSentence, appName: "mukuchi" });
+        api.result({ kind: "inserted", id: 1, text: t.testSentence, appName: "mukuchi", submitted: false });
       }, 300);
       setTimeout(() => {
         api.started(2);

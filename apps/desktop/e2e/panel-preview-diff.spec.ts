@@ -45,7 +45,7 @@ async function show(page: Page, k: number) {
     await mock(
       page,
       `api.setStatus({ phase: "finalizing" });
-       api.result({ kind: "inserted", id: 1, text: ${JSON.stringify(text)}, appName: "メモ" });
+       api.result({ kind: "inserted", id: 1, text: ${JSON.stringify(text)}, appName: "メモ", submitted: false });
        api.setStatus({ phase: "listening" });`,
     );
   } else {

@@ -216,6 +216,9 @@ export const en = {
 
     voice: {
       inputModeHelp: "Where other people are around or talking nearby, Listen once avoids typing voices you didn’t mean to",
+      autoSubmit: "Auto-send",
+      autoSubmitSub: "Presses the send key after typing what you said. Not sent for voice commands or when nothing was typed",
+      autoSubmitKey: "Send key",
       microphone: "Microphone",
       systemDefault: "System Default",
       systemDefaultWith: (name: string) => `System Default (${name})`,

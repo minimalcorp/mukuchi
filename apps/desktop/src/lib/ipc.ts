@@ -52,7 +52,8 @@ export type Utterance = {
 };
 
 export type UtteranceResult =
-  | { kind: "inserted"; id: number; text: string; appName: string }
+  /** submitted: 自動送信の送信キーを送った */
+  | { kind: "inserted"; id: number; text: string; appName: string; submitted: boolean }
   | { kind: "command"; id: number; text: string; key: string }
   | { kind: "skipped_excluded"; id: number; text: string; appName: string }
   | { kind: "empty"; id: number }
@@ -86,6 +87,10 @@ export type Settings = {
   panelStyle: PanelStyle;
   /** 入力モード (docs/architecture.md「決定事項」の入力モード) */
   inputMode: InputMode;
+  /** 貼り付けた発話の直後に送信キーを送る (docs/architecture.md「決定事項」の自動送信) */
+  autoSubmit: boolean;
+  /** 自動送信の送信キー。modEnter は主修飾キー+Enter (macOS は ⌘+Enter) */
+  autoSubmitKey: AutoSubmitKey;
   /** 自動でアップデートを確認・取得する (docs/architecture.md「アップデート」)。false でも手動の確認はできる */
   autoCheckUpdates: boolean;
   /**
@@ -109,6 +114,8 @@ export const ASR_CONTEXT_MAX = 1000;
 export type PanelStyle = "full" | "compact";
 /** continuous: ON の間ずっと発話ごとに入力 (常に聞き取る)。oneShot: 1発話を確定したら自動で OFF (1回ずつ聞き取る) */
 export type InputMode = "continuous" | "oneShot";
+/** 自動送信の送信キー。OS 非依存の値で持ち、実際のキーは Rust が OS ごとに決める */
+export type AutoSubmitKey = "enter" | "modEnter";
 /** error: 起動時などに登録できなかった時の表示用 (表示言語) */
 export type ShortcutStatus = { shortcut: string | null; registered: boolean; error: string | null };
 

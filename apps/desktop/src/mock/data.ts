@@ -67,6 +67,8 @@ function defaultSettings(locale: Locale): Settings {
     setupCompleted: true,
     panelStyle: "full",
     inputMode: "continuous",
+    autoSubmit: false,
+    autoSubmitKey: "enter",
     autoCheckUpdates: true,
     shortcut: "Alt+Space",
     uiLanguage: "system",

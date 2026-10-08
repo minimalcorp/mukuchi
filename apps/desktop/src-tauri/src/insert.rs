@@ -41,6 +41,8 @@ pub enum UtteranceResult {
         id: u64,
         text: String,
         app_name: String,
+        /// 自動送信の送信キーを送った
+        submitted: bool,
     },
     Command {
         id: u64,
@@ -69,8 +71,17 @@ impl UtteranceResult {
     /// ログ用の要約。発話内容はログに残さない (ログはファイルに残り、共有されることがあるため)
     pub fn summary(&self) -> String {
         match self {
-            Self::Inserted { id, text, app_name } => {
-                format!("#{id} inserted {}文字 → {app_name}", text.chars().count())
+            Self::Inserted {
+                id,
+                text,
+                app_name,
+                submitted,
+            } => {
+                let submitted = if *submitted { " (submitted)" } else { "" };
+                format!(
+                    "#{id} inserted {}文字 → {app_name}{submitted}",
+                    text.chars().count()
+                )
             }
             Self::Command { id, key, .. } => format!("#{id} command {key}"),
             Self::SkippedExcluded { id, app_name, .. } => {
@@ -105,6 +116,8 @@ pub struct InsertConfig {
     pub excluded_apps: Vec<ExcludedApp>,
     /// 開発時の自動テスト用: 指定したアプリが前面にある時だけ入力する (他のアプリに誤って入力しない)
     pub only_bundle_id: Option<String>,
+    /// 自動送信の送信キー。None は自動送信 OFF
+    pub auto_submit: Option<KeyCombo>,
 }
 
 /// 確定待ちの発話。`result` には ASR の結果 (または失敗) が届く。
@@ -202,11 +215,36 @@ pub fn handle_text(
             text: text.to_string(),
             key: key.display(),
         }),
-        None => backend.paste_text(text).map(|_| UtteranceResult::Inserted {
-            id,
-            text: text.to_string(),
-            app_name,
-        }),
+        None => backend
+            .paste_text(text)
+            .and_then(|_| {
+                // 句読点・記号だけ (音声コマンドと同じ正規化で空) は文として送る意味がなく、
+                // 誤検出の「。」等でチャットに空の送信をしないよう貼り付けだけにする
+                let submit = cfg
+                    .auto_submit
+                    .as_ref()
+                    .filter(|_| !voice_command::normalize(text).is_empty());
+                let Some(key) = submit else {
+                    return Ok(false);
+                };
+                // 貼り付けの間 (クリップボードの復元待ちを含め数百ms) に前面アプリが切り替わると、
+                // 送信キーが別のアプリ (除外アプリを含む) に届いて確定・送信してしまうため送らない
+                let now = backend.frontmost_app();
+                if now.as_ref().and_then(|a| a.bundle_id.as_deref()) != bundle {
+                    log::info!(
+                        "発話 {id} は貼り付けの間に前面アプリが変わったため送信キーを送りません"
+                    );
+                    return Ok(false);
+                }
+                // 本文は入ったが送れていないことを知らせるため、送信キーの失敗も入力の失敗として扱う
+                backend.send_key(key).map(|_| true)
+            })
+            .map(|submitted| UtteranceResult::Inserted {
+                id,
+                text: text.to_string(),
+                app_name,
+                submitted,
+            }),
     };
     outcome.unwrap_or_else(|e| {
         log::error!("発話 {id} の入力に失敗: {e:#}");
@@ -221,7 +259,7 @@ pub fn handle_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::default_voice_commands;
+    use crate::settings::{default_voice_commands, AutoSubmitKey};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -230,10 +268,25 @@ mod tests {
         log: Mutex<Vec<String>>,
         untrusted: bool,
         bundle: Option<String>,
+        fail_key: bool,
+        /// 貼り付けの後に前面アプリがこの bundle id に切り替わる
+        switch_after_paste: Option<String>,
     }
 
     impl InsertBackend for Mock {
         fn frontmost_app(&self) -> Option<FrontApp> {
+            let pasted = self
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.starts_with("paste:"));
+            if let Some(b) = self.switch_after_paste.as_ref().filter(|_| pasted) {
+                return Some(FrontApp {
+                    name: "Other".into(),
+                    bundle_id: Some(b.clone()),
+                });
+            }
             Some(FrontApp {
                 name: "TextEdit".into(),
                 bundle_id: self.bundle.clone().or(Some("com.apple.TextEdit".into())),
@@ -247,6 +300,9 @@ mod tests {
             Ok(())
         }
         fn send_key(&self, key: &KeyCombo) -> Result<()> {
+            if self.fail_key {
+                anyhow::bail!("send_key failed");
+            }
             self.log
                 .lock()
                 .unwrap()
@@ -264,6 +320,14 @@ mod tests {
                 name: "Secret".into(),
             }],
             only_bundle_id: None,
+            auto_submit: None,
+        }
+    }
+
+    fn submit_cfg(key: AutoSubmitKey) -> InsertConfig {
+        InsertConfig {
+            auto_submit: Some(key.key_combo()),
+            ..cfg()
         }
     }
 
@@ -365,6 +429,132 @@ mod tests {
     }
 
     #[test]
+    fn auto_submit_sends_key_after_paste() {
+        let mock = Mock::default();
+        let r = handle_text(1, "こんにちは", &mock, &submit_cfg(AutoSubmitKey::Enter));
+        assert!(matches!(
+            r,
+            UtteranceResult::Inserted {
+                submitted: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            *mock.log.lock().unwrap(),
+            vec!["paste:こんにちは", "key:Enter"]
+        );
+
+        let mock = Mock::default();
+        handle_text(2, "こんにちは", &mock, &submit_cfg(AutoSubmitKey::ModEnter));
+        let expected = AutoSubmitKey::ModEnter.key_combo().display();
+        assert_eq!(
+            *mock.log.lock().unwrap(),
+            vec!["paste:こんにちは".to_string(), format!("key:{expected}")]
+        );
+
+        // OFF なら貼り付けのみ
+        let mock = Mock::default();
+        let r = handle_text(3, "こんにちは", &mock, &cfg());
+        assert!(matches!(
+            r,
+            UtteranceResult::Inserted {
+                submitted: false,
+                ..
+            }
+        ));
+        assert_eq!(*mock.log.lock().unwrap(), vec!["paste:こんにちは"]);
+    }
+
+    #[test]
+    fn auto_submit_skips_when_nothing_was_typed() {
+        let c = submit_cfg(AutoSubmitKey::Enter);
+        // 音声コマンドに一致したらコマンドのキーだけ (送信キーを重ねない)
+        let mock = Mock::default();
+        assert!(matches!(
+            handle_text(1, "確定。", &mock, &c),
+            UtteranceResult::Command { .. }
+        ));
+        assert_eq!(*mock.log.lock().unwrap(), vec!["key:Enter"]);
+
+        let mock = Mock::default();
+        assert_eq!(
+            handle_text(2, "  ", &mock, &c),
+            UtteranceResult::Empty { id: 2 }
+        );
+        assert!(mock.log.lock().unwrap().is_empty());
+
+        let excluded = Mock {
+            bundle: Some("com.example.secret".into()),
+            ..Default::default()
+        };
+        handle_text(3, "こんにちは", &excluded, &c);
+        assert!(excluded.log.lock().unwrap().is_empty());
+
+        let untrusted = Mock {
+            untrusted: true,
+            ..Default::default()
+        };
+        handle_text(4, "こんにちは", &untrusted, &c);
+        assert!(untrusted.log.lock().unwrap().is_empty());
+
+        // 句読点だけは貼り付けるが送らない
+        let mock = Mock::default();
+        assert!(matches!(
+            handle_text(5, "。", &mock, &c),
+            UtteranceResult::Inserted {
+                submitted: false,
+                ..
+            }
+        ));
+        assert_eq!(*mock.log.lock().unwrap(), vec!["paste:。"]);
+    }
+
+    #[test]
+    fn auto_submit_skips_when_front_app_changed_during_paste() {
+        let mock = Mock {
+            switch_after_paste: Some("com.example.secret".into()),
+            ..Default::default()
+        };
+        let r = handle_text(1, "こんにちは", &mock, &submit_cfg(AutoSubmitKey::Enter));
+        assert!(matches!(
+            r,
+            UtteranceResult::Inserted {
+                submitted: false,
+                ..
+            }
+        ));
+        assert_eq!(*mock.log.lock().unwrap(), vec!["paste:こんにちは"]);
+    }
+
+    #[test]
+    fn auto_submit_with_voice_commands_disabled_submits_command_phrase() {
+        // 音声コマンド OFF なら「確定。」も文として貼り付け、自動送信する
+        let mut c = submit_cfg(AutoSubmitKey::Enter);
+        c.voice_commands_enabled = false;
+        let mock = Mock::default();
+        let r = handle_text(1, "確定。", &mock, &c);
+        assert!(matches!(
+            r,
+            UtteranceResult::Inserted {
+                submitted: true,
+                ..
+            }
+        ));
+        assert_eq!(*mock.log.lock().unwrap(), vec!["paste:確定。", "key:Enter"]);
+    }
+
+    #[test]
+    fn auto_submit_key_failure_is_insert_failed() {
+        let mock = Mock {
+            fail_key: true,
+            ..Default::default()
+        };
+        let r = handle_text(1, "こんにちは", &mock, &submit_cfg(AutoSubmitKey::Enter));
+        assert_eq!(r.error_code(), Some(ErrorCode::InsertFailed));
+        assert_eq!(*mock.log.lock().unwrap(), vec!["paste:こんにちは"]);
+    }
+
+    #[test]
     fn serializes_per_contract() {
         let v = serde_json::to_value(UtteranceResult::SkippedExcluded {
             id: 3,
@@ -374,6 +564,15 @@ mod tests {
         .unwrap();
         assert_eq!(v["kind"], "skipped_excluded");
         assert_eq!(v["appName"], "X");
+        let v = serde_json::to_value(UtteranceResult::Inserted {
+            id: 2,
+            text: "a".into(),
+            app_name: "X".into(),
+            submitted: true,
+        })
+        .unwrap();
+        assert_eq!(v["kind"], "inserted");
+        assert_eq!(v["submitted"], true);
         let v = serde_json::to_value(UtteranceResult::Discarded { id: 1 }).unwrap();
         assert_eq!(v, serde_json::json!({ "kind": "discarded", "id": 1 }));
     }

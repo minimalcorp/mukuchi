@@ -168,6 +168,60 @@ impl<'de> Deserialize<'de> for InputMode {
     }
 }
 
+/// 自動送信の送信キー (docs/architecture.md「自動送信」)。
+/// 値は OS 非依存で持ち、実際のキーは `key_combo` で OS ごとに決める (Windows 対応を見越して)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AutoSubmitKey {
+    #[default]
+    Enter,
+    /// 主修飾キー+Enter
+    ModEnter,
+}
+
+impl AutoSubmitKey {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "enter" => Some(Self::Enter),
+            "modEnter" => Some(Self::ModEnter),
+            _ => None,
+        }
+    }
+
+    /// 送るキー。OS による主修飾キーの違いはここだけで吸収する
+    pub fn key_combo(&self) -> KeyCombo {
+        match self {
+            Self::Enter => KeyCombo {
+                key: Key::Enter,
+                modifiers: vec![],
+            },
+            Self::ModEnter => KeyCombo {
+                key: Key::Enter,
+                modifiers: vec![primary_modifier()],
+            },
+        }
+    }
+}
+
+/// OS の主修飾キー (macOS は ⌘、それ以外は Ctrl)
+#[cfg(target_os = "macos")]
+fn primary_modifier() -> Modifier {
+    Modifier::Cmd
+}
+
+#[cfg(not(target_os = "macos"))]
+fn primary_modifier() -> Modifier {
+    Modifier::Ctrl
+}
+
+/// PanelStyle と同じく、未知の値は既定として読む (設定全体を捨てない)
+impl<'de> Deserialize<'de> for AutoSubmitKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Self::parse(&s).unwrap_or_default())
+    }
+}
+
 /// ショートカットの既定 (⌥Space)
 pub const DEFAULT_SHORTCUT: &str = "Alt+Space";
 
@@ -187,6 +241,9 @@ pub struct Settings {
     pub setup_completed: bool,
     pub panel_style: PanelStyle,
     pub input_mode: InputMode,
+    /// 貼り付けた発話の直後に送信キーを送る (insert::handle_text)。旧設定 (キーなし) は false
+    pub auto_submit: bool,
+    pub auto_submit_key: AutoSubmitKey,
     /// 自動でアップデートを確認・取得する (update.rs)。旧設定 (キーなし) は true
     pub auto_check_updates: bool,
     /// ON/OFF のグローバルショートカット (`shortcut::parse` の形式)。None は無効
@@ -222,6 +279,8 @@ impl Default for Settings {
             setup_completed: false,
             panel_style: PanelStyle::Full,
             input_mode: InputMode::Continuous,
+            auto_submit: false,
+            auto_submit_key: AutoSubmitKey::Enter,
             auto_check_updates: true,
             shortcut: Some(DEFAULT_SHORTCUT.to_string()),
             ui_language: UiLanguage::System,
@@ -292,6 +351,7 @@ impl Settings {
             let valid = match k.as_str() {
                 "panelStyle" => v.as_str().and_then(PanelStyle::parse).is_some(),
                 "inputMode" => v.as_str().and_then(InputMode::parse).is_some(),
+                "autoSubmitKey" => v.as_str().and_then(AutoSubmitKey::parse).is_some(),
                 "uiLanguage" => v.as_str().and_then(UiLanguage::parse).is_some(),
                 "speechLanguage" => v.as_str().and_then(Locale::parse).is_some(),
                 _ => true,
@@ -557,6 +617,54 @@ mod tests {
         assert_eq!(serde_json::to_value(&next).unwrap()["inputMode"], "oneShot");
         assert!(s.apply_patch(&json!({ "inputMode": "one_shot" })).is_err());
         assert!(s.apply_patch(&json!({ "inputMode": 1 })).is_err());
+    }
+
+    #[test]
+    fn auto_submit_default_patch_and_lenient_load() {
+        let s = Settings::default();
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            (&v["autoSubmit"], &v["autoSubmitKey"]),
+            (&json!(false), &json!("enter"))
+        );
+        // 旧設定 (キーなし) は OFF・enter、未知の値でも設定全体は捨てない
+        let old: Settings = serde_json::from_value(json!({ "silenceMs": 800 })).unwrap();
+        assert_eq!(
+            (old.auto_submit, old.auto_submit_key),
+            (false, AutoSubmitKey::Enter)
+        );
+        let s2: Settings =
+            serde_json::from_value(json!({ "autoSubmitKey": "shiftEnter", "silenceMs": 800 }))
+                .unwrap();
+        assert_eq!(
+            (s2.auto_submit_key, s2.silence_ms),
+            (AutoSubmitKey::Enter, 800)
+        );
+        let next = s
+            .apply_patch(&json!({ "autoSubmit": true, "autoSubmitKey": "modEnter" }))
+            .unwrap();
+        assert_eq!(
+            (next.auto_submit, next.auto_submit_key),
+            (true, AutoSubmitKey::ModEnter)
+        );
+        assert_eq!(
+            serde_json::to_value(&next).unwrap()["autoSubmitKey"],
+            "modEnter"
+        );
+        assert!(s
+            .apply_patch(&json!({ "autoSubmitKey": "mod_enter" }))
+            .is_err());
+        assert!(s.apply_patch(&json!({ "autoSubmitKey": 1 })).is_err());
+        assert!(s.apply_patch(&json!({ "autoSubmit": "yes" })).is_err());
+    }
+
+    #[test]
+    fn auto_submit_key_combo() {
+        assert_eq!(AutoSubmitKey::Enter.key_combo().display(), "Enter");
+        #[cfg(target_os = "macos")]
+        assert_eq!(AutoSubmitKey::ModEnter.key_combo().display(), "⌘+Enter");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(AutoSubmitKey::ModEnter.key_combo().display(), "⌃+Enter");
     }
 
     #[test]

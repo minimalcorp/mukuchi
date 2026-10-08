@@ -217,6 +217,9 @@ export const ja = {
 
     voice: {
       inputModeHelp: "周りに人がいる・会話が聞こえる場所では、1回ずつ聞き取るにすると関係のない声を入力しません",
+      autoSubmit: "自動送信",
+      autoSubmitSub: "話し終わって入力した後に送信キーを押します。音声コマンドや、何も入力しなかった時は送りません",
+      autoSubmitKey: "送信キー",
       microphone: "マイク",
       systemDefault: "システムの既定",
       systemDefaultWith: (name: string) => `システムの既定（${name}）`,

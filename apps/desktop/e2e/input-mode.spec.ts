@@ -240,3 +240,32 @@ test("settings: 音声入力で入力モードとショートカットを変え�
     "update:Alt+Digit1",
   ]);
 });
+
+test("settings: 音声入力で自動送信を切り替え、送信キーを選べる", async ({ page, m }) => {
+  await open(page, "window=settings&mock=default&category=voice", SETTINGS);
+  const toggle = page.getByRole("switch", { name: m.settings.voice.autoSubmit });
+  const key = page.getByRole("combobox", { name: m.settings.voice.autoSubmitKey });
+  await expect(toggle).not.toBeChecked();
+  // OFF の間は送信キーを選べない
+  await expect(key).toBeDisabled();
+  await expect(key).toHaveValue("enter");
+
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  await expect.poll(() => savedSetting(page, "autoSubmit")).toBe(true);
+  await expect(key).toBeEnabled();
+  // 選択肢は formatKeyCombo の表記
+  await expect(key.locator("option")).toHaveText(["Enter", "⌘ + Enter"]);
+  await key.selectOption("modEnter");
+  await expect.poll(() => savedSetting(page, "autoSubmitKey")).toBe("modEnter");
+  expect((await calls(page, "update_settings")).map((c) => c.args.patch)).toEqual([
+    { autoSubmit: true },
+    { autoSubmitKey: "modEnter" },
+  ]);
+
+  await toggle.click();
+  await expect.poll(() => savedSetting(page, "autoSubmit")).toBe(false);
+  await expect(key).toBeDisabled();
+  // OFF にしても選んだキーは残す
+  await expect(key).toHaveValue("modEnter");
+});

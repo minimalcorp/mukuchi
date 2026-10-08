@@ -25,7 +25,7 @@ type Sample = {
 
 const SPEAK = `api.setStatus({ phase: "speaking" }); api.started(1); api.partial({ id: 1, text: "明日の打ち合わせは十時からに変更して", stableLength: 13 });`;
 // 入力できた最終結果は 750ms 表示してから消え、カードがピルに戻る (live のシナリオなので時間で消える)
-const INSERT = `api.setStatus({ phase: "finalizing" }); api.result({ kind: "inserted", id: 1, text: "明日の打ち合わせは十時からに変更してください。", appName: "メモ" }); api.setStatus({ phase: "listening" });`;
+const INSERT = `api.setStatus({ phase: "finalizing" }); api.result({ kind: "inserted", id: 1, text: "明日の打ち合わせは十時からに変更してください。", appName: "メモ", submitted: false }); api.setStatus({ phase: "listening" });`;
 
 async function open(page: Page, m: Messages, anchor: string) {
   await page.setViewportSize(PANEL);

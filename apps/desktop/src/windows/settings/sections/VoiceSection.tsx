@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { AppWindow, AudioLines, Plus, X } from "lucide-react";
 import { Select } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "@/components/ui/icon-button";
 import {
@@ -16,10 +17,25 @@ import { LevelMeter } from "@/components/app/level-meter";
 import { InputModeRadio } from "@/components/app/input-mode-options";
 import { ShortcutRecorder } from "@/components/app/shortcut-recorder";
 import { errorMessage, useDebouncedCommit } from "@/lib/hooks";
-import { commands, subscribeEvents, type AppStatus, type AudioDevice, type RunningApp } from "@/lib/ipc";
-import { formatSeconds } from "@/lib/format";
+import {
+  commands,
+  subscribeEvents,
+  type AppStatus,
+  type AudioDevice,
+  type AutoSubmitKey,
+  type KeyCombo,
+  type RunningApp,
+} from "@/lib/ipc";
+import { formatKeyCombo, formatSeconds } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n/context";
-import { Card, FieldError, FieldHeading, type SectionProps } from "./common";
+import { Card, FieldError, FieldHeading, Row, TitleWithSub, type SectionProps } from "./common";
+
+/** 送信キーの表示用。modEnter は macOS の主修飾キー (⌘)。実際に送るキーは Rust が OS ごとに決める */
+const AUTO_SUBMIT_KEYS: Record<AutoSubmitKey, KeyCombo> = {
+  enter: { key: "enter", modifiers: [] },
+  modEnter: { key: "enter", modifiers: ["cmd"] },
+};
 
 const ON_PHASES: AppStatus["phase"][] = ["listening", "speaking", "finalizing", "done"];
 
@@ -121,6 +137,7 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
           hint={t.inputMode.shortcutHint[settings.inputMode]}
         />
       </div>
+      <AutoSubmit settings={settings} update={update} errors={errors} />
       <div className="flex flex-col gap-1.5">
         <Select
           label={v.microphone}
@@ -181,6 +198,43 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
       </div>
       <ExcludedApps settings={settings} update={update} errors={errors} />
     </>
+  );
+}
+
+/** 自動送信 (docs/architecture.md「決定事項」の自動送信)。OFF の間も送信キーは見せ、選べないようにする (音声コマンドの対応表と同じ扱い) */
+function AutoSubmit({ settings, update, errors }: SectionProps) {
+  const { t } = useI18n();
+  const v = t.settings.voice;
+  const keyOptions = (Object.keys(AUTO_SUBMIT_KEYS) as AutoSubmitKey[]).map((k) => ({
+    value: k,
+    label: formatKeyCombo(AUTO_SUBMIT_KEYS[k]),
+  }));
+  return (
+    <div className="flex flex-col gap-2">
+      <Card>
+        <Row>
+          <TitleWithSub title={v.autoSubmit} sub={v.autoSubmitSub} />
+          <Switch
+            aria-label={v.autoSubmit}
+            checked={settings.autoSubmit}
+            onCheckedChange={(on) => update({ autoSubmit: on })}
+          />
+        </Row>
+        <Row last>
+          <span className={cn("flex-1 text-sm", !settings.autoSubmit && "text-fg-muted")}>{v.autoSubmitKey}</span>
+          <Select
+            aria-label={v.autoSubmitKey}
+            data-testid="auto-submit-key"
+            className="w-[160px] flex-none"
+            options={keyOptions}
+            value={settings.autoSubmitKey}
+            disabled={!settings.autoSubmit}
+            onValueChange={(k) => update({ autoSubmitKey: k === "modEnter" ? "modEnter" : "enter" })}
+          />
+        </Row>
+      </Card>
+      <FieldError message={errors.autoSubmit ?? errors.autoSubmitKey} />
+    </div>
   );
 }
 

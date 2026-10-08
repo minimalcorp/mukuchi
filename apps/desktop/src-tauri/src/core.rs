@@ -399,6 +399,7 @@ impl Core {
                             voice_commands: s.voice_commands,
                             excluded_apps: s.excluded_apps,
                             only_bundle_id: dev_target_bundle(),
+                            auto_submit: s.auto_submit.then(|| s.auto_submit_key.key_combo()),
                         }
                     })
                     .unwrap_or_default()

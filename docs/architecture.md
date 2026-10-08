@@ -32,6 +32,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 | 入力モード | `Settings.inputMode`。`continuous` (常に聞き取る・既定): ONの間ずっと発話ごとに入力。`oneShot` (1回ずつ聞き取る): ONにしてから1発話を確定 (VAD の話し終わり・最大長、またはショートカットの再押下) したら自動で OFF。短すぎる発話 (誤検出) では OFF にしない。ON (または誤検出) から10秒 (固定) 話し始めなければ OFF。開始手段 (パネル・メニューバー・ショートカット) によらず同じ。セットアップの「入力モード」ステップと 設定 > 音声入力 で選ぶ | 2026-10-02 決定。ひとりなら常に聞き取る、周りに人がいる・会話が聞こえる場所では入力のタイミングを自分で決めたいため |
 | リアルタイムプレビュー | 発話中は前回から音声が0.8秒以上伸び、かつ途中表示の要求が処理中でなければ、発話開始からの音声を文字起こしし直してパネルに表示する。入力するのは話し終わり時点の最終結果のみ。確定後は最終結果で表示を置き換えて750ms表示する (入力成功時は成功マークのみで入力先アプリ名は出さない)。推論時間の見積もり(実測から学習)が話し終わりの無音(silenceMs)を超える場合は送らない。長い発話は区切り (見積もりが silenceMs に収まる最長、3〜12秒) ごとに静かな所で確定し、以後は区切りの後の音声だけを送る (表示は確定した区切りの文字 + 今の区切りの文字。1回の推論が発話の長さに比例して伸びず、確定を遅らせない) | 2026-09-30 確定。値はtsunagiの音声入力に準拠 (implementation-plan.md「音声入力の体験」)。途中表示の応答待ちを取り消してもサーバーの推論は止まらず(直列実行)、確定がその分遅れるため |
 | 入力方式 | クリップボード + ⌘V、元のクリップボードを復元 | IMEの影響を受けない |
+| 自動送信 | `Settings.autoSubmit` (既定 OFF) が ON なら、貼り付けた発話の直後に送信キー (`Settings.autoSubmitKey`: Enter または 主修飾キー+Enter) を送る。入力モードによらない。何も入力しなかった発話 (empty・discarded・skipped_excluded・failed)、音声コマンドに一致した発話、正規化 (音声コマンドと同じ) すると空になる文字列 (句読点だけ等。貼り付けはする)、貼り付けの間に前面アプリが変わった発話 (送信キーが別のアプリに届くため。貼り付けはする) では送らない。設定 > 音声入力 で切り替える | 2026-10-08 決定。チャット等で話すたびに手で送信しなくて済むように。キーは Windows 対応を見越して OS 非依存の値 (`modEnter`) で持つ |
 | 音声コマンド | 「言い方→キー」対応表(既定: 確定/エンター→Enter、改行→Shift+Enter、送信→⌘+Enter)。発話全体が正規化後に完全一致した時のみ。機能ごとON/OFF可 | 表記揺れは複数の言い方で吸収 |
 | パネルの表示形式 | 通常 (プレビュー・状態の文言あり) と コンパクト (マイクの円形ボタンのみ。OFF=グレー、ON=青、発話中は音量に合わせて広がるリング、文字起こし中は回転するリング、エラーは赤い点) を `Settings.panelStyle` で切り替え。パネルの右クリックメニューのチェック項目「コンパクト表示」と 設定 > 一般 から切り替える | 2026-09-30 決定。デザインは既存トークンで作成 |
 | 入力しないアプリ | 登録したアプリが前面にある間は入力しない(パネルに「このアプリには入力しません」) | デザインの任意提案Aを採用 |
@@ -227,7 +228,7 @@ type Utterance = {
 };
 
 type UtteranceResult =
-  | { kind: "inserted"; id: number; text: string; appName: string }
+  | { kind: "inserted"; id: number; text: string; appName: string; submitted: boolean } // submitted: 自動送信の送信キーを送った
   | { kind: "command"; id: number; text: string; key: string }        // key 表示用 例 "Enter" "⇧+Enter" "⌘+Enter" (修飾は ⌃⌥⇧⌘ の順)
   | { kind: "skipped_excluded"; id: number; text: string; appName: string }
   | { kind: "empty"; id: number }                                     // 認識結果が空
@@ -250,6 +251,8 @@ type Settings = {
   autoCheckUpdates: boolean;              // 既定 true。自動でアップデートを確認・取得する (「アップデート」)。false でも手動の確認はできる
   uiLanguage: "system" | Locale;          // 既定 "system"。表示言語 (「言語」)
   speechLanguage: Locale;                 // 話す言語。ASR の language・推奨モデル・音声コマンドの既定を決める (「言語」。既定は新規なら解決した表示言語、既存の設定に無ければ "ja")
+  autoSubmit: boolean;                    // 既定 false。貼り付けた発話の直後に送信キーを送る (「決定事項」の自動送信)。送信キーだけ失敗したら failed (insert_failed)
+  autoSubmitKey: "enter" | "modEnter";    // 既定 "enter"。modEnter は主修飾キー+Enter (macOS は ⌘+Enter。Windows では Ctrl+Enter を想定)。未知の値は既定として読む
   shortcut: string | null;                // 既定 "Alt+Space"。null=無効。形式は「修飾+…+キー」: 修飾は Ctrl・Alt・Shift・Cmd をこの順で1つ以上、キーは KeyboardEvent.code (例 "Space" "KeyM" "Digit1" "F5")。登録できなければ (形式の誤り・OS が拒否) update_settings は保存せずエラー。他アプリが同じキーを使っていても登録は成功しうる (global-hotkey 0.8 は非排他で `RegisterEventHotKey` するため衝突を検出できない。どちらに届くかは未確認)
 };
 type Locale = "ja" | "en";

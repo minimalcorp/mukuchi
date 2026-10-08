@@ -56,7 +56,7 @@ test("panel: 3 行を超える発話も途中表示・確定のたびに最新�
     await mock(
       page,
       `api.setStatus({ phase: "finalizing" });
-       api.result({ kind: "inserted", id: ${id}, text: ${JSON.stringify(final)}, appName: "メモ" });
+       api.result({ kind: "inserted", id: ${id}, text: ${JSON.stringify(final)}, appName: "メモ", submitted: false });
        api.setStatus({ phase: "listening" });`,
     );
     await expect(preview.locator("p").last()).toHaveText(final);

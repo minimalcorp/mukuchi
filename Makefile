@@ -1,5 +1,10 @@
 # 開発タスク (リポジトリ全体の入口)。devShell 外で実行された場合は nix develop -c で自身を再実行する。
 # desktop (apps/desktop: Tauri + asr-server) のスクリプトは apps/desktop/scripts/ にある。
+# Windows ネイティブ (OS=Windows_NT。macOS・Linux では未定義) は Makefile.windows に分ける (nix を使わない)。
+# コマンド名と意味は同じで、中身だけが OS で変わる。以下の else から endif までが Mac の記述
+ifeq ($(OS),Windows_NT)
+include Makefile.windows
+else
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
@@ -179,3 +184,4 @@ clean: ## 生成物を削除 (モデル等の dev データは残す)
 	  $(WEB)/build $(WEB)/.react-router .sst node_modules apps/*/node_modules "$(PC_DIR)"
 
 endif
+endif # Windows_NT

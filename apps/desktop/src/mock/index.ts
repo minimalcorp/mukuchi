@@ -9,6 +9,9 @@
  * &locale=<ja|en> (または読み込み前に window.__MUKUCHI_MOCK_LOCALE__) で OS の言語を指定する (既定 ja)。
  * uiLanguage が system ならこれが表示言語になり、新規の設定の話す言語もこれになる。
  * Rust 由来の文言 (エラー・モデル名等) は表示言語、発話・既定の音声コマンドは話す言語で返す (texts.ts)。
+ * &platform=<macos|windows> (または読み込み前に window.__MUKUCHI_MOCK_PLATFORM__) で OS を指定する (既定 macos)。
+ * Windows では &gpu=<ok|integrated|driver_missing|none> で GPU の判定結果、&gpu-probe=<同> で再検出の結果、
+ * &cpu=1 で CPU 実行に同意済みにする。
  */
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
@@ -37,27 +40,41 @@ import { findScenario } from "./scenarios";
 import {
   createDb,
   defaultModels,
+  gpuStatus,
   model,
+  modelOrder,
   presentModels,
   provisioning,
   resolvedLocale,
   updateStatus,
   GB,
-  MODEL_ORDER,
   MODEL_TOTAL,
   UPDATE_TOTAL,
   type MockDb,
   type ModelId,
 } from "./data";
+import type { GpuStatus } from "@/lib/ipc";
+import { isPlatform, type Platform } from "@/lib/platform";
 
-import { MOCK_SPEECH_TEXTS, MOCK_UI_TEXTS } from "./texts";
+import { MOCK_SPEECH_TEXTS, MOCK_UI_TEXTS, MOCK_WINDOWS_TEXTS, mockVoiceCommands } from "./texts";
 
 const HOME = "/Users/you";
+const WIN_HOME = "C:\\Users\\you";
 
 /** OS の言語。URL の ?locale= を優先し、無ければ Playwright が読み込み前に入れる値 */
 function systemLocale(params: URLSearchParams): Locale {
   const v = params.get("locale") ?? (window as { __MUKUCHI_MOCK_LOCALE__?: string }).__MUKUCHI_MOCK_LOCALE__;
   return v === "en" ? "en" : "ja";
+}
+
+/** OS。URL の ?platform= を優先し、無ければ Playwright が読み込み前に入れる値 */
+function systemPlatform(params: URLSearchParams): Platform {
+  const v = params.get("platform") ?? (window as { __MUKUCHI_MOCK_PLATFORM__?: string }).__MUKUCHI_MOCK_PLATFORM__;
+  return isPlatform(v) ? v : "macos";
+}
+
+function gpuKind(value: string | null): GpuStatus["kind"] | null {
+  return value === "ok" || value === "integrated" || value === "driver_missing" || value === "none" ? value : null;
 }
 
 /** Rust と同じく AppError の message は表示言語で作る (表示言語の変更時は code から作り直す) */
@@ -86,8 +103,15 @@ function fire<E extends EventName>(event: E, payload: EventMap[E]) {
 export function installMock(params: URLSearchParams) {
   const windowLabel = params.get("window") ?? "settings";
   const scenario = findScenario(windowLabel, params.get("mock") ?? "default");
-  const db = createDb(systemLocale(params));
+  const db = createDb(systemLocale(params), systemPlatform(params));
+  if (db.platform === "windows") {
+    if (params.get("cpu") === "1") db.settings.cpuInferenceAccepted = true;
+    db.gpu = gpuStatus(gpuKind(params.get("gpu")) ?? "ok", db.settings.cpuInferenceAccepted);
+    db.gpuProbe = gpuKind(params.get("gpu-probe"));
+  }
   scenario.setup?.(db);
+  // Windows にアクセシビリティの権限はなく、Rust は常に true を返す
+  if (db.platform === "windows") db.permissions = { ...db.permissions, accessibility: true };
   db.anchor = parseAnchor(params.get("anchor"));
   if (params.get("style") === "compact") db.settings.panelStyle = "compact";
   // 静止状態のシナリオは確定結果・エラー表示を消さない
@@ -106,6 +130,17 @@ export function installMock(params: URLSearchParams) {
   const setStatus = (patch: Partial<Omit<AppStatus, "seq">>) => {
     db.status = { ...db.status, ...patch, seq: db.status.seq + 1 };
     fire("status-changed", db.status);
+  };
+
+  // GPU の判定結果を変える (Rust は起動時・再検出・同意で gpu-status-changed を送る)。
+  // GPU を使えるか同意済みになれば、止めていた文字起こし (gpu_unavailable) を始める
+  const setGpu = (next: GpuStatus) => {
+    db.gpu = next;
+    fire("gpu-status-changed", next);
+    const usable = (next.kind !== "none" && next.kind !== "driver_missing") || next.device === "cpu";
+    if (usable && db.status.error?.code === "gpu_unavailable") {
+      setStatus({ phase: "off", loadingProgress: null, error: null });
+    }
   };
 
   // 一時解除中は登録しない。それ以外は設定の値を登録する (モックでは登録の失敗は update_settings でのみ起きる)
@@ -308,7 +343,7 @@ export function installMock(params: URLSearchParams) {
           const patch = a.patch as Partial<Settings>;
           // Rust は登録できないショートカット (形式の誤り・OS が拒否) では保存せずに reject する
           if (patch.shortcut != null && db.shortcutRejected.includes(patch.shortcut)) {
-            throw ui().reject.shortcut(formatShortcut(patch.shortcut));
+            throw ui().reject.shortcut(formatShortcut(patch.shortcut, db.platform));
           }
           // Rust は前後の空白を除いた認識のヒントが上限 (Unicode スカラー値で数える) を超えると保存せずに reject する
           if (patch.asrContext != null && [...patch.asrContext.trim()].length > ASR_CONTEXT_MAX) {
@@ -320,8 +355,8 @@ export function installMock(params: URLSearchParams) {
           // 話す言語の変更 (docs/architecture.md「言語」): 既定のままの音声コマンドは新しい言語の既定に入れ替える
           const speechChanged = patch.speechLanguage != null && patch.speechLanguage !== prev.speechLanguage;
           if (speechChanged && !("voiceCommands" in patch)) {
-            if (sameCommands(prev.voiceCommands, MOCK_SPEECH_TEXTS[prev.speechLanguage].voiceCommands)) {
-              next.voiceCommands = structuredClone(MOCK_SPEECH_TEXTS[next.speechLanguage].voiceCommands);
+            if (sameCommands(prev.voiceCommands, mockVoiceCommands(prev.speechLanguage, db.platform))) {
+              next.voiceCommands = mockVoiceCommands(next.speechLanguage, db.platform);
             }
           }
           db.settings = next;
@@ -331,7 +366,7 @@ export function installMock(params: URLSearchParams) {
           const modelPending = db.provisioning.items.find((i) => i.id === "model")?.state === "pending";
           const running = st === "runtime" || st === "model" || st === "verify";
           if (speechChanged && modelPending && !running && st !== "done") {
-            const rec = MODEL_ORDER[next.speechLanguage][0];
+            const rec = modelOrder(db.platform, next.speechLanguage)[0];
             db.models = db.models.map((m) => ({ ...m, selected: m.id === rec }));
           }
           fire("settings-changed", db.settings);
@@ -345,6 +380,10 @@ export function installMock(params: URLSearchParams) {
             }
           }
           if (locale !== prevLocale || speechChanged) fire("models-changed", presentModels(db));
+          // CPU 実行の同意 (Windows): GPU を使えなければ CPU で動かす
+          if (patch.cpuInferenceAccepted != null && patch.cpuInferenceAccepted !== prev.cpuInferenceAccepted) {
+            setGpu(gpuStatus(db.gpu.kind, next.cpuInferenceAccepted));
+          }
           return db.settings;
         }
         case "get_shortcut_status":
@@ -357,6 +396,14 @@ export function installMock(params: URLSearchParams) {
           return db.devices;
         case "get_permissions":
           return db.permissions;
+        case "get_gpu_status":
+          return db.gpu;
+        case "probe_gpu": {
+          // 判定には時間がかかる (llama-server --list-devices)。&gpu-probe= があればその結果になる (ドライバーを入れ直した等)
+          await new Promise((r) => setTimeout(r, 600));
+          setGpu(gpuStatus(db.gpuProbe ?? db.gpu.kind, db.settings.cpuInferenceAccepted));
+          return db.gpu;
+        }
         case "request_microphone":
           db.permissions = { ...db.permissions, microphone: "granted" };
           fire("permissions-changed", db.permissions);
@@ -410,7 +457,7 @@ export function installMock(params: URLSearchParams) {
           stopModelTicker();
           setProvisioning(provisioning("idle"));
           // 全モデルを消し、選択は既定 (話す言語の推奨) に戻る
-          setModels(defaultModels(db.settings.speechLanguage, "not_downloaded"));
+          setModels(defaultModels(db.settings.speechLanguage, "not_downloaded", db.platform));
           setStatus({ phase: "error", loadingProgress: null, error: appError("runtime_missing", "start_setup", resolvedLocale(db)) });
           return null;
         case "list_models":
@@ -474,6 +521,12 @@ export function installMock(params: URLSearchParams) {
           return null;
         }
         case "get_uninstall_targets":
+          if (db.platform === "windows") {
+            return [
+              { path: `${WIN_HOME}\\AppData\\Local\\Programs\\mukuchi`, bytes: 130_000_000 },
+              { path: `${WIN_HOME}\\AppData\\Local\\com.minimalcorp.mukuchi`, bytes: 2.6 * GB },
+            ];
+          }
           return [
             // Rust は存在するものだけを絶対パスで返す
             { path: "/Applications/mukuchi.app", bytes: 48_000_000 },
@@ -487,6 +540,17 @@ export function installMock(params: URLSearchParams) {
           // 実機は成功するとアプリが終了する。モックは MUKUCHI_DEV_UNINSTALL_DRY_RUN と同じく終了せずに返る
           return new Promise((resolve) => setTimeout(() => resolve(null), 800));
         case "list_running_apps":
+          if (db.platform === "windows") {
+            // Windows の識別子は実行ファイル名 (小文字)。表示名がなければ exe 名
+            return [
+              { bundleId: "msedge.exe", name: "Microsoft Edge" },
+              { bundleId: "notepad.exe", name: MOCK_WINDOWS_TEXTS[db.systemLocale].notepad },
+              { bundleId: "slack.exe", name: "Slack" },
+              { bundleId: "windowsterminal.exe", name: MOCK_WINDOWS_TEXTS[db.systemLocale].terminal },
+              { bundleId: "code.exe", name: "Visual Studio Code" },
+              { bundleId: "keepass.exe", name: "keepass.exe" },
+            ];
+          }
           return [
             { bundleId: "com.apple.Safari", name: "Safari" },
             { bundleId: "com.apple.Notes", name: MOCK_SPEECH_TEXTS[db.systemLocale].notes },
@@ -536,7 +600,7 @@ export function installMock(params: URLSearchParams) {
           setUpdate({ state: "installing" });
           return new Promise(() => {});
         case "get_app_info":
-          return { version: "0.1.0", build: "42" };
+          return { version: "0.1.0", build: "42", platform: db.platform };
         default:
           // ウィンドウ API 等 (plugin:window|...) は何もしない
           return null;

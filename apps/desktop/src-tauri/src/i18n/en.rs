@@ -14,15 +14,21 @@ pub(super) fn text(m: &Msg) -> String {
         ErrRuntimeMissing => s("The runtime and model aren’t installed"),
         ErrVadFailed => s("Can’t start speech detection"),
         ErrInsertFailed => s("Couldn’t type the text"),
+        ErrInsertElevated => s("Can’t type into an app running as administrator"),
+        ErrGpuUnavailable => s("Can’t start transcription because the GPU isn’t available"),
 
         MenuLoading(Some(p)) => format!("Loading Model… {p}%"),
         MenuLoading(None) => s("Loading Model…"),
         MenuOffReady => s("Off · Model Loaded"),
         MenuListening => s("Listening"),
         MenuError => s("Error"),
+        // Windows の「設定」はアプリの設定 (MenuSettings) と紛れるため Windows を付ける
+        MenuOpenSystemSettings if cfg!(target_os = "windows") => s("Open Windows Settings…"),
         MenuOpenSystemSettings => s("Open System Settings…"),
         MenuSelectMicrophone => s("Choose Microphone…"),
         MenuRestartAsr => s("Restart Transcription Server"),
+        MenuAcceptCpu => s("Continue on CPU…"),
+        MenuProbeGpu => s("Detect GPU Again"),
         MenuOpenSetup => s("Open Setup…"),
         MenuTurnOn => s("Turn On Voice Input"),
         MenuTurnOff => s("Turn Off Voice Input"),
@@ -99,6 +105,8 @@ pub(super) fn text(m: &Msg) -> String {
             ModelText::Ja8bit => "Japanese (8-bit)",
             ModelText::Base17b8bit => "Standard (8-bit)",
             ModelText::JaBf16 => "Japanese (bf16)",
+            ModelText::JaGguf => "Japanese (8-bit)",
+            ModelText::BaseGguf => "Standard (8-bit)",
         }),
         ModelDescription(t) => s(match t {
             ModelText::Ja8bit => {
@@ -109,6 +117,10 @@ pub(super) fn text(m: &Msg) -> String {
             }
             ModelText::JaBf16 => {
                 "The original unquantized model. Uses more disk space and memory (about 8.5 GB)."
+            }
+            ModelText::JaGguf => "Fine-tuned for Japanese. Also recognizes English.",
+            ModelText::BaseGguf => {
+                "The original model without additional training. Best for English."
             }
         }),
 
@@ -132,6 +144,14 @@ pub(super) fn text(m: &Msg) -> String {
         }
         VerifyFailed => s("The transcription test failed. Try again."),
         VerifyAudioMissing => s("The test audio is missing. Reinstall the app."),
+        GpuConsentRequired => s("No GPU was found. To continue, agree to run on the CPU."),
+        LlamaServerMissing => {
+            s("The transcription engine (llama-server) is missing. Reinstall the app.")
+        }
+        LlamaServerBroken => s("The transcription engine couldn’t start. Reinstall the app."),
+        CpuRuntimeFailed => s(
+            "Couldn’t install the CPU version of the transcription engine. Check your network connection and try again.",
+        ),
         SetupSaveFailed => s("Couldn’t save the setup progress"),
 
         SettingsUnknownKey { key } => format!("Unknown setting: {key}"),
@@ -164,6 +184,7 @@ pub(super) fn text(m: &Msg) -> String {
             format!("Couldn’t register the shortcut “{shortcut}”. Choose a different key.")
         }
         LoginItemNeedsMacos13 => s("Opening at login requires macOS 13 or later"),
+        LoginItemNotApproved if cfg!(target_os = "windows") => s("mukuchi is turned off in Startup apps. Turn it on in Settings > Apps > Startup."),
         LoginItemNotApproved => s("mukuchi isn’t allowed as a login item. Turn it on in System Settings > General > Login Items."),
         LoginItemEnableFailed => s("Couldn’t set mukuchi to open at login"),
         LoginItemDisableFailed => s("Couldn’t stop mukuchi from opening at login"),

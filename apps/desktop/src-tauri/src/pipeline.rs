@@ -436,7 +436,11 @@ mod tests {
             eprintln!("speech source: smoke WAV");
             return Some((read_16k(&a), read_16k(&b)));
         }
+        say_pair()
+    }
 
+    #[cfg(target_os = "macos")]
+    fn say_pair() -> Option<(Vec<f32>, Vec<f32>)> {
         let Some((voice, texts)) = pick_say_voice() else {
             eprintln!("skip: smoke WAV がなく say の音声も見つからない");
             return None;
@@ -447,13 +451,23 @@ mod tests {
         Some((a, b))
     }
 
+    /// `say` は macOS にしかない
+    #[cfg(not(target_os = "macos"))]
+    fn say_pair() -> Option<(Vec<f32>, Vec<f32>)> {
+        eprintln!("skip: smoke WAV がない (say は macOS のみ)");
+        None
+    }
+
+    #[cfg(target_os = "macos")]
     const JA_TEXTS: [&str; 2] = ["今日の午後3時から定例ミーティングがあります。", "確定"];
+    #[cfg(target_os = "macos")]
     const EN_TEXTS: [&str; 2] = [
         "The regular meeting starts at three o'clock this afternoon.",
         "Okay, confirmed.",
     ];
 
     /// `say -v ?` の一覧から、テキストの言語と一致する音声を選ぶ。
+    #[cfg(target_os = "macos")]
     fn pick_say_voice() -> Option<(String, [&'static str; 2])> {
         let out = std::process::Command::new("say")
             .args(["-v", "?"])
@@ -497,6 +511,7 @@ mod tests {
             .and_then(|(n, l)| Some((n.clone(), texts_for(l)?)))
     }
 
+    #[cfg(target_os = "macos")]
     fn say_16k(voice: &str, text: &str, tag: &str) -> Vec<f32> {
         let tmp = std::env::temp_dir().join(format!(
             "mukuchi-test-{tag}-{}-{}.wav",

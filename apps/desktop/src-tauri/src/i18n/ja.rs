@@ -13,15 +13,21 @@ pub(super) fn text(m: &Msg) -> String {
         ErrRuntimeMissing => s("実行環境とモデルが導入されていません"),
         ErrVadFailed => s("発話検出を開始できません"),
         ErrInsertFailed => s("入力に失敗しました"),
+        ErrInsertElevated => s("管理者として実行中のアプリには入力できません"),
+        ErrGpuUnavailable => s("GPU を使えないため文字起こしを開始できません"),
 
         MenuLoading(Some(p)) => format!("モデルを読み込んでいます… {p}%"),
         MenuLoading(None) => s("モデルを読み込んでいます…"),
         MenuOffReady => s("オフ・モデル読み込み済み"),
         MenuListening => s("聞いています"),
         MenuError => s("エラー"),
+        // Windows の「設定」はアプリの設定 (MenuSettings) と紛れるため Windows を付ける
+        MenuOpenSystemSettings if cfg!(target_os = "windows") => s("Windows の設定を開く…"),
         MenuOpenSystemSettings => s("システム設定を開く…"),
         MenuSelectMicrophone => s("マイクを選択…"),
         MenuRestartAsr => s("文字起こしサーバーを再起動"),
+        MenuAcceptCpu => s("CPU で続ける…"),
+        MenuProbeGpu => s("GPU を再検出"),
         MenuOpenSetup => s("セットアップを開く…"),
         MenuTurnOn => s("音声入力をオン"),
         MenuTurnOff => s("音声入力をオフ"),
@@ -98,6 +104,8 @@ pub(super) fn text(m: &Msg) -> String {
             ModelText::Ja8bit => "日本語 (8bit)",
             ModelText::Base17b8bit => "標準 (8bit)",
             ModelText::JaBf16 => "日本語 (bf16)",
+            ModelText::JaGguf => "日本語 (8bit)",
+            ModelText::BaseGguf => "標準 (8bit)",
         }),
         ModelDescription(t) => s(match t {
             ModelText::Ja8bit => {
@@ -109,6 +117,8 @@ pub(super) fn text(m: &Msg) -> String {
             ModelText::JaBf16 => {
                 "量子化していない元のモデル。容量とメモリの使用量 (約8.5GB) が大きい"
             }
+            ModelText::JaGguf => "日本語向けに追加学習したモデル。英語も認識できる",
+            ModelText::BaseGguf => "追加学習をしていない元のモデル。英語に向く",
         }),
 
         FetchNetwork => {
@@ -133,6 +143,16 @@ pub(super) fn text(m: &Msg) -> String {
         }
         VerifyFailed => s("文字起こしの動作確認に失敗しました。再試行してください"),
         VerifyAudioMissing => s("検証用の音声が見つかりません。アプリを入れ直してください"),
+        GpuConsentRequired => {
+            s("GPU が見つかりません。CPU で続けるには、CPU での実行に同意してください")
+        }
+        LlamaServerMissing => s(
+            "文字起こしエンジン (llama-server) が見つかりません。アプリを入れ直してください",
+        ),
+        LlamaServerBroken => s("文字起こしエンジンを起動できません。アプリを入れ直してください"),
+        CpuRuntimeFailed => s(
+            "CPU 版の文字起こしエンジンを導入できません。ネットワーク接続を確認して再試行してください",
+        ),
         SetupSaveFailed => s("セットアップの状態を保存できません"),
 
         SettingsUnknownKey { key } => format!("未知の設定キー: {key}"),
@@ -163,6 +183,7 @@ pub(super) fn text(m: &Msg) -> String {
             "ショートカット「{shortcut}」を登録できませんでした。別のキーに変更してください"
         ),
         LoginItemNeedsMacos13 => s("ログイン時の起動には macOS 13 以降が必要です"),
+        LoginItemNotApproved if cfg!(target_os = "windows") => s("スタートアップで無効になっています。設定の「アプリ > スタートアップ」で mukuchi をオンにしてください"),
         LoginItemNotApproved => s("ログイン項目が許可されていません。システム設定の「一般 > ログイン項目」で mukuchi をオンにしてください"),
         LoginItemEnableFailed => s("ログイン時の起動を設定できません"),
         LoginItemDisableFailed => s("ログイン時の起動を解除できません"),

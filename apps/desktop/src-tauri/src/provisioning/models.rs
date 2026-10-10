@@ -14,7 +14,7 @@ use anyhow::{anyhow, bail, Context};
 use serde::Serialize;
 use tokio::sync::watch;
 
-use super::hf::{self, Cache, Downloader, HfModel};
+use super::hf::{self, Cache, Downloader, HfModel, ModelFormat};
 use super::{
     failed, lock, model_present, now_secs, Cancel, ModelRecord, Provisioned, RateMeter, StepError,
     EMIT_INTERVAL,
@@ -24,11 +24,40 @@ use crate::paths::DataPaths;
 
 // ---- カタログ ---------------------------------------------------------------
 
+/// 動かせる環境 (OS・CPU)。docs/architecture.md「ASR (Windows)」のモデルの実行環境
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    /// macOS (Apple Silicon)
+    MacosAarch64,
+    /// Windows 11 (x64)
+    WindowsX64,
+}
+
+impl Platform {
+    #[cfg(test)]
+    pub const ALL: [Platform; 2] = [Platform::MacosAarch64, Platform::WindowsX64];
+
+    /// ビルドした環境
+    pub const fn current() -> Self {
+        #[cfg(target_os = "windows")]
+        return Self::WindowsX64;
+        #[cfg(not(target_os = "windows"))]
+        return Self::MacosAarch64;
+    }
+}
+
+const MAC: &[Platform] = &[Platform::MacosAarch64];
+const WINDOWS: &[Platform] = &[Platform::WindowsX64];
+
 pub struct CatalogEntry {
     pub id: &'static str,
     pub repo: &'static str,
     /// commit で固定する (同じ名前で中身が変わらないように)
     pub revision: &'static str,
+    /// 実行方式 (取得するファイル・取得済みの判定もこれで決まる)
+    pub backend: ModelFormat,
+    /// 動かせる環境。今の環境が含まれない候補は一覧に出さず、選択・取得も拒む (カタログに無い id と同じ扱い)
+    pub supported_on: &'static [Platform],
     /// 表示名・説明 (表示言語ごとの辞書。i18n)
     pub text: ModelText,
     /// 追加学習で特化した言語 (元のモデルは None)
@@ -37,12 +66,14 @@ pub struct CatalogEntry {
     pub size_bytes: u64,
 }
 
-/// 根拠: spikes/asr-bench/MODEL_DECISION.md・MODEL_DECISION_I18N.md
-pub const CATALOG: [CatalogEntry; 3] = [
+/// 根拠: spikes/asr-bench/MODEL_DECISION.md・MODEL_DECISION_I18N.md (Mac)、WINDOWS_DECISION.md (Windows)
+pub const CATALOG: [CatalogEntry; 5] = [
     CatalogEntry {
         id: "ja-8bit",
         repo: "minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit",
         revision: "698eff963b084561b12a045c95bc4a208898337f",
+        backend: ModelFormat::Mlx,
+        supported_on: MAC,
         text: ModelText::Ja8bit,
         tuned_for: Some(Locale::Ja),
         size_bytes: 2_185_804_096,
@@ -52,6 +83,8 @@ pub const CATALOG: [CatalogEntry; 3] = [
         // 元: Qwen/Qwen3-ASR-1.7B@7278e1e70fe206f11671096ffdd38061171dd6e5 を全層8bit (mukuchi-asr-convert)
         repo: "minimalcorp/Qwen3-ASR-1.7B-MLX-8bit",
         revision: "fc85f8e586506b91c707de9561998928f3f5d842",
+        backend: ModelFormat::Mlx,
+        supported_on: MAC,
         text: ModelText::Base17b8bit,
         tuned_for: None,
         size_bytes: 2_174_372_462,
@@ -60,19 +93,48 @@ pub const CATALOG: [CatalogEntry; 3] = [
         id: "ja-bf16",
         repo: "neosophie/Qwen3-ASR-1.7B-JA",
         revision: "987bda160f2dabfa6757550bcff7cdda2ba0648c",
+        backend: ModelFormat::Mlx,
+        supported_on: MAC,
         text: ModelText::JaBf16,
         tuned_for: Some(Locale::Ja),
         size_bytes: 4_092_092_275,
     },
+    // Windows: LLM Q8_0 + mmproj Q8_0 の GGUF (llama.cpp の convert_hf_to_gguf.py で自前変換)
+    CatalogEntry {
+        id: "ja-gguf",
+        // 元: neosophie/Qwen3-ASR-1.7B-JA@987bda160f2dabfa6757550bcff7cdda2ba0648c
+        repo: "minimalcorp/Qwen3-ASR-1.7B-JA-GGUF",
+        revision: "7017bd6ff5156a4e9ad32997d2a9e38eedcb370e",
+        backend: ModelFormat::Gguf,
+        supported_on: WINDOWS,
+        text: ModelText::JaGguf,
+        tuned_for: Some(Locale::Ja),
+        // Qwen3-ASR-1.7B-JA-Q8_0.gguf 1,834,422,688 + mmproj-Qwen3-ASR-1.7B-JA-Q8_0.gguf 355,709,760
+        size_bytes: 2_190_132_448,
+    },
+    CatalogEntry {
+        id: "base-gguf",
+        // 元: Qwen/Qwen3-ASR-1.7B@7278e1e70fe206f11671096ffdd38061171dd6e5
+        repo: "minimalcorp/Qwen3-ASR-1.7B-GGUF",
+        revision: "bf5c671638392f5d963391fb56765771def5fdfe",
+        backend: ModelFormat::Gguf,
+        supported_on: WINDOWS,
+        text: ModelText::BaseGguf,
+        tuned_for: None,
+        // Qwen3-ASR-1.7B-Q8_0.gguf 2,165,035,008 + mmproj-Qwen3-ASR-1.7B-Q8_0.gguf 355,709,376
+        size_bytes: 2_520_744_384,
+    },
 ];
 
 /// 話す言語ごとの並び (docs/architecture.md「モデルの管理」の話す言語ごとの並び)。先頭が推奨。
-/// 言語ごとに明示し、規則 (tuned_for 等) から自動で決めない。
+/// 言語ごとに明示し、規則 (tuned_for 等) から自動で決めない。環境ごとにその環境で動かせる候補だけを並べる。
 /// どの言語の並びにも無いモデルは旧候補 (手元にある導入でのみ一覧に出す。`ModelManager::is_listed`)
-pub fn model_order(lang: Locale) -> &'static [&'static str] {
-    match lang {
-        Locale::Ja => &["ja-8bit", "base-1.7b-8bit"],
-        Locale::En => &["base-1.7b-8bit", "ja-8bit"],
+pub fn model_order(platform: Platform, lang: Locale) -> &'static [&'static str] {
+    match (platform, lang) {
+        (Platform::MacosAarch64, Locale::Ja) => &["ja-8bit", "base-1.7b-8bit"],
+        (Platform::MacosAarch64, Locale::En) => &["base-1.7b-8bit", "ja-8bit"],
+        (Platform::WindowsX64, Locale::Ja) => &["ja-gguf", "base-gguf"],
+        (Platform::WindowsX64, Locale::En) => &["base-gguf", "ja-gguf"],
     }
 }
 
@@ -89,7 +151,7 @@ impl ModelDef {
     fn from_entry(e: &CatalogEntry) -> Self {
         Self {
             id: e.id.into(),
-            hf: HfModel::hub(e.repo, e.revision),
+            hf: HfModel::hub(e.repo, e.revision, e.backend),
             text: e.text,
             tuned_for: e.tuned_for,
             size_bytes: e.size_bytes,
@@ -114,11 +176,29 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    /// 配布するカタログのうち、今の環境で動かせるもの
     pub fn distributed() -> Self {
-        let models = CATALOG.iter().map(ModelDef::from_entry).collect();
+        Self::for_platform(Platform::current())
+    }
+
+    /// その環境で動かせる候補だけのカタログ (動かせない候補は一覧・選択・取得の対象にしない)
+    pub fn for_platform(platform: Platform) -> Self {
+        let models = CATALOG
+            .iter()
+            .filter(|e| e.supported_on.contains(&platform))
+            .map(ModelDef::from_entry)
+            .collect();
         let orders = Locale::ALL
             .into_iter()
-            .map(|l| (l, model_order(l).iter().map(|s| s.to_string()).collect()))
+            .map(|l| {
+                (
+                    l,
+                    model_order(platform, l)
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                )
+            })
             .collect();
         Self::with_orders(models, orders)
     }
@@ -182,7 +262,7 @@ impl Catalog {
     }
 }
 
-/// 取得済み: 現在の revision の記録があり、スナップショットの config.json がある
+/// 取得済み: 現在の revision の記録があり、スナップショットのファイルがある (MLX は config.json、GGUF は2ファイル)
 fn is_installed(rec: &Provisioned, paths: &DataPaths, m: &ModelDef) -> bool {
     rec.has_model(&m.hf.version()) && model_present(paths, &m.hf)
 }
@@ -1008,6 +1088,7 @@ mod tests {
                     endpoint: server.endpoint.clone(),
                     repo: repo.into(),
                     revision: rev.into(),
+                    format: ModelFormat::Mlx,
                 },
                 text,
                 tuned_for,
@@ -1101,10 +1182,77 @@ mod tests {
     }
 
     #[test]
-    fn distributed_catalog_is_consistent() {
-        let c = Catalog::distributed();
+    fn distributed_catalog_is_for_current_platform() {
+        let ids = |c: &Catalog| c.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            ids(&Catalog::distributed()),
+            ids(&Catalog::for_platform(Platform::current()))
+        );
+    }
+
+    #[test]
+    fn windows_catalog_is_gguf_only() {
+        let c = Catalog::for_platform(Platform::WindowsX64);
+        let ids: Vec<&str> = c.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["ja-gguf", "base-gguf"]);
+        assert!(c.iter().all(|m| m.hf.format == ModelFormat::Gguf));
+        let order = |l| c.iter_for(l).map(|m| m.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(order(Locale::Ja), ["ja-gguf", "base-gguf"]);
+        assert_eq!(order(Locale::En), ["base-gguf", "ja-gguf"]);
+        assert_eq!(c.recommended(Locale::Ja).id, "ja-gguf");
+        assert_eq!(c.recommended(Locale::En).id, "base-gguf");
+        // Mac の候補は出さない・選べない
+        for id in ["ja-8bit", "base-1.7b-8bit", "ja-bf16"] {
+            assert!(c.get(id).is_none(), "{id}");
+        }
+        let tuned: Vec<Option<Locale>> = c.iter().map(|m| m.tuned_for).collect();
+        assert_eq!(tuned, vec![Some(Locale::Ja), None]);
+        // 容量は取得するファイル (LLM + mmproj) の合計 (tree API の値。it.rs の real_catalog_sizes で確かめる)
+        let size = |id| c.get(id).unwrap().size_bytes;
+        assert_eq!(size("ja-gguf"), 1_834_422_688 + 355_709_760);
+        assert_eq!(size("base-gguf"), 2_165_035_008 + 355_709_376);
+        for m in c.iter() {
+            assert_eq!(m.hf.revision.len(), 40, "{}: commit で固定する", m.id);
+            assert!(m.hf.revision.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(m.hf.endpoint.starts_with("https://"));
+            for l in Locale::ALL {
+                assert!(!Msg::ModelName(m.text).text(l).is_empty());
+                assert!(!Msg::ModelDescription(m.text).text(l).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn catalog_entries_are_consistent() {
+        // 形式と環境の組 (Mac = MLX のみ、Windows = GGUF のみ)
+        for e in CATALOG.iter() {
+            let expected = match e.backend {
+                ModelFormat::Mlx => MAC,
+                ModelFormat::Gguf => WINDOWS,
+            };
+            assert_eq!(e.supported_on, expected, "{}", e.id);
+        }
+        // id とリポジトリは全体で重ならない (削除・古い版の掃除が他のモデルのファイルを消すため)
+        let mut ids: Vec<&str> = CATALOG.iter().map(|e| e.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), CATALOG.len());
+        let mut repos: Vec<&str> = CATALOG.iter().map(|e| e.repo).collect();
+        repos.sort();
+        repos.dedup();
+        assert_eq!(repos.len(), CATALOG.len());
+        // 並びは各環境で動かせる候補だけ (Catalog::with_orders が確かめる)
+        for p in Platform::ALL {
+            Catalog::for_platform(p);
+        }
+    }
+
+    #[test]
+    fn mac_catalog_is_consistent() {
+        let c = Catalog::for_platform(Platform::MacosAarch64);
         let ids: Vec<&str> = c.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["ja-8bit", "base-1.7b-8bit", "ja-bf16"]);
+        assert!(c.iter().all(|m| m.hf.format == ModelFormat::Mlx));
         // 話す言語ごとの並び (docs/architecture.md「モデルの管理」)
         let order = |l| c.iter_for(l).map(|m| m.id.as_str()).collect::<Vec<_>>();
         assert_eq!(order(Locale::Ja), ["ja-8bit", "base-1.7b-8bit", "ja-bf16"]);

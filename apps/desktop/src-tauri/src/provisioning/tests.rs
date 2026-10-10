@@ -107,6 +107,7 @@ impl Fixture {
             endpoint: self.server.endpoint.clone(),
             repo: REPO.into(),
             revision: REVISION.into(),
+            format: hf::ModelFormat::Mlx,
         }
     }
 
@@ -176,6 +177,7 @@ fn full_run_writes_hf_layout_and_skips_on_rerun() {
         std::fs::read(snap.join("model.safetensors")).unwrap(),
         content(64 * 1024, 7)
     );
+    #[cfg(unix)]
     assert!(std::fs::read_link(snap.join("sub/vocab.txt"))
         .unwrap()
         .starts_with("../../../blobs"));
@@ -685,6 +687,7 @@ fn setup_fetches_the_selected_model() {
         endpoint: fx.server.endpoint.clone(),
         repo: "org/other".into(),
         revision: "2222222222222222222222222222222222222222".into(),
+        format: hf::ModelFormat::Mlx,
     };
     fx.server
         .state()

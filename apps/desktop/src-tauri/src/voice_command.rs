@@ -130,7 +130,7 @@ mod tests {
         );
         assert_eq!(
             match_command("送信!", &cmds).unwrap().modifiers,
-            vec![Modifier::Cmd]
+            vec![crate::settings::primary_modifier()]
         );
         assert!(match_command("これで確定します", &cmds).is_none());
         assert!(match_command("確定確定", &cmds).is_none());

@@ -74,6 +74,8 @@ jobs:
             '^rust-toolchain\.toml$'
             # CI の Prepare bundle resources で使う
             '^apps/desktop/scripts/(prepare-bundle-resources|fetch-uv|make-verify-wav)\.sh$'
+            # rust-windows の Prepare bundle resources で使う
+            '^apps/desktop/scripts/fetch-llama-server\.mjs$'
             # tauri.conf.json の bundle.resources (tauri-build が要求する)
             '^apps/desktop/THIRD_PARTY_NOTICES$'
             '^(LICENSE|NOTICE)$'
@@ -177,6 +179,51 @@ jobs:
         run: nix develop -c cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
       - name: cargo test
         run: nix develop -c cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+  # Windows 版 (docs/plans/windows-plan.md)。Windows に nix は無いため rustup (rust-toolchain.toml の版) で動かす。
+  # ビルド・lint・単体テストを確かめる (GPU・llama-server・実モデルを使う通しの確認は ignored のテストで手元の実機で行う)
+  rust-windows:
+    name: Rust Windows (fmt, clippy, test)
+    needs: changes
+    # changes が成功しなかったら (失敗・タイムアウト) 判定に頼らず動かす
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            apps/desktop/src-tauri/target
+            apps/desktop/.build-cache/llama-server
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/scripts/fetch-llama-server.mjs') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      # 引数なしの toolchain install は rust-toolchain.toml の版と components を入れる
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+      # tauri-build は bundle.resources (tauri.windows.conf.json で llama-server/ を足したもの) と frontendDist を要求する。
+      # verify.wav は日本語の SAPI 音声 (make-verify-wav.ps1) が runner に無いことがあり、テストでは使わないため空のファイルを置く。
+      # frontendDist は空のディレクトリでよい (macOS の job と同じ)
+      - name: Prepare bundle resources
+        run: |
+          node scripts/fetch-llama-server.mjs
+          New-Item -ItemType File -Force src-tauri/bundle-resources/verify.wav | Out-Null
+          New-Item -ItemType Directory -Force dist | Out-Null
+      - name: cargo fmt
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - name: cargo clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
   frontend:
     name: Frontend (lint, build, e2e)

@@ -24,8 +24,11 @@ use tauri::{AppHandle, Manager};
 
 use crate::core::Core;
 use crate::i18n::{self, Locale, Msg};
+#[cfg(target_os = "macos")]
 use crate::macos::status_icon::{self, IconPng, StatusIcon};
 use crate::permissions::{self, Pane};
+#[cfg(target_os = "windows")]
+use crate::platform::tray::{IconPng, StatusIcon};
 use crate::settings::PanelStyle;
 use crate::state::{AppStatus, ErrorAction, Phase};
 use crate::windows::{self, SettingsCategory};
@@ -155,6 +158,8 @@ fn recover_text(a: ErrorAction) -> Msg {
         ErrorAction::SelectMicrophone => Msg::MenuSelectMicrophone,
         ErrorAction::RestartAsr => Msg::MenuRestartAsr,
         ErrorAction::StartSetup => Msg::MenuOpenSetup,
+        ErrorAction::AcceptCpu => Msg::MenuAcceptCpu,
+        ErrorAction::ProbeGpu => Msg::MenuProbeGpu,
     }
 }
 
@@ -238,6 +243,7 @@ fn refresh(app: &AppHandle, state: &TrayState) -> Result<()> {
     let kind = IconKind::of(status.phase);
     let mut icon = state.icon.lock().unwrap_or_else(|p| p.into_inner());
     let current = *icon;
+    #[cfg(target_os = "macos")]
     let applied = tray
         .with_inner_tray_icon(move |t| {
             let (Some(item), Some(mtm)) = (t.ns_status_item(), objc2::MainThreadMarker::new())
@@ -254,6 +260,17 @@ fn refresh(app: &AppHandle, state: &TrayState) -> Result<()> {
             Some((kind, dark))
         })
         .context("アイコンを変更できません")?;
+    // 状態ごとの画像を set_icon する。タスクバーの明暗 (SystemUsesLightTheme) で塗る色が変わるため、
+    // 明暗の変化でも描き直す (テンプレート画像の仕組みが無いため、エラー以外の状態も対象)
+    #[cfg(target_os = "windows")]
+    let applied = {
+        let dark = crate::platform::tray::taskbar_is_dark();
+        if current != Some((kind, dark)) {
+            log::debug!("タスクトレイのアイコンを更新: {kind:?}");
+            crate::platform::tray::set_icon(&tray, kind.icon(dark), dark)?;
+        }
+        Some((kind, dark))
+    };
     *icon = applied;
     drop(icon);
 
@@ -300,6 +317,7 @@ pub fn popup_panel_menu(app: &AppHandle, x: f64, y: f64) -> Result<()> {
     .context("メインスレッドに送れません")
 }
 
+#[cfg(target_os = "macos")]
 fn popup_on_main(app: &AppHandle, x: f64, y: f64) -> Result<()> {
     let core = app.state::<Arc<Core>>().inner().clone();
     let model = current_model(&core, &core.state.status());
@@ -311,6 +329,52 @@ fn popup_on_main(app: &AppHandle, x: f64, y: f64) -> Result<()> {
     panel
         .popup_menu_at(&menu, tauri::LogicalPosition::new(x, y))
         .context("メニューを表示できません")
+}
+
+/// Windows: Tauri (muda) のポップアップは前面化 (SetForegroundWindow) してから出し、入力先のアプリの
+/// フォーカス・IME の変換中の文字が失われるため、前面化せずに出す (platform::panel::popup_menu)。
+/// 項目はメニューバーと同じ組み立て (`menu_entries`) から作り、選ばれた項目は `on_menu` で同じ処理にする
+#[cfg(target_os = "windows")]
+fn popup_on_main(app: &AppHandle, x: f64, y: f64) -> Result<()> {
+    use crate::platform::panel::{popup_menu, PopupItem};
+    let core = app.state::<Arc<Core>>().inner().clone();
+    let model = current_model(&core, &core.state.status());
+    let compact = core.settings.get().panel_style == PanelStyle::Compact;
+    let entries = menu_entries(&model, MenuVariant::Panel { compact });
+    let items: Vec<PopupItem> = entries
+        .iter()
+        .map(|e| match e {
+            Entry::Item { text, enabled, .. } => PopupItem::Item {
+                text: text.clone(),
+                enabled: *enabled,
+            },
+            Entry::Check { text, checked, .. } => PopupItem::Check {
+                text: text.clone(),
+                checked: *checked,
+            },
+            Entry::Separator => PopupItem::Separator,
+        })
+        .collect();
+    let panel = app
+        .get_webview_window(windows::PANEL)
+        .context("パネルがありません")?;
+    // パネルは枠なしのため、ウィンドウの左上がページの左上 (CSS px = 論理 px)
+    let origin = panel.inner_position().context("パネルの位置を取れません")?;
+    let scale = panel.scale_factor().context("パネルの倍率を取れません")?;
+    let at = (
+        origin.x + (x * scale).round() as i32,
+        origin.y + (y * scale).round() as i32,
+    );
+    let hwnd = panel.hwnd().context("パネルのウィンドウがありません")?;
+    let chosen = popup_menu(hwnd, &items, at)?;
+    let id = chosen.and_then(|i| match entries.get(i) {
+        Some(Entry::Item { id, .. } | Entry::Check { id, .. }) => Some(*id),
+        _ => None,
+    });
+    if let Some(id) = id {
+        on_menu(app, id);
+    }
+    Ok(())
 }
 
 /// メニューの1行。組み立て (`menu_entries`) をテストできるよう、Tauri のメニューとは分ける
@@ -381,16 +445,21 @@ fn menu_entries(m: &MenuModel, variant: MenuVariant) -> Vec<Entry> {
         id: ID_SETTINGS,
         text: t(Msg::MenuSettings),
         enabled: true,
-        accelerator: Some("CmdOrCtrl+,"),
+        accelerator: menu_accelerator("CmdOrCtrl+,"),
     });
     v.push(Entry::Separator);
     v.push(Entry::Item {
         id: ID_QUIT,
         text: t(Msg::MenuQuit),
         enabled: true,
-        accelerator: Some("CmdOrCtrl+Q"),
+        accelerator: menu_accelerator("CmdOrCtrl+Q"),
     });
     v
+}
+
+/// メニューに添えるキーの表示。Windows のタスクトレイのメニューにはキーの操作が無く、表示だけ出ると紛らわしいため付けない
+fn menu_accelerator(a: &'static str) -> Option<&'static str> {
+    cfg!(target_os = "macos").then_some(a)
 }
 
 fn build_menu(app: &AppHandle, m: &MenuModel, variant: MenuVariant) -> Result<Menu<tauri::Wry>> {
@@ -481,6 +550,13 @@ pub fn recover(app: &AppHandle, core: &Arc<Core>) {
                     log::error!("文字起こしサーバーを再起動できません: {e:#}");
                 }
             });
+            Ok(())
+        }
+        // 注意書きを読んでから同意させるため、その場で同意せず 設定 > 認識 を開く (パネルと同じ)
+        ErrorAction::AcceptCpu => windows::open_settings(app, Some(SettingsCategory::Recognition)),
+        ErrorAction::ProbeGpu => {
+            let core = core.clone();
+            tauri::async_runtime::spawn(async move { core.probe_gpu().await });
             Ok(())
         }
     };
@@ -657,6 +733,7 @@ mod tests {
     /// 全状態 × 明暗 × @1x/@2x で、メニューバーに出る画像に不透明な画素があること。
     /// `MUKUCHI_TRAY_ICON_DUMP=<dir>` を指定すると PNG に書き出す (目視確認用)
     #[test]
+    #[cfg(target_os = "macos")]
     fn every_icon_renders_visible_pixels() {
         use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRepPropertyKey};
         use objc2_foundation::NSDictionary;

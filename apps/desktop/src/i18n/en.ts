@@ -1,6 +1,7 @@
 /*
  * 英語の辞書。キーと引数は ja.ts (Messages) と同じでなければ型検査で落ちる。
- * 用語は macOS (Apple HIG) に合わせる: ボタン・メニュー項目は Title Case、説明文は文の形
+ * 用語は macOS (Apple HIG) に合わせる: ボタン・メニュー項目は Title Case、説明文は文の形。
+ * Windows の文言 (PerOs の windows) は Windows の用語 (Windows Settings・system tray・File Explorer) に合わせる
  */
 import type { ReactNode } from "react";
 import type { Messages } from "./ja";
@@ -14,7 +15,7 @@ export const en = {
   languageName: { ja: "Japanese", en: "English" },
 
   common: {
-    openSystemSettings: "Open System Settings",
+    openSystemSettings: { macos: "Open System Settings", windows: "Open Windows Settings" },
     cancel: "Cancel",
     close: "Close",
     delete: "Delete",
@@ -46,10 +47,12 @@ export const en = {
 
   errorActions: {
     open_accessibility: "Open System Settings",
-    open_microphone: "Open System Settings",
+    open_microphone: { macos: "Open System Settings", windows: "Open Windows Settings" },
     select_microphone: "Choose Microphone",
     restart_asr: "Restart",
     start_setup: "Open Setup",
+    accept_cpu: "Use CPU",
+    probe_gpu: "Detect Again",
   },
 
   inputMode: {
@@ -73,7 +76,10 @@ export const en = {
   shortcut: {
     label: "Shortcut",
     help: "Works in any app. It may not work if another app uses the same keys",
-    recordingGuide: "Press a key together with ⌃, ⌥, ⇧, or ⌘. Press esc to cancel, or ⌫ to remove the shortcut",
+    recordingGuide: {
+      macos: "Press a key together with ⌃, ⌥, ⇧, or ⌘. Press esc to cancel, or ⌫ to remove the shortcut",
+      windows: "Press a key together with Ctrl, Alt, Shift, or Win. Press Esc to cancel, or Backspace to remove the shortcut",
+    },
     unsupportedGuide: "This key can’t be used for a shortcut. Press a different key, or esc to cancel",
     pressKeys: "Press keys",
     none: "None",
@@ -94,6 +100,7 @@ export const en = {
       runtime_missing: "Model not installed",
       insert_failed: "Couldn’t type text",
       vad_failed: "Couldn’t start speech detection",
+      gpu_unavailable: "GPU not available",
     },
     idle: "Listening",
     speaking: "Hearing you",
@@ -104,13 +111,42 @@ export const en = {
     commandSent: (key: ReactNode): ReactNode => rich("Sent ", key),
   },
 
+  gpu: {
+    heading: "Device used for transcription",
+    help: "Transcription runs on the GPU. On a PC that can’t use a GPU, you can choose to run it on the CPU, which is slower",
+    detect: "Detect Again",
+    checking: "Checking the GPU…",
+    continueCpu: "Continue with CPU",
+    continueCpuEllipsis: "Continue with CPU…",
+    noneTitle: "No GPU found",
+    driverTitle: "The GPU can’t be used",
+    noneLead: "This PC doesn’t have a GPU that can be used for transcription.",
+    driverLead:
+      "A GPU was found, but it can’t be used for transcription. Its driver may be outdated or not installed correctly.",
+    cpuWarning:
+      "mukuchi can run on the CPU, but recognition takes 1–3 seconds or longer and is much less pleasant to use. We recommend using a PC with a GPU.",
+    driverHint: "Install the latest driver from your GPU maker’s website (NVIDIA, AMD, or Intel), then detect again.",
+    noneHint: "If this PC has a GPU that wasn’t found, update its driver and then detect again.",
+    consentTitle: "Continue with the CPU?",
+    cancel: "Cancel",
+    gpu: "GPU",
+    integrated: "Integrated GPU",
+    cpu: "CPU",
+    okSub: "Transcribes on the GPU",
+    integratedSub: "Transcribes on the integrated GPU. Recognition may be slow",
+    cpuSub: "Transcribes on the CPU because the GPU can’t be used. Recognition is slow",
+  },
+
   setup: {
     windowTitle: "mukuchi Setup",
     progress: (step: number, total: number) => `Step ${step} of ${total}`,
     welcome: {
       title: "Welcome to mukuchi",
       lead: "mukuchi lets you type just by speaking. Finish a few steps to get started.",
-      privacy: "Transcription happens on this Mac. Your voice never leaves it",
+      privacy: {
+        macos: "Transcription happens on this Mac. Your voice never leaves it",
+        windows: "Transcription happens on this PC. Your voice never leaves it",
+      },
       download: "Downloads the runtime and the speech model",
       downloadWithSize: (size: string) => `Downloads the runtime and the speech model (about ${size})`,
       duration: "Takes about 5–10 minutes",
@@ -124,14 +160,21 @@ export const en = {
     },
     permissions: {
       title: "Allow access",
-      lead: "Allow both to continue.",
+      lead: { macos: "Allow both to continue.", windows: "Allow microphone access to continue." },
       microphone: "Microphone",
       microphoneSub: "Used to hear what you say",
       accessibility: "Accessibility",
       accessibilityHelp: "Needed to send text and keystrokes to the cursor in other apps",
       accessibilitySub: "Used to type text",
-      guideMicNotDetermined: "Allow mukuchi to use the microphone. A confirmation dialog will appear.",
-      guideMicDenied: "Turn on mukuchi in System Settings > Microphone. This updates automatically once allowed.",
+      guideMicNotDetermined: {
+        macos: "Allow mukuchi to use the microphone. A confirmation dialog will appear.",
+        windows: "Allow mukuchi to use the microphone.",
+      },
+      guideMicDenied: {
+        macos: "Turn on mukuchi in System Settings > Microphone. This updates automatically once allowed.",
+        windows:
+          "In Windows Settings > Microphone, turn on “Microphone access” and “Let desktop apps access your microphone.” This updates automatically once allowed.",
+      },
       guideAccessibility: "Turn on mukuchi in System Settings. This updates automatically once allowed.",
     },
     download: {
@@ -143,7 +186,7 @@ export const en = {
       titleRunning: "Downloading the runtime and model",
       overall: "Overall",
       overallProgress: "Overall progress",
-      runtime: "Python runtime",
+      runtime: { macos: "Python runtime", windows: "Runtime (llama.cpp)" },
       modelFallback: "Speech model",
       verify: "Verification",
       runningRuntime: "Preparing…",
@@ -180,13 +223,29 @@ export const en = {
     },
     done: {
       title: "You’re all set",
-      lead: "mukuchi stays in the menu bar. Open settings from the menu bar icon.",
-      hintOneShot: (keys: ReactNode): ReactNode =>
-        rich("Press ", keys, " to listen once. You can also start from the panel or the menu bar icon"),
-      hintWithKeys: (keys: ReactNode): ReactNode =>
-        rich("Turn voice input on or off from the panel, the menu bar icon, or ", keys),
-      hintNoKeys: "Turn voice input on or off from the panel or the menu bar icon",
+      lead: {
+        macos: "mukuchi stays in the menu bar. Open settings from the menu bar icon.",
+        windows: "mukuchi stays in the system tray. Open settings from the system tray icon.",
+      },
+      hintOneShot: {
+        macos: (keys: ReactNode): ReactNode =>
+          rich("Press ", keys, " to listen once. You can also start from the panel or the menu bar icon"),
+        windows: (keys: ReactNode): ReactNode =>
+          rich("Press ", keys, " to listen once. You can also start from the panel or the system tray icon"),
+      },
+      hintWithKeys: {
+        macos: (keys: ReactNode): ReactNode =>
+          rich("Turn voice input on or off from the panel, the menu bar icon, or ", keys),
+        windows: (keys: ReactNode): ReactNode =>
+          rich("Turn voice input on or off from the panel, the system tray icon, or ", keys),
+      },
+      hintNoKeys: {
+        macos: "Turn voice input on or off from the panel or the menu bar icon",
+        windows: "Turn voice input on or off from the panel or the system tray icon",
+      },
       launchAtLogin: "Open at Login",
+      shortcutConflict: (keys: ReactNode): ReactNode =>
+        rich("The shortcut ", keys, " couldn’t be registered because another app uses it. Choose a different key"),
     },
   },
 
@@ -276,7 +335,11 @@ export const en = {
       missing: "Not Installed",
       missingSub: "The runtime and model aren’t installed",
       loaded: "Loaded",
-      loadedSub: "Running on the Apple silicon GPU",
+      loadedSub: { macos: "Running on the Apple silicon GPU", windows: "Running on the GPU" },
+      runningOn: (device: string) => `Running on ${device}`,
+      runningOnCpu: "Running on the CPU",
+      gpuUnavailable: "GPU Not Available",
+      gpuUnavailableSub: "Transcription hasn’t started because no usable GPU was found",
       speechLanguage: "Language you speak",
       speechLanguageHelp:
         "The language to transcribe. The recommended model and the default voice command phrases (if you haven’t changed them) follow this language",
@@ -319,14 +382,18 @@ export const en = {
       accessibility: "Accessibility",
       accessibilitySub: "Used to type text and send keystrokes",
       micNotDetermined: "Microphone access hasn’t been allowed yet. Allow it to use voice input.",
-      micDenied:
-        "mukuchi can’t hear you without access. Turn on mukuchi in System Settings > Privacy & Security > Microphone.",
+      micDenied: {
+        macos:
+          "mukuchi can’t hear you without access. Turn on mukuchi in System Settings > Privacy & Security > Microphone.",
+        windows:
+          "mukuchi can’t hear you without access. In Windows Settings > Privacy & security > Microphone, turn on “Microphone access” and “Let desktop apps access your microphone.”",
+      },
       accessibilityDenied:
         "mukuchi can transcribe but can’t type without access. Turn on mukuchi in System Settings > Privacy & Security > Accessibility.",
     },
 
     storage: {
-      runtime: "Python runtime",
+      runtime: { macos: "Python runtime", windows: "Runtime (llama.cpp)" },
       models: "Models",
       other: "Settings and logs",
       used: "used",
@@ -334,18 +401,26 @@ export const en = {
       deleteRuntime: "Delete Runtime and Models Only",
       deleteRuntimeSub: "Your settings are kept. You’ll need to run setup again to use mukuchi.",
       uninstall: "Uninstall Completely",
-      uninstallSub: "Deletes all data and the app itself.",
+      uninstallSub: {
+        macos: "Deletes all data and the app itself.",
+        windows: "Opens the uninstaller to delete all data and the app itself.",
+      },
       uninstallEllipsis: "Uninstall…",
       deleteRuntimeTitle: "Delete the runtime and models?",
       deleteRuntimeDescription:
         "Voice input will stop working. Settings and logs are kept. To use it again, download them in Setup.",
       uninstallTitle: "Uninstall mukuchi completely?",
       uninstallDone: "Uninstalled. mukuchi will quit.",
-      uninstallRunning: "Uninstalling… mukuchi will quit when finished.",
+      uninstallRunning: {
+        macos: "Uninstalling… mukuchi will quit when finished.",
+        windows: "Opening the uninstaller… mukuchi will quit.",
+      },
       uninstallConfirm: "The following will be deleted. You can’t undo this action.",
       uninstallButton: "Uninstall",
-      uninstallCount: (count: number) =>
-        `${count} ${items(count)} (also removes the login item and permissions)`,
+      uninstallCount: {
+        macos: (count: number) => `${count} ${items(count)} (also removes the login item and permissions)`,
+        windows: (count: number) => `${count} ${items(count)} (also stops mukuchi from opening at sign-in)`,
+      },
       uninstallTotal: (size: string) => `Total ${size}`,
     },
 
@@ -354,7 +429,7 @@ export const en = {
       license: "License",
       show: "Show",
       logs: "Logs",
-      openInFinder: "Show in Finder",
+      showInFolder: { macos: "Show in Finder", windows: "Show in File Explorer" },
       updates: "Updates",
       install: "Restart to Update",
       check: "Check for Updates",

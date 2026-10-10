@@ -7,6 +7,7 @@ import {
   latestStatusOnly,
   subscribeWithInitial,
   type AppStatus,
+  type GpuStatus,
   type ModelInfo,
   type PanelAnchor,
   type Permissions,
@@ -181,6 +182,52 @@ export function useModels(): { models: ModelInfo[] | null; error: string | null 
     [],
   );
   return { models, error };
+}
+
+/**
+ * GPU の判定結果 (Windows のみ。docs/architecture.md「GPU の判定と CPU 実行の同意」)。null は取得前。
+ * enabled が false (GPU の判定がない OS) の間は取得も購読もしない。
+ * probe は再検出 (probe_gpu) で、応答の判定結果をそのまま反映する (gpu-status-changed も届く)
+ */
+export function useGpuStatus(enabled: boolean): {
+  status: GpuStatus | null;
+  error: string | null;
+  probing: boolean;
+  probe: () => void;
+} {
+  const [status, setStatus] = useState<GpuStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [probing, setProbing] = useState(false);
+  useEffect(() => {
+    if (!enabled) return;
+    return subscribeWithInitial(
+      "gpu-status-changed",
+      () =>
+        commands.getGpuStatus().catch((e: unknown) => {
+          setError(errorMessage(e));
+          throw e;
+        }),
+      (s) => {
+        setStatus(s);
+        setError(null);
+      },
+    );
+  }, [enabled]);
+  const probe = useCallback(() => {
+    setProbing(true);
+    setError(null);
+    commands
+      .probeGpu()
+      .then(setStatus, (e: unknown) => setError(errorMessage(e)))
+      .finally(() => setProbing(false));
+  }, []);
+  return { status, error, probing, probe };
+}
+
+/** CPU 実行の同意が要るか: GPU が使えず (none・driver_missing)、まだ同意していない */
+export function needsCpuConsent(gpu: GpuStatus | null, settings: Settings | null): boolean {
+  if (!gpu || !settings) return false;
+  return (gpu.kind === "none" || gpu.kind === "driver_missing") && !settings.cpuInferenceAccepted;
 }
 
 /** エラーの表示用メッセージ (Rust の表示用メッセージ) */

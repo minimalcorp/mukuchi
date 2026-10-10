@@ -4,6 +4,7 @@
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { commands, subscribeWithInitial, type Locale } from "@/lib/ipc";
+import { pickOs, usePlatform, type PerOs } from "@/lib/platform";
 import { I18nContext, MESSAGES } from "./context";
 
 /** get_locale を取れなかった時・未知の値の時。Rust の解決で対応表に当たらない時の既定 (en) に合わせる */
@@ -32,7 +33,12 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (locale) document.documentElement.lang = locale;
   }, [locale]);
-  const value = useMemo(() => (locale ? { locale, t: MESSAGES[locale] } : null), [locale]);
+  const platform = usePlatform();
+  const value = useMemo(
+    () =>
+      locale ? { locale, t: MESSAGES[locale], platform, os: <T,>(v: PerOs<T>): T => pickOs(v, platform) } : null,
+    [locale, platform],
+  );
   if (!value) return null;
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }

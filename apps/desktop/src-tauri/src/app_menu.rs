@@ -19,6 +19,11 @@ use crate::i18n::{self, Locale, Msg};
 
 /// 今の表示言語で組み直して設定する。どのスレッドからでも呼べる (項目の作成はメインスレッドで行われる)
 pub fn refresh(app: &AppHandle) {
+    // Windows にアプリのメニューバーは無い (set_menu は全ウィンドウにメニューバーを付けてしまう)。
+    // 編集のキー (Ctrl+C・Ctrl+V 等) は WebView2 がメニュー無しで扱う
+    if cfg!(not(target_os = "macos")) {
+        return;
+    }
     let result = build(app, i18n::current())
         .and_then(|m| app.set_menu(m).context("アプリのメニューを設定できません"));
     if let Err(e) = result {

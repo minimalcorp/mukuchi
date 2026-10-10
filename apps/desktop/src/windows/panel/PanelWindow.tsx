@@ -11,6 +11,7 @@ import {
   CircleAlert,
   CircleCheck,
   CornerDownLeft,
+  Gpu,
   LoaderCircle,
   Mic,
   MicOff,
@@ -339,6 +340,7 @@ const ERROR_PILL: Record<AppError["code"], { icon: LucideIcon; iconClass: string
   runtime_missing: { icon: PackageX, iconClass: "text-amber-500" },
   insert_failed: { icon: CircleAlert, iconClass: "text-red-500" },
   vad_failed: { icon: CircleAlert, iconClass: "text-red-500" },
+  gpu_unavailable: { icon: Gpu, iconClass: "text-red-500" },
 };
 
 // Rust が新しいエラーコードを足した場合 (フロントが未対応) は Rust の表示用メッセージをそのまま出す
@@ -359,11 +361,11 @@ function ErrorPill({ error }: { error: AppError }) {
 }
 
 /**
- * 復旧操作 (メニューバーの復旧項目と同じ)。デザイン 06 のピルは文言のみだが、パネルからも直接復旧できるようにした。
+ * 復旧操作 (メニューバー・タスクトレイの復旧項目と同じ)。デザイン 06 のピルは文言のみだが、パネルからも直接復旧できるようにした。
  */
 function ErrorActionButton({ error }: { error: AppError }) {
-  const { t } = useI18n();
-  const action = errorActionView(error.action, t);
+  const { t, platform } = useI18n();
+  const action = errorActionView(error.action, t, platform);
   if (!action) return null;
   const Icon = action.icon;
   return (

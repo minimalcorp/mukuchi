@@ -6,9 +6,14 @@
 //! - 失敗: `ProvisioningStatus.error` に表示用の文言を入れる。再試行 (start) は一時停止からの再開と同じ
 //! - 完了した段階は `provisioned.json` に版と時刻を記録し、版が変わった段階 (とそれ以降の verify) だけやり直す
 //! - model は選択中のモデル (models.rs) を取る。モデルごとの取得・削除・選択は models.rs
+//! - runtime は OS ごと: Mac は uv で Python と asr-server の依存を入れる (runtime.rs)、Windows は同梱の
+//!   llama-server を確かめ、CPU 実行に同意していれば CPU 版を取得する (llama_runtime.rs)
 
 pub mod hf;
+#[cfg(target_os = "windows")]
+pub mod llama_runtime;
 pub mod models;
+#[cfg(not(target_os = "windows"))]
 pub mod runtime;
 #[cfg(test)]
 mod test_server;
@@ -27,7 +32,6 @@ use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use crate::asr::{AsrClient, HttpAsrClient};
 use crate::asr_process::{AsrProcess, LaunchSpec};
 use crate::i18n::{Locale, Msg};
 use crate::paths::DataPaths;
@@ -189,6 +193,11 @@ impl Cancel {
 // ---- 段階の実装 (テストで差し替える) ---------------------------------------
 
 pub trait RuntimeStep: Send + Sync {
+    /// 段階を始める前の確認。失敗したら何も取得せずに止める (Windows: GPU が使えず CPU 実行への同意も無い時に、
+    /// モデル・CPU 版の取得を始めないため)
+    fn precheck(&self) -> BoxFuture<Result<(), StepError>> {
+        Box::pin(async { Ok(()) })
+    }
     /// 同梱物から求めた版。求められない (開発で同梱物がない等) 場合は None
     fn version(&self) -> Option<String>;
     /// 導入先が残っているか (記録だけあって消されていないか)
@@ -244,7 +253,7 @@ async fn verify_server(
         Err(_) if cancel.is_cancelled() => return Err(StepError::Paused),
         Err(e) => return Err(failed(ERROR, e)),
     };
-    let client = HttpAsrClient::new(url).map_err(|e| failed(ERROR, e))?;
+    let client = crate::asr::connect(url).map_err(|e| failed(ERROR, e))?;
     let t = tokio::select! {
         // 検証用の音声は日本語 (「確認します。」) のため、話す言語によらず日本語として送る
         r = client.transcribe(wav, Locale::Ja, None) => r.map_err(|e| failed(ERROR, e))?,
@@ -680,6 +689,33 @@ impl Provisioner {
         self.suspended.load(Ordering::SeqCst)
     }
 
+    /// 導入済みかを今の状態で求め直す (実行中・削除中は何もしない)。Windows で、起動時の GPU の判定の後に
+    /// 使う llama-server (同梱の Vulkan 版か CPU 版) が決まり、CPU 版が無ければ runtime をやり直すため。
+    /// 変わった時は状態を送る
+    #[cfg(target_os = "windows")]
+    pub fn refresh(&self) {
+        let running = lock(&self.running);
+        if running.as_ref().is_some_and(|r| !*r.finished.borrow()) || self.is_suspended() {
+            return;
+        }
+        let rec = Provisioned::load(&self.paths.provisioned());
+        let selected = (self.model)();
+        let p = plan(
+            &rec,
+            self.runtime.version().as_deref(),
+            self.runtime.is_present(),
+            &selected.version(),
+            model_present(&self.paths, &selected),
+        );
+        let was = self.done.swap(p.is_empty(), Ordering::SeqCst);
+        if was != p.is_empty() {
+            log::info!("導入済みの判定を求め直した: {p:?}");
+            let next = ProvisioningStatus::new([!p.runtime, !p.model, !p.verify]);
+            self.shared.update_now(|s| *s = next);
+        }
+        drop(running);
+    }
+
     /// 実行中 (uv・ダウンロード・動作確認) か。アップデートのインストールを拒む判定に使う
     pub fn is_running(&self) -> bool {
         lock(&self.running)
@@ -774,6 +810,10 @@ impl Provisioner {
 
     async fn run_steps(self: &Arc<Self>, cancel: &Cancel) -> Result<(), StepError> {
         let sh = &self.shared;
+        tokio::select! {
+            r = self.runtime.precheck() => r?,
+            _ = cancel.cancelled() => return Err(StepError::Paused),
+        }
         let path = self.paths.provisioned();
         let rec = Provisioned::load(&path);
         let runtime_version = self.runtime.version();
@@ -922,11 +962,9 @@ impl Provisioner {
 
 pub(crate) const SAVE_ERROR: Msg = Msg::SetupSaveFailed;
 
+/// 取得済みのモデルのファイルがあるか (形式ごと。hf.rs の HfModel::is_present)
 pub fn model_present(paths: &DataPaths, model: &HfModel) -> bool {
-    model
-        .snapshot_dir(&paths.models())
-        .join("config.json")
-        .is_file()
+    model.is_present(&paths.models())
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

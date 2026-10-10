@@ -110,9 +110,15 @@ test("setup: 動作テストの案内は入力モードで変わる", { tag: I18
 
 test("setup: 完了画面のオン／オフの案内にショートカットを出す", { tag: I18N }, async ({ page, m }) => {
   await open(page, "window=setup&mock=done", SETUP);
-  await expect(page.getByTestId("done-toggle-hint")).toHaveText(textOf(m.setup.done.hintWithKeys("⌥Space")));
+  await expect(page.getByTestId("done-toggle-hint")).toHaveText(textOf(m.setup.done.hintWithKeys.macos("⌥Space")));
   await open(page, "window=setup&mock=done-oneshot", SETUP);
-  await expect(page.getByTestId("done-toggle-hint")).toHaveText(textOf(m.setup.done.hintOneShot("⌥Space")));
+  await expect(page.getByTestId("done-toggle-hint")).toHaveText(textOf(m.setup.done.hintOneShot.macos("⌥Space")));
+});
+
+test("setup: Mac の完了画面はショートカットの登録の失敗を案内しない (衝突を検出できないため)", async ({ page, m }) => {
+  await open(page, "window=setup&mock=done-conflict", SETUP);
+  await expect(page.getByTestId("done-toggle-hint")).toHaveText(textOf(m.setup.done.hintWithKeys.macos("⌥Space")));
+  await expect(page.getByTestId("done-shortcut-conflict")).toHaveCount(0);
 });
 
 // ---------- ショートカットの記録 ----------
@@ -132,7 +138,7 @@ test("shortcut: 記録中は登録を一時解除し、戻してから保存す�
   await page.keyboard.up("Shift");
   await page.keyboard.press("KeyK");
   await expect(field).toHaveAttribute("data-recording", "true");
-  await expect(page.getByText(m.shortcut.recordingGuide)).toBeVisible();
+  await expect(page.getByText(m.shortcut.recordingGuide.macos)).toBeVisible();
 
   // Rust が受け付けないキー (JIS の ¥) は保存せず案内を出す
   // Playwright の US 配列に IntlYen がないため、keydown を直接送る

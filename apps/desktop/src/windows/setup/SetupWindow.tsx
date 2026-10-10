@@ -1,6 +1,8 @@
 /*
  * 初回セットアップ (デザイン 04、560×440)。
  * ようこそ → 権限 → 実行環境とモデルのダウンロード → 入力モード → 動作テスト → 完了 の 6 ステップ。
+ * Windows は GPU の判定結果をようこその間に取り、GPU を使えない時だけダウンロードの前に CPU 実行の同意の画面を差し込む
+ * (docs/architecture.md「GPU の判定と CPU 実行の同意」。GPU を使える時は画面を増やさない)。
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
@@ -18,11 +20,14 @@ import {
   Mic,
   Pause,
   Play,
+  RefreshCw,
   RotateCw,
   ShieldCheck,
+  TriangleAlert,
 } from "lucide-react";
 import { AppLogo } from "@/components/app/app-logo";
-import { TrafficLights, WindowFrame } from "@/components/app/window-frame";
+import { GpuNotice } from "@/components/app/gpu-notice";
+import { TrafficLights, TrafficLightsBalance, WindowFrame } from "@/components/app/window-frame";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -34,17 +39,20 @@ import { useAudioLevel } from "@/lib/audio-level";
 import { useLevelEnvelope } from "@/lib/level-envelope";
 import { devOverrides } from "@/lib/env";
 import { formatBytes, formatBytesPair, formatEta } from "@/lib/format";
-import { useI18n, type Messages } from "@/i18n/context";
+import { useI18n, type I18n, type Messages } from "@/i18n/context";
 import { isLocale, LOCALE_AUTONYMS, LOCALES } from "@/i18n/locales";
 import { SAMPLE_PHRASES } from "@/i18n/speech";
 import {
   errorMessage,
   isPermissionsGranted,
+  needsCpuConsent,
   useAppStatus,
+  useGpuStatus,
   useModels,
   usePermissions,
   useProvisioning,
   useSettings,
+  useShortcutStatus,
 } from "@/lib/hooks";
 import { LaunchAtLoginError } from "@/components/app/launch-at-login-error";
 import {
@@ -57,6 +65,7 @@ import {
   type Permissions,
   type ProvisioningStatus,
 } from "@/lib/ipc";
+import { useOsFeatures } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 
 const STEPS = 6;
@@ -81,6 +90,9 @@ export function SetupWindow() {
   }
   const next = () => setStep((s) => Math.min(STEPS, s + 1));
   const back = () => setStep((s) => Math.max(1, s - 1));
+  // GPU の判定結果はウィンドウを開いた時 (ようこその間) から取っておき、ダウンロードの前に待たせないようにする
+  const { gpuCheck } = useOsFeatures();
+  const gpu = useGpuStatus(gpuCheck);
 
   return (
     <WindowFrame width={560} height={440}>
@@ -95,7 +107,7 @@ export function SetupWindow() {
             {t.setup.windowTitle}
           </span>
           <span className="flex-1" />
-          <span className="w-[52px]" />
+          <TrafficLightsBalance />
         </header>
         <div className="flex gap-1 px-8 pt-4" aria-label={t.setup.progress(step, STEPS)}>
           {Array.from({ length: STEPS }, (_, i) => (
@@ -107,7 +119,12 @@ export function SetupWindow() {
         </div>
         {step === 1 && <WelcomeStep provisioning={provisioning} models={models} onNext={next} />}
         {step === 2 && <PermissionsStep onBack={back} onNext={next} />}
-        {step === 3 && <DownloadStep provisioning={provisioning} models={models} onNext={next} />}
+        {step === 3 &&
+          (gpuCheck ? (
+            <GpuGate gpu={gpu} provisioning={provisioning} models={models} onBack={back} onNext={next} />
+          ) : (
+            <DownloadStep provisioning={provisioning} models={models} onNext={next} />
+          ))}
         {step === 4 && <InputModeStep onBack={back} onNext={next} />}
         {step === 5 && <TestStep onBack={back} onNext={next} />}
         {step === 6 && <DoneStep provisioning={provisioning} />}
@@ -182,7 +199,7 @@ function WelcomeStep({
   models: ModelInfo[] | null;
   onNext: () => void;
 }) {
-  const { locale, t } = useI18n();
+  const { locale, t, os } = useI18n();
   const w = t.setup.welcome;
   const [settings, update, errors] = useSettings();
   // 容量は取得するモデルの固定値 (list_models の sizeBytes)。ファイル一覧の取得前でも出せる。取れない場合は容量を出さない
@@ -202,7 +219,7 @@ function WelcomeStep({
         <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-sm text-fg-muted">
           <li className="flex items-start gap-2">
             <ShieldCheck size={16} className="mt-0.5 flex-none" aria-hidden />
-            {w.privacy}
+            {os(w.privacy)}
           </li>
           <li data-testid="welcome-download" className="flex items-start gap-2">
             <Download size={16} className="mt-0.5 flex-none" aria-hidden />
@@ -299,8 +316,10 @@ function PermissionBadge({ granted }: { granted: boolean }) {
 }
 
 function PermissionsStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }) {
-  const { t } = useI18n();
+  const { t, os } = useI18n();
   const ps = t.setup.permissions;
+  // Windows にアクセシビリティの権限はない (マイクの行だけ出す)
+  const { accessibility } = useOsFeatures();
   // システム設定での変更は通知されないことがあるため 1 秒ごとに再取得する
   const [perms, setPerms] = usePermissions(1000);
   const granted = isPermissionsGranted(perms);
@@ -308,9 +327,9 @@ function PermissionsStep({ onBack, onNext }: { onBack: () => void; onNext: () =>
     <>
       <StepBody>
         <Title>{ps.title}</Title>
-        <p className="m-0 text-sm leading-[1.6] text-fg-muted">{ps.lead}</p>
+        <p className="m-0 text-sm leading-[1.6] text-fg-muted">{os(ps.lead)}</p>
         <div className="flex flex-col rounded-lg border border-line-default">
-          <div className="flex items-center gap-3 border-b border-line-subtle px-4 py-3.5">
+          <div className={cn("flex items-center gap-3 px-4 py-3.5", accessibility && "border-b border-line-subtle")}>
             <Mic size={20} className="flex-none text-fg-muted" aria-hidden />
             <div className="flex flex-1 flex-col gap-0.5">
               <span className="text-md leading-[1.4] font-medium">{ps.microphone}</span>
@@ -318,17 +337,19 @@ function PermissionsStep({ onBack, onNext }: { onBack: () => void; onNext: () =>
             </div>
             <PermissionBadge granted={perms?.microphone === "granted"} />
           </div>
-          <div className="flex items-center gap-3 px-4 py-3.5">
-            <Keyboard size={20} className="flex-none text-fg-muted" aria-hidden />
-            <div className="flex flex-1 flex-col gap-0.5">
-              <span className="flex items-center gap-1.5 text-md leading-[1.4] font-medium">
-                {ps.accessibility}
-                <HelpTip content={ps.accessibilityHelp} />
-              </span>
-              <span className="text-xs leading-[1.4] text-fg-muted">{ps.accessibilitySub}</span>
+          {accessibility ? (
+            <div className="flex items-center gap-3 px-4 py-3.5">
+              <Keyboard size={20} className="flex-none text-fg-muted" aria-hidden />
+              <div className="flex flex-1 flex-col gap-0.5">
+                <span className="flex items-center gap-1.5 text-md leading-[1.4] font-medium">
+                  {ps.accessibility}
+                  <HelpTip content={ps.accessibilityHelp} />
+                </span>
+                <span className="text-xs leading-[1.4] text-fg-muted">{ps.accessibilitySub}</span>
+              </div>
+              <PermissionBadge granted={!!perms?.accessibility} />
             </div>
-            <PermissionBadge granted={!!perms?.accessibility} />
-          </div>
+          ) : null}
         </div>
         {perms && !granted ? <PermissionGuide perms={perms} onChange={setPerms} /> : null}
       </StepBody>
@@ -346,29 +367,29 @@ function PermissionsStep({ onBack, onNext }: { onBack: () => void; onNext: () =>
 
 /** 未許可の権限への案内。先に未許可のマイク、次にアクセシビリティの順で 1 つずつ出す */
 function PermissionGuide({ perms, onChange }: { perms: Permissions; onChange: (p: Permissions) => void }) {
-  const { t } = useI18n();
+  const { t, os } = useI18n();
   const ps = t.setup.permissions;
   let text: string;
   let button: ReactNode;
   if (perms.microphone === "not_determined") {
-    text = ps.guideMicNotDetermined;
+    text = os(ps.guideMicNotDetermined);
     button = (
       <Button size="sm" onClick={() => commands.requestMicrophone().then(onChange, () => {})}>
         {t.common.allow}
       </Button>
     );
   } else if (perms.microphone === "denied") {
-    text = ps.guideMicDenied;
+    text = os(ps.guideMicDenied);
     button = (
       <Button size="sm" iconRight={ExternalLink} onClick={() => runCommand(commands.openSystemSettings("microphone"))}>
-        {t.common.openSystemSettings}
+        {os(t.common.openSystemSettings)}
       </Button>
     );
   } else {
     text = ps.guideAccessibility;
     button = (
       <Button size="sm" iconRight={ExternalLink} onClick={() => runCommand(commands.openSystemSettings("accessibility"))}>
-        {t.common.openSystemSettings}
+        {os(t.common.openSystemSettings)}
       </Button>
     );
   }
@@ -385,9 +406,9 @@ function PermissionGuide({ perms, onChange }: { perms: Permissions; onChange: (p
 type ProvisioningItem = ProvisioningStatus["items"][number];
 
 /** 項目の名前。model は取得するモデルの表示名 (Rust の ModelInfo.name。一覧の取得前は汎用の名前) */
-function itemLabel(id: ProvisioningItem["id"], model: ModelInfo | null, t: Messages): string {
+function itemLabel(id: ProvisioningItem["id"], model: ModelInfo | null, { t, os }: Pick<I18n, "t" | "os">): string {
   const d = t.setup.download;
-  if (id === "runtime") return d.runtime;
+  if (id === "runtime") return os(d.runtime);
   if (id === "model") return model?.name ?? d.modelFallback;
   return d.verify;
 }
@@ -432,7 +453,8 @@ function DownloadStep({
   models: ModelInfo[] | null;
   onNext: () => void;
 }) {
-  const { locale, t } = useI18n();
+  const i18n = useI18n();
+  const { locale, t } = i18n;
   const d = t.setup.download;
   const model = setupModel(models);
   const started = useRef(false);
@@ -453,14 +475,7 @@ function DownloadStep({
     }
   }, [p?.stage]);
 
-  if (!p) {
-    return (
-      <StepBody dense>
-        <Title>{d.titlePending}</Title>
-        <p className="m-0 text-sm text-fg-muted">{d.checkingStatus}</p>
-      </StepBody>
-    );
-  }
+  if (!p) return <DownloadPending />;
 
   const done = p.stage === "done";
   const paused = p.stage === "paused";
@@ -528,7 +543,7 @@ function DownloadStep({
                   )}
                   aria-hidden
                 />
-                <span className="flex-1">{itemLabel(item.id, model, t)}</span>
+                <span className="flex-1">{itemLabel(item.id, model, i18n)}</span>
                 <span className={cn(item.state !== "pending" && "tabular text-fg-muted")}>
                   {itemRight(item, p.stage, locale, t)}
                 </span>
@@ -583,6 +598,107 @@ function DownloadStep({
         <Button variant="primary" disabled={!done} onClick={onNext}>
           {t.common.next}
         </Button>
+      </StepFooter>
+    </>
+  );
+}
+
+/** 導入の状態 (・GPU の判定結果) を取得するまでの表示 */
+function DownloadPending({ error, onRetry }: { error?: string | null; onRetry?: () => void }) {
+  const { t } = useI18n();
+  const d = t.setup.download;
+  return (
+    <StepBody dense>
+      <Title>{d.titlePending}</Title>
+      <p className="m-0 text-sm text-fg-muted">{d.checkingStatus}</p>
+      {error ? (
+        <div role="alert" className="flex items-center gap-2.5 text-xs leading-[1.5] text-fg-danger">
+          <span className="flex-1">{error}</span>
+          {onRetry ? (
+            <Button size="sm" iconLeft={RotateCw} onClick={onRetry}>
+              {t.common.retry}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+    </StepBody>
+  );
+}
+
+/**
+ * ダウンロードの前に GPU を確かめる (GPU の判定がある OS だけ)。判定結果が届くまでは導入の状態の確認と同じ表示にし、
+ * GPU を使えず CPU 実行に同意していなければ同意の画面を出す。同意するまでダウンロードを始めない (DownloadStep を出さない)
+ */
+function GpuGate({
+  gpu,
+  provisioning,
+  models,
+  onBack,
+  onNext,
+}: {
+  gpu: ReturnType<typeof useGpuStatus>;
+  provisioning: ProvisioningStatus | null;
+  models: ModelInfo[] | null;
+  onBack: () => void;
+  onNext: () => void;
+}) {
+  const [settings, update, errors] = useSettings();
+  if (!gpu.status || !settings) return <DownloadPending error={gpu.error} onRetry={gpu.probe} />;
+  if (needsCpuConsent(gpu.status, settings)) {
+    return (
+      <GpuStep
+        gpu={gpu}
+        error={gpu.error ?? errors.cpuInferenceAccepted}
+        onAccept={() => update({ cpuInferenceAccepted: true })}
+        onBack={onBack}
+      />
+    );
+  }
+  return <DownloadStep provisioning={provisioning} models={models} onNext={onNext} />;
+}
+
+/** GPU を使えない時の CPU 実行の同意 (none: GPU なし、driver_missing: GPU はあるが使えない) */
+function GpuStep({
+  gpu,
+  error,
+  onAccept,
+  onBack,
+}: {
+  gpu: ReturnType<typeof useGpuStatus>;
+  error: string | null | undefined;
+  onAccept: () => void;
+  onBack: () => void;
+}) {
+  const { t } = useI18n();
+  const g = t.gpu;
+  const status = gpu.status;
+  if (!status) return null;
+  const none = status.kind === "none";
+  return (
+    <>
+      <StepBody dense>
+        <Title>{none ? g.noneTitle : g.driverTitle}</Title>
+        <p className="m-0 text-sm leading-[1.6] text-fg-muted">{none ? g.noneLead : g.driverLead}</p>
+        <GpuNotice
+          gpu={status}
+          action={
+            <Button size="sm" iconLeft={RefreshCw} loading={gpu.probing} onClick={gpu.probe}>
+              {g.detect}
+            </Button>
+          }
+        />
+        {error ? (
+          <p role="alert" className="m-0 text-xs leading-[1.5] text-fg-danger">
+            {error}
+          </p>
+        ) : null}
+      </StepBody>
+      <StepFooter align="between">
+        <Button variant="ghost" onClick={onBack}>
+          {t.common.back}
+        </Button>
+        {/* GPU のある PC をすすめるため、CPU で続ける操作は主ボタンの色にしない */}
+        <Button onClick={onAccept}>{g.continueCpu}</Button>
       </StepFooter>
     </>
   );
@@ -767,10 +883,19 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
 /* ---------- 6. 完了 ---------- */
 
 function DoneStep({ provisioning }: { provisioning: ProvisioningStatus | null }) {
-  const { t } = useI18n();
+  const { t, os } = useI18n();
   const ds = t.setup.done;
   const [settings, update, settingsErrors] = useSettings();
   const [completeError, setCompleteError] = useState<string | null>(null);
+  const { shortcutConflictNotice } = useOsFeatures();
+  const shortcutStatus = useShortcutStatus();
+  // 他のアプリと衝突して登録できていない (Windows のみ検出できる)。完了は止めない (パネル・トレイから使えるため)
+  const failed =
+    shortcutConflictNotice && !!settings?.shortcut && shortcutStatus?.registered === false && !!shortcutStatus.error;
+  // 一度出したら登録できるまで出し続ける (案内の中で記録している間は登録を外すため、状態が一時的に変わっても消さない)
+  const [conflictShown, setConflictShown] = useState(false);
+  if (failed && !conflictShown) setConflictShown(true);
+  const conflict = conflictShown && !!settings?.shortcut && shortcutStatus?.registered !== true;
   // 導入が済むまで (動作確認の成功まで) はセットアップを完了させない
   const ready = provisioning?.stage === "done";
   return (
@@ -780,16 +905,38 @@ function DoneStep({ provisioning }: { provisioning: ProvisioningStatus | null })
           <CircleCheck size={20} aria-hidden />
         </div>
         <Title large>{ds.title}</Title>
-        <p className="m-0 text-md leading-[1.6]">{ds.lead}</p>
+        <p className="m-0 text-md leading-[1.6]">{os(ds.lead)}</p>
         <div className="flex items-center gap-2.5 rounded-lg border border-line-default px-3.5 py-3 text-sm">
           <span data-testid="done-toggle-hint" className="flex-1 leading-[1.6]">
-            {settings?.shortcut && settings.inputMode === "oneShot"
-              ? ds.hintOneShot(<ShortcutKeys shortcut={settings.shortcut} className="mx-0.5 align-[1px]" />)
+            {settings?.shortcut && conflict
+              ? os(ds.hintNoKeys)
+              : settings?.shortcut && settings.inputMode === "oneShot"
+              ? os(ds.hintOneShot)(<ShortcutKeys shortcut={settings.shortcut} className="mx-0.5 align-[1px]" />)
               : settings?.shortcut
-                ? ds.hintWithKeys(<ShortcutKeys shortcut={settings.shortcut} className="mx-0.5 align-[1px]" />)
-                : ds.hintNoKeys}
+                ? os(ds.hintWithKeys)(<ShortcutKeys shortcut={settings.shortcut} className="mx-0.5 align-[1px]" />)
+                : os(ds.hintNoKeys)}
           </span>
         </div>
+        {conflict && settings?.shortcut ? (
+          <div
+            data-testid="done-shortcut-conflict"
+            className="flex flex-col gap-2.5 rounded-md bg-tone-warning-bg px-3 py-2.5 text-xs text-tone-warning-fg"
+          >
+            <p role="status" className="m-0 flex items-start gap-2.5 leading-[1.5]">
+              <TriangleAlert size={16} className="mt-px flex-none" aria-hidden />
+              <span className="flex-1">
+                {ds.shortcutConflict(<ShortcutKeys shortcut={settings.shortcut} className="mx-0.5 align-[1px]" />)}
+              </span>
+            </p>
+            {/* 案内は上に出しているため、記録 UI の同じ警告は出さない */}
+            <ShortcutRecorder
+              shortcut={settings.shortcut}
+              onChange={(shortcut) => update({ shortcut })}
+              error={settingsErrors.shortcut}
+              statusWarning={false}
+            />
+          </div>
+        ) : null}
         <Switch
           label={ds.launchAtLogin}
           checked={settings?.launchAtLogin ?? true}

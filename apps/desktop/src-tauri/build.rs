@@ -28,5 +28,15 @@ fn main() {
         "cargo:rustc-env=MUKUCHI_TARGET_DIR={}",
         target_dir.unwrap_or_default()
     );
+    // examples/ (実機の検証用) にもコモンコントロール v6 のマニフェストを付ける。tauri-build は bin にしか
+    // 付けないため、付けないと examples が起動時に STATUS_ENTRYPOINT_NOT_FOUND で落ちる
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!("cargo:rustc-link-arg-examples=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg-examples=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+        );
+    }
     tauri_build::build()
 }

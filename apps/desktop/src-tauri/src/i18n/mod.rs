@@ -136,11 +136,22 @@ pub fn locale_from_preferred<'a>(languages: impl IntoIterator<Item = &'a str>) -
 /// macOS の優先言語 (`NSLocale.preferredLanguages`) から求めた表示言語。
 /// システム設定の「言語と地域」の並びに、アプリ別の言語の設定 (アプリのドメインの `AppleLanguages`) があれば
 /// それが反映される (NSUserDefaults の検索順でアプリのドメインがグローバルより先のため)
+#[cfg(target_os = "macos")]
 pub fn system_locale() -> Locale {
     let langs = objc2_foundation::NSLocale::preferredLanguages();
     let langs: Vec<String> = langs.iter().map(|s| s.to_string()).collect();
     let l = locale_from_preferred(langs.iter().map(String::as_str));
     log::info!("macOS の優先言語: {langs:?} → {}", l.as_str());
+    l
+}
+
+/// Windows の表示言語の優先順 (設定 > 時刻と言語 > 言語と地域。`GetUserPreferredUILanguages`) から求めた表示言語。
+/// 地域の形式 (`GetUserDefaultLocaleName`) ではなく表示言語を見る (mac の優先言語と同じ意味のため)
+#[cfg(target_os = "windows")]
+pub fn system_locale() -> Locale {
+    let langs = crate::platform::preferred_ui_languages();
+    let l = locale_from_preferred(langs.iter().map(String::as_str));
+    log::info!("Windows の表示言語: {langs:?} → {}", l.as_str());
     l
 }
 
@@ -152,6 +163,9 @@ pub enum ModelText {
     Ja8bit,
     Base17b8bit,
     JaBf16,
+    /// Windows (GGUF)
+    JaGguf,
+    BaseGguf,
 }
 
 /// アンインストールで消せなかったもの
@@ -175,6 +189,12 @@ pub enum Msg {
     ErrRuntimeMissing,
     ErrVadFailed,
     ErrInsertFailed,
+    /// Windows のみ: 前面のアプリが管理者として動いていて入力が届かない (UIPI)
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    ErrInsertElevated,
+    /// Windows のみ: GPU が使えず CPU 実行への同意も無い
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    ErrGpuUnavailable,
 
     // ---- メニュー (メニューバー・パネルの右クリック) ----
     /// 読み込みの進捗 (%)。分からなければ None
@@ -185,6 +205,11 @@ pub enum Msg {
     MenuOpenSystemSettings,
     MenuSelectMicrophone,
     MenuRestartAsr,
+    /// Windows のみ (gpu_unavailable の復旧)
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    MenuAcceptCpu,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    MenuProbeGpu,
     MenuOpenSetup,
     MenuTurnOn,
     MenuTurnOff,
@@ -277,13 +302,27 @@ pub enum Msg {
     ModelCorrupted,
     ModelSaveFailed,
     DiskFull,
+    // Mac の実行環境 (uv) の導入でだけ使う
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     UvLaunchFailed,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     RuntimeInstallFailed,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     UvMissing,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     AsrServerFilesFailed,
     VerifyFailed,
     VerifyAudioMissing,
     SetupSaveFailed,
+    // ---- Windows の文字起こしエンジン (llama-server) の導入 ----
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    GpuConsentRequired,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    LlamaServerMissing,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    LlamaServerBroken,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    CpuRuntimeFailed,
 
     // ---- 設定 ----
     SettingsUnknownKey {
@@ -325,7 +364,10 @@ pub enum Msg {
     ShortcutRegisterFailed {
         shortcut: String,
     },
+    /// macOS のみ (SMAppService は macOS 13 から)
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     LoginItemNeedsMacos13,
+    /// 文言は OS ごと (Mac: システム設定のログイン項目 / Windows: 設定のスタートアップ)
     LoginItemNotApproved,
     LoginItemEnableFailed,
     LoginItemDisableFailed,
@@ -427,6 +469,7 @@ mod tests {
             ErrRuntimeMissing,
             ErrVadFailed,
             ErrInsertFailed,
+            ErrInsertElevated,
             MenuLoading(None),
             MenuLoading(Some(42)),
             MenuOffReady,
@@ -562,8 +605,21 @@ mod tests {
             UpdateChecking,
             UpdateInstallFailed,
             UpdateNotInstallable,
+            ErrGpuUnavailable,
+            MenuAcceptCpu,
+            MenuProbeGpu,
+            GpuConsentRequired,
+            LlamaServerMissing,
+            LlamaServerBroken,
+            CpuRuntimeFailed,
         ];
-        for t in [ModelText::Ja8bit, ModelText::Base17b8bit, ModelText::JaBf16] {
+        for t in [
+            ModelText::Ja8bit,
+            ModelText::Base17b8bit,
+            ModelText::JaBf16,
+            ModelText::JaGguf,
+            ModelText::BaseGguf,
+        ] {
             v.push(ModelName(t));
             v.push(ModelDescription(t));
         }
@@ -691,9 +747,17 @@ mod tests {
             AppMenuMinimize => 114,
             AppMenuZoom => 115,
             AppMenuHelp => 116,
+            ErrGpuUnavailable => 117,
+            MenuAcceptCpu => 118,
+            MenuProbeGpu => 119,
+            GpuConsentRequired => 120,
+            LlamaServerMissing => 121,
+            LlamaServerBroken => 122,
+            CpuRuntimeFailed => 123,
+            ErrInsertElevated => 124,
         }
     }
-    const VARIANTS: usize = 117;
+    const VARIANTS: usize = 125;
 
     fn has_japanese(s: &str) -> bool {
         s.chars().any(|c| {

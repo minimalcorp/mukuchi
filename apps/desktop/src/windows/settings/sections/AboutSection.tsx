@@ -16,7 +16,7 @@ import { useI18n } from "@/i18n/context";
 import { Card, FieldError, Row, TitleWithSub, type SectionProps } from "./common";
 
 export function AboutSection({ settings, update, errors }: SectionProps) {
-  const { t } = useI18n();
+  const { t, os } = useI18n();
   const a = t.settings.about;
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [license, setLicense] = useState(false);
@@ -50,7 +50,7 @@ export function AboutSection({ settings, update, errors }: SectionProps) {
         <div className="flex items-center px-3.5 py-2.5">
           <span className="flex-1">{a.logs}</span>
           <Button size="sm" variant="ghost" iconLeft={FolderOpen} onClick={() => runCommand(commands.openLogsFolder())}>
-            {a.openInFinder}
+            {os(a.showInFolder)}
           </Button>
         </div>
       </Card>

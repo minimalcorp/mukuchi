@@ -1,0 +1,1 @@
+Rust, Tauri, GitHub, Qwen3 ASR, プルリクエスト, 常駐

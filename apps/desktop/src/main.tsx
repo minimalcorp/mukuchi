@@ -12,6 +12,7 @@ import "./styles/index.css";
 import { env, isWindowKind, type WindowKind } from "./lib/env";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { I18nProvider } from "./i18n/provider";
+import { loadPlatform, PlatformContext } from "./lib/platform";
 
 async function boot() {
   const params = new URLSearchParams(window.location.search);
@@ -23,6 +24,10 @@ async function boot() {
     const { installMock } = await import("./mock");
     installMock(params);
   }
+
+  // OS は起動中に変わらないため描画の前に 1 回だけ取る (Mac の表示で描いてから切り替わるのを避ける)
+  const platform = await loadPlatform();
+  document.documentElement.dataset.platform = platform;
 
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
   const label = getCurrentWindow().label;
@@ -39,11 +44,13 @@ async function boot() {
 
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
-      <I18nProvider>
-        <TooltipProvider>
-          <Screen />
-        </TooltipProvider>
-      </I18nProvider>
+      <PlatformContext.Provider value={platform}>
+        <I18nProvider>
+          <TooltipProvider>
+            <Screen />
+          </TooltipProvider>
+        </I18nProvider>
+      </PlatformContext.Provider>
     </React.StrictMode>,
   );
 }

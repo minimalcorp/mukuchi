@@ -1,13 +1,17 @@
-//! ASRサーバーのクライアントとプロセス管理 (HTTP API は docs/architecture.md)。
+//! ASRサーバーのクライアント (HTTP API は docs/architecture.md)。
+//!
+//! パイプライン・セットアップは `AsrBackend` だけを見る。実装は OS で選ぶ (`connect`):
+//! Mac は Python + MLX のサーバー (`/transcribe`、`HttpAsrClient`)、Windows は llama-server
+//! (`/v1/chat/completions`、llama.rs の `LlamaClient`)。プロセスの起動・自動再起動は asr_process.rs。
 //!
 //! 開発時 (デバッグビルドのみ) は環境変数 `MUKUCHI_ASR_URL` のサーバーに接続するだけで、自分では起動しない。
-//! 本番の起動 (空きポート・`uv run`・/health 待ち・自動再起動) は P4 で実装する。
 //!
 //! リクエストの URL には認識のヒント (`context`) が含まれるため、reqwest のエラーは `without_url()` で
 //! URL を外してからログ・画面に出す。
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -23,12 +27,19 @@ pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Transcript {
     pub text: String,
-    /// サーバーが報告した処理時間 (受信完了から応答まで。推論待ちを含む)。古いサーバーでは無い
+    /// 処理時間 (受信完了から応答まで。推論待ちを含む)。Mac はサーバーの報告 (古いサーバーでは無い)、
+    /// Windows はクライアントで測った値
     pub server_ms: Option<u64>,
 }
 
-/// 文字起こしクライアント。テストや別実装に差し替えられるようにtraitにする。
-pub trait AsrClient: Send + Sync {
+/// 文字起こしの実装。テストや OS ごとの実装に差し替えられるようにtraitにする。
+pub trait AsrBackend: Send + Sync {
+    /// 接続先 (ログ用)
+    fn base_url(&self) -> &str;
+
+    /// 準備完了 (モデルの読み込み済み) なら、読み込み済みのモデル名 (分からなければ空) を返す
+    fn health(&self) -> BoxFuture<Result<String>>;
+
     /// 16kHz/mono/16bit の WAV を送り、認識結果を返す。`language` は話す言語 (常に明示する。
     /// 省くとサーバーの自動判定になり、英語の精度が大きく崩れるため)
     fn transcribe(
@@ -39,10 +50,12 @@ pub trait AsrClient: Send + Sync {
     ) -> BoxFuture<Result<Transcript>>;
 }
 
-#[derive(Debug, Deserialize)]
-struct TranscribeResponse {
-    text: String,
-    elapsed_ms: Option<u64>,
+/// ベース URL のサーバーに接続するクライアント (OS の ASR の実装)
+pub fn connect(base: impl Into<String>) -> Result<Arc<dyn AsrBackend>> {
+    #[cfg(not(target_os = "windows"))]
+    return Ok(Arc::new(HttpAsrClient::new(base)?));
+    #[cfg(target_os = "windows")]
+    return Ok(Arc::new(crate::llama::LlamaClient::new(base)?));
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,58 +64,78 @@ struct HealthResponse {
     model: Option<String>,
 }
 
+/// ループバックのサーバー用の HTTP クライアント
+pub(crate) fn loopback_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        // ループバックへの接続にプロキシを使わない
+        .no_proxy()
+        // サーバー (uvicorn) は5秒で待機中の接続を閉じる。閉じかけの接続を再利用して
+        // 失敗しないよう、それより早く手放す
+        .pool_idle_timeout(Duration::from_secs(2))
+        .build()
+        .context("HTTPクライアントを作成できません")
+}
+
+/// `/health` が ok を返せば、読み込み済みのモデル名を返す (llama-server は model を返さないため空)。
+/// 読み込み中は Mac のサーバーは応答せず、llama-server は 503 を返す
+pub(crate) async fn health(http: &reqwest::Client, base: &str) -> Result<String> {
+    let res = http
+        .get(format!("{base}/health"))
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(reqwest::Error::without_url)
+        .context("ASRサーバーに接続できません")?
+        .error_for_status()
+        .map_err(reqwest::Error::without_url)
+        .context("ASRサーバーの /health がエラー")?;
+    let h: HealthResponse = res
+        .json()
+        .await
+        .map_err(reqwest::Error::without_url)
+        .context("/health の応答が不正")?;
+    if h.status != "ok" {
+        anyhow::bail!("ASRサーバーの状態: {}", h.status);
+    }
+    Ok(h.model.unwrap_or_default())
+}
+
+/// Mac の ASR サーバー (Python + MLX。`/transcribe`)
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug, Deserialize)]
+struct TranscribeResponse {
+    text: String,
+    elapsed_ms: Option<u64>,
+}
+
+#[cfg(not(target_os = "windows"))]
 #[derive(Clone)]
 pub struct HttpAsrClient {
     base: String,
     http: reqwest::Client,
 }
 
+#[cfg(not(target_os = "windows"))]
 impl HttpAsrClient {
     pub fn new(base: impl Into<String>) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            // ループバックへの接続にプロキシを使わない
-            .no_proxy()
-            // サーバー (uvicorn) は5秒で待機中の接続を閉じる。閉じかけの接続を再利用して
-            // 失敗しないよう、それより早く手放す
-            .pool_idle_timeout(Duration::from_secs(2))
-            .build()
-            .context("HTTPクライアントを作成できません")?;
         Ok(Self {
             base: base.into().trim_end_matches('/').to_string(),
-            http,
+            http: loopback_http_client()?,
         })
-    }
-
-    pub fn base_url(&self) -> &str {
-        &self.base
-    }
-
-    /// `/health` が ok を返せば、読み込み済みのモデル名を返す。
-    pub async fn health(&self) -> Result<String> {
-        let res = self
-            .http
-            .get(format!("{}/health", self.base))
-            .timeout(Duration::from_secs(3))
-            .send()
-            .await
-            .map_err(reqwest::Error::without_url)
-            .context("ASRサーバーに接続できません")?
-            .error_for_status()
-            .map_err(reqwest::Error::without_url)
-            .context("ASRサーバーの /health がエラー")?;
-        let h: HealthResponse = res
-            .json()
-            .await
-            .map_err(reqwest::Error::without_url)
-            .context("/health の応答が不正")?;
-        if h.status != "ok" {
-            anyhow::bail!("ASRサーバーの状態: {}", h.status);
-        }
-        Ok(h.model.unwrap_or_default())
     }
 }
 
-impl AsrClient for HttpAsrClient {
+#[cfg(not(target_os = "windows"))]
+impl AsrBackend for HttpAsrClient {
+    fn base_url(&self) -> &str {
+        &self.base
+    }
+
+    fn health(&self) -> BoxFuture<Result<String>> {
+        let this = self.clone();
+        Box::pin(async move { health(&this.http, &this.base).await })
+    }
+
     fn transcribe(
         &self,
         wav: Vec<u8>,
@@ -223,6 +256,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn errors_do_not_contain_query() {
         // context (認識のヒント) を含む URL がエラー文言に出ないこと
         let rt = tokio::runtime::Builder::new_current_thread()

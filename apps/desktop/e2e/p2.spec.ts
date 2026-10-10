@@ -65,7 +65,7 @@ test("panel: マイクが見つからない → マイクを選択 で設定の�
 
 test("panel: アクセシビリティ未許可 → システム設定を開く", async ({ page, m }) => {
   await open(page, "window=panel&mock=error-accessibility", PANEL);
-  await page.getByRole("button", { name: m.common.openSystemSettings }).click();
+  await page.getByRole("button", { name: m.common.openSystemSettings.macos }).click();
   await expect
     .poll(async () => (await calls(page)).find((c) => c.cmd === "open_system_settings")?.args)
     .toEqual({ pane: "accessibility" });

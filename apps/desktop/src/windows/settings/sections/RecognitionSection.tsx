@@ -4,15 +4,23 @@ import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
-import { ASR_CONTEXT_MAX, commands, runCommand, type AppStatus } from "@/lib/ipc";
-import { useModels } from "@/lib/hooks";
-import { useI18n, type Messages } from "@/i18n/context";
+import { ASR_CONTEXT_MAX, commands, runCommand, type AppStatus, type GpuStatus } from "@/lib/ipc";
+import { useGpuStatus, useModels } from "@/lib/hooks";
+import { runningOnText } from "@/lib/gpu";
+import { useOsFeatures } from "@/lib/platform";
+import { useI18n, type I18n } from "@/i18n/context";
 import { isLocale, LOCALE_AUTONYMS, LOCALES } from "@/i18n/locales";
 import { cn } from "@/lib/utils";
 import { Card, FieldError, FieldHeading, TitleWithSub, type SectionProps } from "./common";
 import { ModelList } from "./ModelList";
+import { GpuSection } from "./GpuSection";
 
-function modelState(status: AppStatus | null, t: Messages): { tone: BadgeTone; label: string; sub: string } {
+/** gpu: GPU の判定結果 (判定のある OS だけ。Mac は null で、OS ごとの既定の文言を出す) */
+function modelState(
+  status: AppStatus | null,
+  gpu: GpuStatus | null,
+  { t, os }: Pick<I18n, "t" | "os">,
+): { tone: BadgeTone; label: string; sub: string } {
   const r = t.settings.recognition;
   if (!status) return { tone: "neutral", label: r.checking, sub: "" };
   if (status.phase === "loading") {
@@ -25,7 +33,10 @@ function modelState(status: AppStatus | null, t: Messages): { tone: BadgeTone; l
   if (status.error?.code === "runtime_missing") {
     return { tone: "warning", label: r.missing, sub: r.missingSub };
   }
-  return { tone: "success", label: r.loaded, sub: r.loadedSub };
+  if (status.error?.code === "gpu_unavailable") {
+    return { tone: "danger", label: r.gpuUnavailable, sub: r.gpuUnavailableSub };
+  }
+  return { tone: "success", label: r.loaded, sub: (gpu && runningOnText(gpu, t)) ?? os(r.loadedSub) };
 }
 
 /** Unicode スカラー値の数 (Rust の chars().count() と同じ数え方。String.length は UTF-16 単位で絵文字等を 2 と数える) */
@@ -157,9 +168,12 @@ export function RecognitionSection({
   errors,
   status,
 }: SectionProps & { status: AppStatus | null }) {
-  const { t } = useI18n();
+  const i18n = useI18n();
+  const { t } = i18n;
   const r = t.settings.recognition;
-  const model = modelState(status, t);
+  const { gpuCheck } = useOsFeatures();
+  const gpu = useGpuStatus(gpuCheck);
+  const model = modelState(status, gpu.status, i18n);
   const { models, error: modelsError } = useModels();
   // 使用中のモデルの名前 (表示言語。Rust の ModelInfo.name)。一覧の取得前は空にする
   const selectedName = models?.find((m) => m.selected)?.name ?? "";
@@ -183,6 +197,17 @@ export function RecognitionSection({
           {model.label}
         </Badge>
       </Card>
+      {gpuCheck ? (
+        <GpuSection
+          settings={settings}
+          update={update}
+          errors={errors}
+          gpu={gpu.status}
+          gpuError={gpu.error}
+          probing={gpu.probing}
+          onProbe={gpu.probe}
+        />
+      ) : null}
       <div className="flex flex-col gap-2">
         <FieldHeading label={r.speechLanguage} help={r.speechLanguageHelp} />
         <Select

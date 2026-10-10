@@ -1,17 +1,24 @@
 mod app_menu;
 mod asr;
+#[cfg(target_os = "windows")]
+mod asr_filters;
 mod asr_process;
 mod audio;
 mod autostart;
 mod commands;
 mod core;
+mod gpu;
 mod i18n;
 mod insert;
 mod launch;
+#[cfg(target_os = "windows")]
+mod llama;
+#[cfg(target_os = "macos")]
 mod macos;
 mod paths;
 mod permissions;
 mod pipeline;
+mod platform;
 mod provisioning;
 mod settings;
 mod shortcut;
@@ -26,6 +33,7 @@ mod windows;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(not(target_os = "windows"))]
 use tauri::path::BaseDirectory;
 use tauri::{Manager, RunEvent, WindowEvent};
 
@@ -87,7 +95,7 @@ pub fn run() {
         };
         std::process::exit(code);
     }
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // アプリのメニューバーは表示言語で自分で組む (app_menu.rs)。既定のメニューは英語に固定のため使わない
         .enable_macos_default_menu(false)
         // 最初に登録する (プラグインの指定)。2つ目のプロセスは既存のプロセスに知らせて、ここで終了する。
@@ -117,8 +125,11 @@ pub fn run() {
                     }),
                 ])
                 .build(),
-        )
-        .plugin(tauri_nspanel::init())
+        );
+    // NSPanel (パネル) は macOS のみ。プラグインの登録順は変えない (single-instance・log の後、updater の前)
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+    let app = builder
         // Rust からのみ使う (update.rs)。JS 用の command は capabilities で許可していない
         .plugin(tauri_plugin_updater::Builder::new().build())
         // 登録は Core (shortcut.rs) が設定に従って行う。押した時だけ反応する (離した時は無視)
@@ -128,6 +139,9 @@ pub fn run() {
                     if event.state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
                         return;
                     }
+                    // Alt・Win の単独押下に見えてメニューモード・スタートメニューに入らないよう、離される前に挟む
+                    #[cfg(target_os = "windows")]
+                    crate::platform::sysmenu::on_hotkey_pressed();
                     // プラグインのロックを持ったメインスレッドから呼ばれるため、処理は別タスクで行う
                     if let Some(core) = app.try_state::<Arc<Core>>() {
                         let core = core.inner().clone();
@@ -137,13 +151,21 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            // 常駐アプリのため Dock に出さない (設定・セットアップ表示中のみ Regular にする)
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            if cfg!(debug_assertions) {
-                macos::activation::install_debug_observer();
+            // 常駐アプリのため Dock に出さない (設定・セットアップ表示中のみ Regular にする)。
+            // Windows はウィンドウを開けばタスクバーに出るため不要
+            #[cfg(target_os = "macos")]
+            {
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                if cfg!(debug_assertions) {
+                    macos::activation::install_debug_observer();
+                }
             }
 
-            // 同梱物。tauri dev では target/debug/ にコピーされたものを指す
+            // 同梱物。tauri dev では target/debug/ にコピーされたものを指す。
+            // Windows は uv (Python) を使わない (ASR は同梱の llama-server)
+            #[cfg(target_os = "windows")]
+            let uv = std::path::PathBuf::new();
+            #[cfg(not(target_os = "windows"))]
             let uv = resolve_uv(|rel| {
                 app.path()
                     .resolve(rel, BaseDirectory::Resource)
@@ -162,6 +184,8 @@ pub fn run() {
                 resources.asr_server.display(),
                 resources.verify_wav.display()
             );
+            #[cfg(target_os = "windows")]
+            log::info!("同梱物: llama-server={}", resources.llama_server.display());
             let data_dir = match paths::dev_path(paths::ENV_DEV_DATA_DIR) {
                 Some(d) => {
                     // 指定を誤っても、リポジトリ・ビルド成果物・ホーム等を削除対象にしない
@@ -170,6 +194,8 @@ pub fn run() {
                         resources.uv.clone(),
                         app.path().home_dir()?,
                     ];
+                    #[cfg(target_os = "windows")]
+                    protected.push(resources.llama_server.clone());
                     protected.extend(storage::build_target_dir());
                     let d = paths::validate_dev_data_dir(&d, &protected).map_err(|e| {
                         log::error!("{}: {e:#}", paths::ENV_DEV_DATA_DIR);
@@ -182,6 +208,10 @@ pub fn run() {
                     );
                     d
                 }
+                // Windows は %LOCALAPPDATA% (数GBのモデルを移動プロファイルに載せない。docs/architecture.md「識別子・パス (Windows)」)
+                #[cfg(target_os = "windows")]
+                None => app.path().app_local_data_dir()?,
+                #[cfg(not(target_os = "windows"))]
                 None => app.path().app_data_dir()?,
             };
             let data_paths = paths::DataPaths::new(data_dir);
@@ -265,6 +295,8 @@ pub fn run() {
             commands::get_panel_anchor,
             commands::show_panel,
             commands::show_panel_menu,
+            commands::get_gpu_status,
+            commands::probe_gpu,
         ])
         .build(context)
         .expect("error while building tauri application");
@@ -278,7 +310,9 @@ pub fn run() {
             }
         }
         // Dock に出ない常駐アプリのため、Finder・Spotlight・Launchpad から開き直した時に設定 (未完了ならセットアップ) を開く。
-        // パネルが常に見えているため has_visible_windows は判断に使わない
+        // パネルが常に見えているため has_visible_windows は判断に使わない。
+        // Windows に Reopen は無く、再度の起動は single-instance のコールバックだけで受ける
+        #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => {
             log::info!("Reopen: 画面を開く");
             windows::open_on_relaunch(app);
@@ -335,8 +369,9 @@ fn spawn_watcher(core: Arc<Core>) {
             }
             windows::refresh_panel_position(core.app());
             // 外観 (ライト/ダーク) で変わるのはエラー時の非テンプレート画像だけ
-            // (テンプレート画像はシステムが色を合わせる)。エラー中だけ見直す
-            if core.state.status().phase == state::Phase::Error {
+            // (テンプレート画像はシステムが色を合わせる)。エラー中だけ見直す。
+            // Windows はテンプレート画像が無く全状態の画像をタスクバーの明暗で塗るため、常に見直す
+            if cfg!(target_os = "windows") || core.state.status().phase == state::Phase::Error {
                 tray::refresh_appearance(core.app());
             }
         }

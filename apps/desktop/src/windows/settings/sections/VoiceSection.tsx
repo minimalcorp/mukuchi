@@ -23,19 +23,16 @@ import {
   type AppStatus,
   type AudioDevice,
   type AutoSubmitKey,
-  type KeyCombo,
   type RunningApp,
 } from "@/lib/ipc";
-import { formatKeyCombo, formatSeconds } from "@/lib/format";
+import { autoSubmitKeyCombo, formatKeyCombo, formatSeconds } from "@/lib/format";
+import { useOsFeatures } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n/context";
 import { Card, FieldError, FieldHeading, Row, TitleWithSub, type SectionProps } from "./common";
 
-/** 送信キーの表示用。modEnter は macOS の主修飾キー (⌘)。実際に送るキーは Rust が OS ごとに決める */
-const AUTO_SUBMIT_KEYS: Record<AutoSubmitKey, KeyCombo> = {
-  enter: { key: "enter", modifiers: [] },
-  modEnter: { key: "enter", modifiers: ["cmd"] },
-};
+/** 送信キーの選択肢の並び */
+const AUTO_SUBMIT_KEYS: AutoSubmitKey[] = ["enter", "modEnter"];
 
 const ON_PHASES: AppStatus["phase"][] = ["listening", "speaking", "finalizing", "done"];
 
@@ -203,11 +200,11 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
 
 /** 自動送信 (docs/architecture.md「決定事項」の自動送信)。OFF の間も送信キーは見せ、選べないようにする (音声コマンドの対応表と同じ扱い) */
 function AutoSubmit({ settings, update, errors }: SectionProps) {
-  const { t } = useI18n();
+  const { t, platform } = useI18n();
   const v = t.settings.voice;
-  const keyOptions = (Object.keys(AUTO_SUBMIT_KEYS) as AutoSubmitKey[]).map((k) => ({
+  const keyOptions = AUTO_SUBMIT_KEYS.map((k) => ({
     value: k,
-    label: formatKeyCombo(AUTO_SUBMIT_KEYS[k]),
+    label: formatKeyCombo(autoSubmitKeyCombo(k, platform), platform),
   }));
   return (
     <div className="flex flex-col gap-2">
@@ -257,6 +254,25 @@ function InputLevel({ isOn, sensitivity, editing }: { isOn: boolean; sensitivity
   );
 }
 
+/**
+ * アプリ名。Windows は識別子 (実行ファイル名) を補助表示する (同じ表示名のアプリ・表示名のない exe を見分けるため)。
+ * 名前が識別子と同じ (表示名がなく exe 名を名前にした) 時は出さない
+ */
+function AppLabel({ app, className }: { app: RunningApp; className?: string }) {
+  const { appIdHint } = useOsFeatures();
+  if (!appIdHint || app.name.toLowerCase() === app.bundleId.toLowerCase()) {
+    return className ? <span className={className}>{app.name}</span> : <>{app.name}</>;
+  }
+  return (
+    <span className={cn("flex min-w-0 items-baseline gap-2", className)}>
+      <span>{app.name}</span>
+      <span data-testid="app-id" className="truncate font-mono text-2xs text-fg-muted">
+        {app.bundleId}
+      </span>
+    </span>
+  );
+}
+
 /** 入力しないアプリ (デザイン 07-A) */
 function ExcludedApps({ settings, update, errors }: SectionProps) {
   const { t } = useI18n();
@@ -276,7 +292,7 @@ function ExcludedApps({ settings, update, errors }: SectionProps) {
         {excluded.map((app) => (
           <div key={app.bundleId} className="flex items-center gap-2.5 border-b border-line-subtle px-3.5 py-2.5">
             <AppWindow size={16} className="flex-none text-fg-muted" aria-hidden />
-            <span className="flex-1">{app.name}</span>
+            <AppLabel app={app} className="flex-1" />
             <IconButton
               icon={X}
               label={v.removeApp(app.name)}
@@ -316,7 +332,7 @@ function ExcludedApps({ settings, update, errors }: SectionProps) {
               {candidates.map((app) => (
                 <DropdownMenuItem key={app.bundleId} onSelect={() => update({ excludedApps: [...excluded, app] })}>
                   <AppWindow size={16} className="flex-none text-fg-muted" aria-hidden />
-                  {app.name}
+                  <AppLabel app={app} />
                 </DropdownMenuItem>
               ))}
             </DropdownMenuContent>

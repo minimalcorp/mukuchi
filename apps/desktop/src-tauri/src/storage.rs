@@ -2,7 +2,6 @@
 //! (docs/architecture.md「識別子・パス」のアンインストール対象)。
 
 use std::collections::HashSet;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -32,8 +31,8 @@ fn usage_of(path: &Path, seen: &mut HashSet<(u64, u64)>) -> u64 {
         return 0;
     };
     let mut total = 0;
-    if seen.insert((meta.dev(), meta.ino())) {
-        total += meta.blocks() * 512;
+    if let Some(bytes) = first_seen_bytes(path, &meta, seen) {
+        total += bytes;
     }
     if meta.is_dir() {
         if let Ok(entries) = std::fs::read_dir(path) {
@@ -43,6 +42,53 @@ fn usage_of(path: &Path, seen: &mut HashSet<(u64, u64)>) -> u64 {
         }
     }
     total
+}
+
+/// 初めて見たファイルならその使用量 (割り当てブロック)。同じ実体 (ハードリンク) は1回だけ数える
+#[cfg(unix)]
+fn first_seen_bytes(
+    _path: &Path,
+    meta: &std::fs::Metadata,
+    seen: &mut HashSet<(u64, u64)>,
+) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    if seen.insert((meta.dev(), meta.ino())) {
+        Some(meta.blocks() * 512)
+    } else {
+        None
+    }
+}
+
+/// Windows: ファイルの大きさ (論理サイズ。割り当て量は std の安定版で取れないため)。
+/// HF のスナップショットは blob のハードリンク (provisioning/hf.rs) のため、リンクが複数あるファイルは
+/// 同じ実体 (ボリュームのシリアル番号 + ファイル ID) を1回だけ数える。ID が取れなければそのまま数える
+#[cfg(windows)]
+fn first_seen_bytes(
+    path: &Path,
+    meta: &std::fs::Metadata,
+    seen: &mut HashSet<(u64, u64)>,
+) -> Option<u64> {
+    use ::windows::Win32::Foundation::HANDLE;
+    use ::windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    use std::os::windows::io::AsRawHandle;
+    if !meta.is_file() {
+        return Some(meta.len());
+    }
+    let id = std::fs::File::open(path).ok().and_then(|f| {
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: f が開いている間ハンドルは有効。info はこの呼び出しの間有効
+        unsafe { GetFileInformationByHandle(HANDLE(f.as_raw_handle()), &mut info) }.ok()?;
+        (info.nNumberOfLinks > 1).then_some((
+            info.dwVolumeSerialNumber as u64,
+            ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+        ))
+    });
+    match id {
+        Some(id) if !seen.insert(id) => None,
+        _ => Some(meta.len()),
+    }
 }
 
 /// runtime = python・venv・uv・cache (+ asr-server のコピー)、model = models/、other = 設定・ログ
@@ -308,6 +354,7 @@ mod tests {
         touch(&paths.venv().join("lib/a.so"), 10_000);
         touch(&paths.cache().join("x"), 5_000);
         touch(&paths.models().join("hub/blobs/b"), 20_000);
+        #[cfg(unix)]
         std::os::unix::fs::symlink("../blobs/b", paths.models().join("hub/link")).unwrap();
         std::fs::create_dir_all(paths.python()).unwrap();
         std::fs::hard_link(paths.cache().join("x"), paths.python().join("x")).unwrap();
@@ -394,7 +441,9 @@ mod tests {
         }
     }
 
+    /// ~/Library の構成は macOS のもの (Windows のアンインストールの対象は Phase 4 で決める)
     #[test]
+    #[cfg(target_os = "macos")]
     fn uninstall_targets_in_fake_home() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();

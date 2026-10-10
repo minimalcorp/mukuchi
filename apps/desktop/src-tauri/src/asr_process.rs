@@ -1,10 +1,13 @@
 //! 本番の ASR サーバーのプロセス管理 (docs/architecture.md「本番の ASR サーバー起動」)。
 //!
-//! `<データ>/venv/bin/python -m mukuchi_asr --port <空きポート> --model <スナップショット> --exit-on-stdin-eof`
+//! Mac: `<データ>/venv/bin/python -m mukuchi_asr --port <空きポート> --model <スナップショット> --exit-on-stdin-eof`
 //! を stdin をパイプにして起動する。アプリが異常終了してもパイプが閉じてサーバーが終わる (孤児にならない)。
-//! /health が応答するまでを読み込み中とし、異常終了時は3回まで自動で起動し直す。
+//! Windows: 同梱の llama-server (起動の作法と引数は llama.rs)。Job Object に入れて孤児にしない。
+//! /health が応答するまでを読み込み中とし、異常終了時は3回まで自動で起動し直す (両 OS で同じ)。
 
+#[cfg(not(target_os = "windows"))]
 use std::path::PathBuf;
+#[cfg(not(target_os = "windows"))]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,8 +15,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use tokio::sync::watch;
-
-use crate::asr::HttpAsrClient;
 
 /// 異常終了時に自動で起動し直す回数
 const MAX_RESTARTS: u32 = 3;
@@ -26,6 +27,11 @@ const STOP_GRACE: Duration = Duration::from_secs(3);
 /// ログがこの大きさを超えたら1世代だけ残して新しくする
 const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 
+/// Windows の起動方法 (llama-server)
+#[cfg(target_os = "windows")]
+pub use crate::llama::LaunchSpec;
+
+#[cfg(not(target_os = "windows"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchSpec {
     pub python: PathBuf,
@@ -249,7 +255,7 @@ impl AsrProcess {
         };
         // stdin はここで持ち続ける。閉じるとサーバーが終了する (--exit-on-stdin-eof)
         let stdin = child.stdin.take();
-        let client = match HttpAsrClient::new(url.clone()) {
+        let client = match crate::asr::connect(url.clone()) {
             Ok(c) => c,
             Err(e) => {
                 let _ = child.kill().await;
@@ -272,7 +278,10 @@ impl AsrProcess {
                 }
                 _ = until_true(stop) => {
                     drop(stdin);
-                    if tokio::time::timeout(STOP_GRACE, child.wait()).await.is_err() {
+                    // Windows の llama-server には stdin の EOF で終わる仕組みが無く、保存する状態も無いため、すぐ止める
+                    if cfg!(target_os = "windows") {
+                        let _ = child.kill().await;
+                    } else if tokio::time::timeout(STOP_GRACE, child.wait()).await.is_err() {
                         log::warn!("文字起こしサーバーが終了しないため強制終了する");
                         let _ = child.kill().await;
                     }
@@ -309,6 +318,12 @@ enum Exit {
     },
 }
 
+#[cfg(target_os = "windows")]
+fn spawn(spec: &LaunchSpec) -> Result<(tokio::process::Child, String)> {
+    crate::llama::spawn(spec)
+}
+
+#[cfg(not(target_os = "windows"))]
 fn spawn(spec: &LaunchSpec) -> Result<(tokio::process::Child, String)> {
     if !spec.python.exists() {
         anyhow::bail!("実行環境がありません: {}", spec.python.display());
@@ -351,6 +366,7 @@ fn spawn(spec: &LaunchSpec) -> Result<(tokio::process::Child, String)> {
 }
 
 /// ASR サーバーに引き継ぐ環境変数。サーバーはオフライン (HF_HUB_OFFLINE) でループバックだけを使うためプロキシは渡さない
+#[cfg(not(target_os = "windows"))]
 fn pass_env(key: &std::ffi::OsStr) -> bool {
     let Some(k) = key.to_str() else {
         return false;
@@ -392,7 +408,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-#[cfg(test)]
+// python の代わりに sh スクリプトを動かすため unix のみ
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -518,6 +535,68 @@ mod tests {
             assert!(p.wait_ready(rx).await.is_err());
             let log = std::fs::read_to_string(tmp.path().join("logs/asr-server.log"));
             assert!(log.is_ok());
+        });
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::*;
+
+    /// 起動してすぐ終わる偽のサーバー (cmd.exe は引数に /c が無く標準入力が空なら、すぐ終わる)
+    fn crashing_spec(dir: &std::path::Path) -> LaunchSpec {
+        let (model, mmproj) = (dir.join("m.gguf"), dir.join("mmproj-m.gguf"));
+        std::fs::write(&model, b"").unwrap();
+        std::fs::write(&mmproj, b"").unwrap();
+        LaunchSpec {
+            exe: crate::platform::process::system_root().join(r"System32\cmd.exe"),
+            model,
+            mmproj,
+            exec: crate::llama::Exec::Cpu,
+            log_file: dir.join(r"logs\asr-server.log"),
+        }
+    }
+
+    #[test]
+    fn crashes_restart_up_to_limit() {
+        tauri::async_runtime::block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let p = Arc::new(AsrProcess::new());
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let ev = events.clone();
+            p.subscribe(move |e| ev.lock().unwrap().push(e));
+            p.start(crashing_spec(tmp.path()), true).await;
+            let (_tx, rx) = watch::channel(false);
+            let err = tokio::time::timeout(Duration::from_secs(30), p.wait_ready(rx))
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("終了"), "{err:#}");
+            let crashes: Vec<bool> = events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|e| match e {
+                    AsrEvent::Crashed { will_restart, .. } => Some(*will_restart),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(crashes, vec![true, true, true, false]);
+            assert!(tmp.path().join(r"logs\asr-server.log").is_file());
+        });
+    }
+
+    #[test]
+    fn missing_model_is_reported_without_starting() {
+        tauri::async_runtime::block_on(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut spec = crashing_spec(tmp.path());
+            spec.model = tmp.path().join("missing.gguf");
+            let p = Arc::new(AsrProcess::new());
+            p.start(spec, false).await;
+            let (_tx, rx) = watch::channel(false);
+            let err = p.wait_ready(rx).await.unwrap_err();
+            assert!(format!("{err:#}").contains("モデルがありません"), "{err:#}");
         });
     }
 }

@@ -121,7 +121,7 @@ test("settings: ログイン時に起動をオンにできなければエラー�
   await expect(alert).toContainText(APPROVAL_ERROR);
   await expect(sw).not.toBeChecked();
   await snap("settings-launch-at-login-error");
-  await alert.getByRole("button", { name: m.common.openSystemSettings }).click();
+  await alert.getByRole("button", { name: m.common.openSystemSettings.macos }).click();
   await expect.poll(async () => (await calls(page, "open_system_settings")).map((c) => c.args)).toEqual([
     { pane: "login_items" },
   ]);
@@ -139,7 +139,7 @@ test("setup: 完了画面でログイン時に起動をオンにできなけれ�
   await expect(alert).toContainText(APPROVAL_ERROR);
   await expect(sw).not.toBeChecked();
   await snap("setup-launch-at-login-error");
-  await alert.getByRole("button", { name: m.common.openSystemSettings }).click();
+  await alert.getByRole("button", { name: m.common.openSystemSettings.macos }).click();
   await expect.poll(async () => (await calls(page, "open_system_settings")).map((c) => c.args)).toEqual([
     { pane: "login_items" },
   ]);

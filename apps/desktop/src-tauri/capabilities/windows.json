@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "windows-setup",
+  "description": "Windows only: setup window can close itself (GPU consent screen's cancel). Mac is unaffected",
+  "platforms": ["windows"],
+  "windows": [
+    "setup"
+  ],
+  "permissions": [
+    "core:window:allow-close"
+  ]
+}

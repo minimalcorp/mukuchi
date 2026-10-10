@@ -10,7 +10,7 @@ import { useI18n } from "@/i18n/context";
 import { Card, ConfirmLayout, FieldError, TitleWithSub } from "./common";
 
 export function StorageSection({ status }: { status: AppStatus | null }) {
-  const { locale, t } = useI18n();
+  const { locale, t, os } = useI18n();
   const st = t.settings.storage;
   const [usage, setUsage] = useState<StorageUsage | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
@@ -32,7 +32,7 @@ export function StorageSection({ status }: { status: AppStatus | null }) {
   const total = usage ? usage.runtimeBytes + usage.modelBytes + usage.otherBytes : 0;
   const parts = usage
     ? [
-        { label: st.runtime, bytes: usage.runtimeBytes, color: "bg-blue-500" },
+        { label: os(st.runtime), bytes: usage.runtimeBytes, color: "bg-blue-500" },
         { label: st.models, bytes: usage.modelBytes, color: "bg-cyan-500" },
         { label: st.other, bytes: usage.otherBytes, color: "bg-gray-400" },
       ]
@@ -101,7 +101,7 @@ export function StorageSection({ status }: { status: AppStatus | null }) {
           </Button>
         </div>
         <div className="flex items-center gap-3 px-3.5 py-3">
-          <TitleWithSub title={st.uninstall} sub={st.uninstallSub} />
+          <TitleWithSub title={st.uninstall} sub={os(st.uninstallSub)} />
           <Button size="sm" variant="danger" onClick={() => setConfirm("uninstall")}>
             {st.uninstallEllipsis}
           </Button>
@@ -163,7 +163,7 @@ function DeleteRuntimeDialog({ open, onClose, onDone }: { open: boolean; onClose
 }
 
 function UninstallDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { locale, t } = useI18n();
+  const { locale, t, os } = useI18n();
   const st = t.settings.storage;
   const [targets, setTargets] = useState<UninstallTarget[] | null>(null);
   // running: 実行中 (取り消せない)。done: 返った (実機は成功すると終了するため、開発用の dry run でだけ見える)
@@ -192,7 +192,7 @@ function UninstallDialog({ open, onClose }: { open: boolean; onClose: () => void
       <DialogContent>
         <ConfirmLayout
           title={st.uninstallTitle}
-          description={phase === "done" ? st.uninstallDone : running ? st.uninstallRunning : st.uninstallConfirm}
+          description={phase === "done" ? st.uninstallDone : running ? os(st.uninstallRunning) : st.uninstallConfirm}
           error={error}
           actions={
             phase === "done" ? (
@@ -250,7 +250,7 @@ function UninstallDialog({ open, onClose }: { open: boolean; onClose: () => void
           </div>
           {targets && targets.length > 0 ? (
             <div className="mx-5 -mt-1.5 mb-3.5 flex justify-between text-xs text-fg-muted">
-              <span>{st.uninstallCount(targets.length)}</span>
+              <span>{os(st.uninstallCount)(targets.length)}</span>
               <span className="tabular">{st.uninstallTotal(formatBytes(totalBytes, locale))}</span>
             </div>
           ) : null}

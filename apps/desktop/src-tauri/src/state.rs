@@ -37,6 +37,9 @@ pub enum ErrorCode {
     InsertFailed,
     /// 発話検出 (VAD) の初期化に失敗した。マイクの問題ではないため別のコードにする
     VadFailed,
+    /// Windows のみ: GPU が使えず CPU 実行への同意 (Settings.cpuInferenceAccepted) も無い
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    GpuUnavailable,
 }
 
 impl ErrorCode {
@@ -50,6 +53,7 @@ impl ErrorCode {
             Self::RuntimeMissing => Msg::ErrRuntimeMissing,
             Self::InsertFailed => Msg::ErrInsertFailed,
             Self::VadFailed => Msg::ErrVadFailed,
+            Self::GpuUnavailable => Msg::ErrGpuUnavailable,
         }
     }
 }
@@ -62,6 +66,12 @@ pub enum ErrorAction {
     SelectMicrophone,
     RestartAsr,
     StartSetup,
+    /// Windows のみ (gpu_unavailable): 設定 > 認識 を開いて CPU 実行への同意を求める
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    AcceptCpu,
+    /// Windows のみ (gpu_unavailable): GPU を判定し直す
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    ProbeGpu,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -106,6 +116,18 @@ impl AppError {
         log::warn!("文字起こしサーバーの停止: {detail}");
         Self::new(ErrorCode::AsrStopped, Some(ErrorAction::RestartAsr))
     }
+    /// GPU が使えない。ドライバーの問題 (GPU はあるのに Vulkan で使えない) なら再検出、無ければ CPU 実行への同意を促す
+    #[cfg(target_os = "windows")]
+    pub fn gpu_unavailable(driver_missing: bool) -> Self {
+        Self::new(
+            ErrorCode::GpuUnavailable,
+            Some(if driver_missing {
+                ErrorAction::ProbeGpu
+            } else {
+                ErrorAction::AcceptCpu
+            }),
+        )
+    }
     pub fn runtime_missing() -> Self {
         Self::new(ErrorCode::RuntimeMissing, Some(ErrorAction::StartSetup))
     }
@@ -116,6 +138,15 @@ impl AppError {
     pub fn insert_failed(detail: impl std::fmt::Display) -> Self {
         log::warn!("入力の失敗: {detail}");
         Self::new(ErrorCode::InsertFailed, None)
+    }
+    /// 前面のアプリが管理者として動いていて入力が届かない (Windows の UIPI)。code は insert_failed のまま、
+    /// 文言だけ原因を伝えるものにする (復旧の操作は無く、利用者がそのアプリを通常の権限で開き直す)。
+    /// 表示言語を変えると `relocalize` で insert_failed の通常の文言に戻る (発話ごとの結果で、残らないため)
+    pub fn insert_blocked_elevated() -> Self {
+        log::warn!("入力の失敗: 前面のアプリが管理者として動いている");
+        let mut e = Self::new(ErrorCode::InsertFailed, None);
+        e.message = Msg::ErrInsertElevated.to_string();
+        e
     }
 }
 

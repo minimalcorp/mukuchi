@@ -1,0 +1,115 @@
+# Windows ネイティブの開発タスク (Makefile から OS が Windows_NT の時だけ読む)。コマンド名と意味は Mac (Makefile) と同じ。
+# 前提: Windows ネイティブ (WSL ではない)・Git for Windows・Node・pnpm・Rust (rustup)・VS Build Tools (C++)。
+# GNU make と process-compose は apps/desktop/scripts/install-dev-tools-windows.ps1 で %USERPROFILE%\bin に入れる。nix は使わない。
+# Mac との違い: ASR は llama-server (Vulkan、GGUF)・process-compose は TCP のループバック + トークン (UDS・-D が無いため)・
+# asr-server (Python) の ruff・pytest は省く (uv が無い。Mac・CI で検査される)・build 系は macOS 専用。
+.DEFAULT_GOAL := help
+
+# レシピのシェルは Git for Windows の sh.exe。System32 の bash.exe は WSL のランチャーなので使わない。
+# make は 32 ビット版のため ProgramFiles が (x86) を指す。64 ビットの Program Files は ProgramW6432。
+# パスの空白は wildcard・firstword で語に分かれるため ? に置き換えて扱う
+_space := $(subst ,, )
+_sh_path = $(subst $(_space),?,$(subst \,/,$(1))/Git/usr/bin/sh.exe)
+_sh_candidates := $(call _sh_path,$(ProgramW6432)) $(call _sh_path,$(ProgramFiles)) $(call _sh_path,$(LOCALAPPDATA)/Programs)
+_git_sh := $(subst ?, ,$(firstword $(foreach c,$(_sh_candidates),$(if $(wildcard $(subst ?,\ ,$(c))),$(c)))))
+ifeq ($(_git_sh),)
+$(error Git for Windows の sh.exe が見つからない (https://gitforwindows.org/))
+endif
+SHELL := $(_git_sh)
+.SHELLFLAGS := -c
+# rm・grep・awk 等 (Git の usr/bin) を使えるようにする。末尾に足す (先頭だと Git の link.exe 等が MSVC のものより先に見つかるため)
+export PATH := $(PATH);$(subst /,\,$(patsubst %/sh.exe,%,$(_git_sh)))
+
+# dev のデータ。Tauri の app_local_data_dir (%LOCALAPPDATA%\<dev のバンドルID>)。パスは / でそろえる (make・sh・Node のどれでも通るため)
+export MUKUCHI_DEV_DATA := $(subst \,/,$(LOCALAPPDATA))/com.minimalcorp.mukuchi.dev
+# 開発で使う ASR モデル。本番の Windows の既定 (provisioning/models.rs の ja-gguf) と同じ版に固定する
+export MUKUCHI_MODEL ?= minimalcorp/Qwen3-ASR-1.7B-JA-GGUF
+export MUKUCHI_MODEL_REVISION ?= 7017bd6ff5156a4e9ad32997d2a9e38eedcb370e
+# process-compose の API のポート (Windows は UDS が無いため TCP。127.0.0.1 のみ・トークン必須)
+export MUKUCHI_PC_PORT ?= 18760
+PC_DIR := $(CURDIR)/.process-compose
+DESKTOP := apps/desktop
+DESKTOP_SCRIPTS := $(DESKTOP)/scripts
+WEB := apps/web
+DEV := node $(DESKTOP_SCRIPTS)/dev-windows.mjs
+
+.PHONY: help up up-desktop up-web down restart reset up-fresh ps logs setup lint test build build-local dmg-local verify web-build web-deploy clean
+
+help: ## ターゲット一覧 (Windows)
+	@grep -hE '^[a-z -]+:.*## ' Makefile.windows | awk -F':.*## ' '{printf "  %-12s %s\n", $$1, $$2}'
+	@$(DEV) notice help
+
+# process-compose.windows.yaml の namespace: desktop (asr・app)、web (web)。
+# 片方だけ起動中に別の up-* を実行しても "already running" になる (make down してから起動し直す)
+up: setup ## 開発環境を起動 (desktop + web、セットアップ込み、バックグラウンド)
+	@$(DEV) up
+
+up-desktop: setup ## desktop (llama-server + tauri dev) だけを起動
+	@$(DEV) up desktop
+
+# web は JS の依存だけあればよいので、モデル取得等を含む setup は通さない
+up-web: ## web (LP の vite dev) だけを起動
+	@pnpm install --frozen-lockfile --dir "$(CURDIR)"
+	@$(DEV) up web
+
+down: ## 開発環境を停止 (プロセス・ポートが消えるまで待つ)
+	@$(DEV) down
+
+restart: down up ## 再起動
+
+# 起動中のアプリが設定を書き戻さないよう先に止める。モデル・実行環境・導入記録は残す
+# (PROVISION=1 で導入記録、ALL=1 で実行環境 (llama-cpu) と導入記録。PERMISSIONS=1 は Windows では無視)
+reset: ## dev の設定・WebView2 のデータを消して初回起動の状態に (PROVISION=1 / ALL=1)
+	@$(MAKE) --no-print-directory down
+	@ALL="$(ALL)" PROVISION="$(PROVISION)" PERMISSIONS="$(PERMISSIONS)" $(DEV) reset
+
+# MUKUCHI_DEV_SHOW_SETUP は今回起動する process-compose (→ app) の環境にだけ渡す。次の make up/restart には残らない
+up-fresh: ## reset してセットアップ画面ありで起動 (MUKUCHI_DEV_SHOW_SETUP=1)
+	@$(MAKE) --no-print-directory reset
+	@MUKUCHI_DEV_SHOW_SETUP=1 $(MAKE) --no-print-directory up
+
+ps: ## プロセス状態と ASR /health・web の応答
+	@$(DEV) ps
+
+logs: ## ログ追従 (s=<name> で個別)
+ifdef s
+	@$(DEV) logs $(s)
+else
+	@tail -n 200 -F "$(PC_DIR)/all.log"
+endif
+
+setup: ## pnpm install / llama-server・verify.wav / モデル取得 (GGUF 約2.2GB)
+	@node $(DESKTOP_SCRIPTS)/setup-windows.mjs
+
+# CI (.github/workflows/ci.yml) の各 job と同じ検査。asr-server (Python) は uv が無いため省く (Mac・CI の asr job で検査される)
+lint: ## 全アプリの lint・型検査 (JS/TS・sst.config.ts・cargo fmt/clippy。ruff は省く)
+	pnpm run lint
+	pnpm run typecheck
+	cargo fmt --manifest-path $(DESKTOP)/src-tauri/Cargo.toml --check
+	cargo clippy --manifest-path $(DESKTOP)/src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+	@$(DEV) notice skip-ruff
+
+# Playwright のブラウザ (desktop: webkit、web: chromium) は pnpm exec playwright install で入れておく
+test: ## 全アプリのテスト (Playwright・cargo test・リリース用スクリプト。pytest は省く)
+	pnpm run test
+	node --test scripts/*.test.mjs
+	cargo test --manifest-path $(DESKTOP)/src-tauri/Cargo.toml --locked
+	@$(DEV) notice skip-pytest
+
+# 黙って何もしないと成功に見えるため、明確に失敗させる。
+# レシピのコマンド行に日本語を書かない (make (32 ビット版) がコマンド行を ANSI のコードページで渡し、文字化けするため。実測)。文言は dev-windows.mjs が出す
+build build-local dmg-local verify: ## (macOS 専用。Windows のパッケージ (NSIS) は Phase 4 で実装予定)
+	@$(DEV) macos-only $@
+
+web-build: ## web の静的ビルド (apps/web/build/client)
+	pnpm run web:build
+
+# 本番のデプロイは通常 .github/workflows/release.yml (手動実行、target=web。版上げ・タグ付き) で行う
+web-deploy: ## web を本番 (mukuchi.minimalcorp.com) へデプロイ (sst deploy --stage production)
+	pnpm run web:deploy
+
+# 起動中に .process-compose を消すと make down で止められなくなるため先に停止する
+clean: ## 生成物を削除 (モデル等の dev データは残す)
+	-@$(MAKE) --no-print-directory down
+	rm -rf $(DESKTOP)/dist $(DESKTOP)/src-tauri/target $(DESKTOP)/src-tauri/bundle-resources \
+	  $(WEB)/build $(WEB)/.react-router .sst node_modules apps/*/node_modules "$(PC_DIR)"

@@ -13,6 +13,9 @@ pub const ENV_DEV_UV: &str = "MUKUCHI_DEV_UV";
 pub const ENV_DEV_ASR_SERVER_DIR: &str = "MUKUCHI_DEV_ASR_SERVER_DIR";
 /// 開発用: 同梱 verify.wav の代わりに使う検証用音声 (デバッグビルドのみ)
 pub const ENV_DEV_VERIFY_WAV: &str = "MUKUCHI_DEV_VERIFY_WAV";
+/// 開発用 (Windows): 同梱 llama-server/ の代わりに使うディレクトリ (デバッグビルドのみ)
+#[cfg(target_os = "windows")]
+pub const ENV_DEV_LLAMA_SERVER_DIR: &str = "MUKUCHI_DEV_LLAMA_SERVER_DIR";
 
 /// デバッグビルドでだけ環境変数のパスを返す
 pub fn dev_path(name: &str) -> Option<PathBuf> {
@@ -139,6 +142,8 @@ impl DataPaths {
     pub fn venv(&self) -> PathBuf {
         self.root.join("venv")
     }
+    // Windows は Python を使わない
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn venv_python(&self) -> PathBuf {
         self.venv().join("bin").join("python")
     }
@@ -151,6 +156,7 @@ impl DataPaths {
         self.root.join("uv")
     }
     /// 同梱 uv のハッシュのキャッシュ (起動のたびに uv 全体を読まないため)
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub fn uv_hash_cache(&self) -> PathBuf {
         self.uv().join("bundled-uv-hash.json")
     }
@@ -162,16 +168,25 @@ impl DataPaths {
     pub fn models(&self) -> PathBuf {
         self.root.join("models")
     }
+    /// Windows: CPU 実行に同意した時に取得する CPU 版の llama-server (同梱の Vulkan 版はコピーしない)
+    #[cfg(target_os = "windows")]
+    pub fn llama_cpu(&self) -> PathBuf {
+        self.root.join("llama-cpu")
+    }
 
     /// 実行環境 (runtime) を構成するもの。ストレージ表示と「実行環境とモデルのみ削除」で使う
     pub fn runtime_dirs(&self) -> Vec<PathBuf> {
-        vec![
+        #[allow(unused_mut)]
+        let mut dirs = vec![
             self.python(),
             self.venv(),
             self.uv(),
             self.cache(),
             self.asr_server(),
-        ]
+        ];
+        #[cfg(target_os = "windows")]
+        dirs.push(self.llama_cpu());
+        dirs
     }
 }
 
@@ -181,6 +196,9 @@ pub struct Resources {
     pub uv: PathBuf,
     pub asr_server: PathBuf,
     pub verify_wav: PathBuf,
+    /// Windows: 同梱の llama-server/ (Vulkan 版。tauri.windows.conf.json の resources)
+    #[cfg(target_os = "windows")]
+    pub llama_server: PathBuf,
 }
 
 impl Resources {
@@ -192,6 +210,9 @@ impl Resources {
             uv,
             asr_server: dev_path(ENV_DEV_ASR_SERVER_DIR).unwrap_or_else(|| base.join("asr-server")),
             verify_wav: dev_path(ENV_DEV_VERIFY_WAV).unwrap_or_else(|| base.join("verify.wav")),
+            #[cfg(target_os = "windows")]
+            llama_server: dev_path(ENV_DEV_LLAMA_SERVER_DIR)
+                .unwrap_or_else(|| base.join("llama-server")),
         }
     }
 }
@@ -243,7 +264,6 @@ fn resolve_uv_with(
 
 /// 実在する実行可能な通常ファイルか確かめ、正規化したパスを返す
 pub fn check_executable(p: &Path) -> Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
     let c = p.canonicalize().with_context(|| {
         format!(
             "実行環境の導入ツール (uv) が見つかりません。アプリを入れ直してください: {}",
@@ -257,11 +277,16 @@ pub fn check_executable(p: &Path) -> Result<PathBuf> {
             c.display()
         );
     }
-    if meta.permissions().mode() & 0o111 == 0 {
-        bail!(
-            "実行環境の導入ツール (uv) に実行権限がありません。アプリを入れ直してください: {}",
-            c.display()
-        );
+    // Windows に実行権限のビットは無い (実行できるかは拡張子で決まる)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            bail!(
+                "実行環境の導入ツール (uv) に実行権限がありません。アプリを入れ直してください: {}",
+                c.display()
+            );
+        }
     }
     Ok(c)
 }
@@ -287,7 +312,8 @@ mod tests {
         assert!(ok(&base.join("empty")));
         // 相対・`..`
         assert!(!ok(Path::new("data")));
-        assert!(!ok(&base.join("empty/../empty")));
+        // 正規化前のパスで確かめる (Windows の canonicalize が返す `\\?\` 付きのパスでは `..` が要素にならない)
+        assert!(!ok(&tmp.path().join("empty").join("..").join("empty")));
         // 空でなく目印もない
         std::fs::create_dir_all(base.join("docs")).unwrap();
         std::fs::write(base.join("docs/a.txt"), "x").unwrap();
@@ -304,14 +330,19 @@ mod tests {
         assert!(!ok(&target));
         assert!(!ok(&base));
         assert!(!ok(Path::new("/")));
-        // シンボリックリンク経由で保護対象の祖先を指す
-        std::os::unix::fs::symlink(base.join("repo/src-tauri"), base.join("link")).unwrap();
-        assert!(!ok(&base.join("link")));
+        // シンボリックリンク経由で保護対象の祖先を指す (Windows の symlink は権限が要るため unix のみ)
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(base.join("repo/src-tauri"), base.join("link")).unwrap();
+            assert!(!ok(&base.join("link")));
+        }
         // 保護対象の中 (祖先ではない) は構わない
         assert!(ok(&target.join("dev-data")));
     }
 
+    /// .app の構成・実行権限・symlink を使うため macOS のみ (uv は Mac の実行環境)
     #[test]
+    #[cfg(target_os = "macos")]
     fn uv_in_app_bundle_uses_helpers() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
@@ -358,6 +389,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn uv_outside_app_bundle_uses_resource() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();

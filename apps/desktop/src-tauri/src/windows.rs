@@ -7,24 +7,35 @@
 //! - `settings` / `setup`: 必要な時に作り、閉じたら破棄する。表示中だけ Dock に出す (ActivationPolicy::Regular)
 //!
 //! AppKit の操作はメインスレッドで行う (`run_on_main_thread`)。
+//!
+//! Windows のパネルは `focusable(false)` の通常の WebView ウィンドウに、フォーカスを奪わない設定
+//! (`platform::panel`) を加えたもの (`panel_win`)。位置の計算 (`geometry`) は両 OS で共通。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+#[cfg(target_os = "macos")]
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
+#[cfg(target_os = "macos")]
 use objc2::MainThreadMarker;
+#[cfg(target_os = "macos")]
 use objc2_app_kit::NSEvent;
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use serde::{Deserialize, Serialize};
-use tauri::{
-    ActivationPolicy, AppHandle, Emitter, LogicalPosition, Manager, WebviewUrl,
-    WebviewWindowBuilder,
-};
+#[cfg(target_os = "macos")]
+use tauri::{ActivationPolicy, LogicalPosition};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+#[cfg(target_os = "macos")]
 use tauri_nspanel::{CollectionBehavior, ManagerExt, PanelBuilder, PanelLevel, StyleMask};
 
 use crate::core::Core;
 use crate::i18n::Msg;
+#[cfg(target_os = "macos")]
 use crate::macos::{activation, screen};
 use crate::settings::PanelPosition;
 use geometry::{PanelAnchor, Point, Rect};
@@ -39,10 +50,13 @@ pub const PANEL_ANCHOR: &str = "panel-anchor";
 /// パネルの初期の大きさ (フロントエンドが set_panel_size で決めるまでの仮の値)
 const PANEL_INITIAL_SIZE: (f64, f64) = (320.0, 100.0);
 /// ドラッグ後、位置を保存するまでの待ち (ドラッグ中に何度も書き込まない)
+#[cfg(target_os = "macos")]
 const SAVE_POSITION_DELAY: Duration = Duration::from_millis(500);
 /// ボタンを離した後に届く移動通知もドラッグの続きとみなす時間
+#[cfg(target_os = "macos")]
 const DRAG_GRACE: Duration = Duration::from_millis(800);
 
+#[cfg(target_os = "macos")]
 mod panel_class {
     use tauri_nspanel::tauri_panel;
 
@@ -59,6 +73,7 @@ mod panel_class {
         })
     }
 }
+#[cfg(target_os = "macos")]
 use panel_class::MukuchiPanel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,7 +111,8 @@ struct Navigate {
 #[derive(Default)]
 struct PanelGeom {
     size: (f64, f64),
-    /// 利用者の位置 (ピルのアンカー点。保存位置・既定位置・ドラッグ先。グローバル座標)。
+    /// 利用者の位置 (ピルのアンカー点。保存位置・既定位置・ドラッグ先。Mac はグローバル座標、
+    /// Windows は `display_id` のディスプレイの左下原点の論理 px)。
     /// 実際の位置は大きさに応じて表示中のディスプレイの visibleFrame に収めたもの (大きさが戻れば元の位置に戻る)
     desired: Option<Point>,
     /// 表示中のディスプレイ
@@ -174,6 +190,7 @@ pub fn panel_anchor(app: &AppHandle) -> PanelAnchor {
 // ---- panel ------------------------------------------------------------------
 
 /// パネルを作る。`visible` なら表示する (セットアップ完了前は作るだけ)。setup (メインスレッド) から呼ぶ。
+#[cfg(target_os = "macos")]
 pub fn create_panel(app: &AppHandle, visible: bool) -> Result<()> {
     let (w, h) = PANEL_INITIAL_SIZE;
     let panel = PanelBuilder::<_, MukuchiPanel>::new(app, PANEL)
@@ -222,6 +239,7 @@ pub fn create_panel(app: &AppHandle, visible: bool) -> Result<()> {
 }
 
 /// パネルを表示する (表示中なら何もしない)。どのスレッドからでも呼べる。
+#[cfg(target_os = "macos")]
 pub fn show_panel(app: &AppHandle) -> Result<()> {
     let app2 = app.clone();
     app.run_on_main_thread(move || {
@@ -243,6 +261,7 @@ pub fn show_panel(app: &AppHandle) -> Result<()> {
 }
 
 /// パネルのクリックで mukuchi を前面アプリにしない設定をする (メインスレッド)。
+#[cfg(target_os = "macos")]
 fn ensure_prevents_activation(app: &AppHandle) {
     let Ok(panel) = app.get_webview_panel(PANEL) else {
         return;
@@ -255,6 +274,7 @@ fn ensure_prevents_activation(app: &AppHandle) {
 }
 
 /// 開発時の確認用に、フォーカスを奪わないための設定をログに出す。
+#[cfg(target_os = "macos")]
 fn log_panel_flags(app: &AppHandle) {
     let Ok(panel) = app.get_webview_panel(PANEL) else {
         return;
@@ -274,6 +294,7 @@ fn log_panel_flags(app: &AppHandle) {
 }
 
 /// フロントエンドが決めた大きさにする。アンカー点は保ち、表示中のディスプレイに収める。
+#[cfg(target_os = "macos")]
 pub fn set_panel_size(app: &AppHandle, width: f64, height: f64) -> Result<()> {
     if !width.is_finite() || !height.is_finite() {
         anyhow::bail!("大きさが不正です");
@@ -290,6 +311,7 @@ pub fn set_panel_size(app: &AppHandle, width: f64, height: f64) -> Result<()> {
 }
 
 /// ディスプレイ構成 (ID と範囲) を表す文字列。変化の検出に使う
+#[cfg(target_os = "macos")]
 fn screens_signature(mtm: MainThreadMarker) -> String {
     screen::screens(mtm)
         .iter()
@@ -304,6 +326,7 @@ fn screens_signature(mtm: MainThreadMarker) -> String {
 }
 
 /// 保存位置 (なければ既定位置) にパネルを置く。`force` でなければ同じディスプレイの同じ位置には動かさない。
+#[cfg(target_os = "macos")]
 fn reposition_panel_on_main(app: &AppHandle, force: bool) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
@@ -357,6 +380,7 @@ fn reposition_panel_on_main(app: &AppHandle, force: bool) {
 }
 
 /// 利用者の位置と大きさから、表示中のディスプレイに収めたフレームを設定する (メインスレッド)。
+#[cfg(target_os = "macos")]
 fn apply_panel_frame(app: &AppHandle) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
@@ -413,6 +437,7 @@ fn apply_panel_frame(app: &AppHandle) {
 }
 
 /// 表示位置の見直し (定期実行)。既定位置に追従している間は前面ウィンドウのディスプレイへ移る。
+#[cfg(target_os = "macos")]
 pub fn refresh_panel_position(app: &AppHandle) {
     let app2 = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -424,11 +449,13 @@ pub fn refresh_panel_position(app: &AppHandle) {
 }
 
 /// マウスの左ボタンが押されているか
+#[cfg(target_os = "macos")]
 fn mouse_down() -> bool {
     NSEvent::pressedMouseButtons() & 1 != 0
 }
 
 /// 利用者がドラッグ中 (または離した直後) か
+#[cfg(target_os = "macos")]
 fn is_dragging(g: &PanelGeom) -> bool {
     mouse_down() && g.last_drag.is_some() || g.last_drag.is_some_and(|t| t.elapsed() < DRAG_GRACE)
 }
@@ -438,6 +465,7 @@ fn is_dragging(g: &PanelGeom) -> bool {
 /// 位置を保存するのは利用者のドラッグ (マウスボタンを押したままの移動) だけ。
 /// ディスプレイの取り外し・解像度の変更で AppKit がパネルを動かした場合は保存せず、
 /// 保存位置 (そのディスプレイがなければ既定位置) に置き直す。
+#[cfg(target_os = "macos")]
 pub fn on_panel_moved(app: &AppHandle) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
@@ -484,6 +512,7 @@ pub fn on_panel_moved(app: &AppHandle) {
     schedule_drag_end(app.clone(), generation);
 }
 
+#[cfg(target_os = "macos")]
 fn schedule_drag_end(app: AppHandle, generation: u64) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(SAVE_POSITION_DELAY).await;
@@ -493,6 +522,7 @@ fn schedule_drag_end(app: AppHandle, generation: u64) {
 }
 
 /// ドラッグが止まった。ボタンを離していれば、画面内に収めた位置に置いて保存する (メインスレッド)。
+#[cfg(target_os = "macos")]
 fn finish_drag(app: &AppHandle, generation: u64) {
     let win = windows(app);
     if win.save_generation.load(Ordering::SeqCst) != generation {
@@ -528,6 +558,7 @@ fn finish_drag(app: &AppHandle, generation: u64) {
 }
 
 /// 設定の panelPosition が外から変わった (既定位置へ戻す等) 場合に反映する。
+#[cfg(target_os = "macos")]
 pub fn on_settings_panel_position(app: &AppHandle, pos: Option<PanelPosition>) {
     let win = windows(app);
     {
@@ -540,6 +571,548 @@ pub fn on_settings_panel_position(app: &AppHandle, pos: Option<PanelPosition>) {
     let app2 = app.clone();
     let _ = app.run_on_main_thread(move || reposition_panel_on_main(&app2, true));
 }
+
+/// Windows のパネル (docs/plans/windows-plan.md §4.1 パネル、U8)。
+///
+/// フォーカスを奪わない設定は `platform::panel` (WS_EX_NOACTIVATE・WS_EX_TOOLWINDOW・サブクラス)。
+/// 位置の考え方は Mac と同じ (`geometry`)。座標はディスプレイごとの「左下原点・y 上向き・論理 px」に換算して
+/// `geometry` に渡し、結果を仮想スクリーンの物理 px (y 下向き) に戻す。`desired` はそのディスプレイ内の座標。
+/// ディスプレイの ID はデバイス名 (`\\.\DISPLAY1`)、範囲はタスクバーを除いた作業領域
+#[cfg(target_os = "windows")]
+mod panel_win {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::platform::panel as pp;
+    use geometry::ScreenInfo;
+
+    /// ドラッグ後、位置を保存するまでの待ち (ドラッグ中に何度も書き込まない)
+    const SAVE_POSITION_DELAY: Duration = Duration::from_millis(500);
+    /// ボタンを離した後に届く移動通知もドラッグの続きとみなす時間
+    const DRAG_GRACE: Duration = Duration::from_millis(800);
+
+    /// ディスプレイ。座標は仮想スクリーンの物理 px (左上原点・y 下向き)
+    #[derive(Debug, Clone, PartialEq)]
+    pub(super) struct Display {
+        pub id: String,
+        pub scale: f64,
+        /// (x, y, w, h)
+        pub frame: (i32, i32, u32, u32),
+        /// タスクバーを除いた作業領域
+        pub work: (i32, i32, u32, u32),
+    }
+
+    impl Display {
+        /// このディスプレイの左下原点・y 上向き・論理 px での範囲 (`geometry` に渡す形)
+        pub fn local(&self) -> ScreenInfo {
+            let s = self.scale;
+            let (fx, fy, fw, fh) = self.frame;
+            let (wx, wy, ww, wh) = self.work;
+            let h = fh as f64 / s;
+            let work_h = wh as f64 / s;
+            let work_top = (wy - fy) as f64 / s;
+            ScreenInfo {
+                id: self.id.clone(),
+                frame: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: fw as f64 / s,
+                    h,
+                },
+                visible: Rect {
+                    x: (wx - fx) as f64 / s,
+                    y: h - (work_top + work_h),
+                    w: ww as f64 / s,
+                    h: work_h,
+                },
+            }
+        }
+
+        /// ローカルの矩形 → 物理 px の (x, y, w, h)
+        pub fn rect_to_physical(&self, r: &Rect) -> (i32, i32, i32, i32) {
+            let s = self.scale;
+            let (fx, fy, _, fh) = self.frame;
+            let h = fh as f64 / s;
+            let top = h - (r.y + r.h);
+            (
+                fx + (r.x * s).round() as i32,
+                fy + (top * s).round() as i32,
+                (r.w * s).round() as i32,
+                (r.h * s).round() as i32,
+            )
+        }
+
+        /// 物理 px の (x, y, w, h) → ローカルの矩形
+        pub fn rect_from_physical(&self, (x, y, w, h): (i32, i32, u32, u32)) -> Rect {
+            let s = self.scale;
+            let (fx, fy, _, fh) = self.frame;
+            let lh = h as f64 / s;
+            let top = (y - fy) as f64 / s;
+            Rect {
+                x: (x - fx) as f64 / s,
+                y: fh as f64 / s - (top + lh),
+                w: w as f64 / s,
+                h: lh,
+            }
+        }
+
+        fn distance_sq(&self, (px, py): (i32, i32)) -> i64 {
+            let (x, y, w, h) = self.frame;
+            let dx = i64::from((x - px).max(0).max(px - (x + w as i32)));
+            let dy = i64::from((y - py).max(0).max(py - (y + h as i32)));
+            dx * dx + dy * dy
+        }
+    }
+
+    /// 点を含むディスプレイ (無ければいちばん近いもの)
+    pub(super) fn display_at(ds: &[Display], p: (i32, i32)) -> Option<&Display> {
+        ds.iter().min_by_key(|d| d.distance_sq(p))
+    }
+
+    fn displays(app: &AppHandle) -> Vec<Display> {
+        app.available_monitors()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| {
+                let (pos, size, work) = (m.position(), m.size(), m.work_area());
+                Some(Display {
+                    id: m.name()?.clone(),
+                    scale: m.scale_factor(),
+                    frame: (pos.x, pos.y, size.width, size.height),
+                    work: (
+                        work.position.x,
+                        work.position.y,
+                        work.size.width,
+                        work.size.height,
+                    ),
+                })
+            })
+            .collect()
+    }
+
+    /// ディスプレイ構成 (ID・範囲・倍率) を表す文字列。変化の検出に使う
+    fn screens_signature(ds: &[Display]) -> String {
+        ds.iter()
+            .map(|d| format!("{}:{:?}:{:?}:{}", d.id, d.frame, d.work, d.scale))
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
+    fn panel_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+        app.get_webview_window(PANEL)
+    }
+
+    /// パネルを作る。`visible` なら表示する (セットアップ完了前は作るだけ)。setup (メインスレッド) から呼ぶ。
+    pub fn create_panel(app: &AppHandle, visible: bool) -> Result<()> {
+        let (w, h) = PANEL_INITIAL_SIZE;
+        let panel = WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App("index.html".into()))
+            .title("mukuchi")
+            .inner_size(w, h)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            // tao が WS_EX_NOACTIVATE を付ける。作成時にもアクティブにしない
+            .focusable(false)
+            .focused(false)
+            .visible(false)
+            .build()
+            .context("パネルを作成できません")?;
+        let hwnd = panel.hwnd().context("パネルのウィンドウがありません")?;
+        pp::prevent_activation(hwnd)?;
+        reposition_panel_on_main(app, true);
+        if visible {
+            panel.show().context("パネルを表示できません")?;
+        }
+        let (noactivate, toolwindow) = pp::activation_flags(hwnd);
+        log::info!("panel: noactivate={noactivate} toolwindow={toolwindow}");
+        Ok(())
+    }
+
+    /// パネルを表示する (表示中なら何もしない)。どのスレッドからでも呼べる。
+    pub fn show_panel(app: &AppHandle) -> Result<()> {
+        let app2 = app.clone();
+        app.run_on_main_thread(move || {
+            let Some(panel) = panel_window(&app2) else {
+                log::warn!("パネルがありません");
+                return;
+            };
+            if panel.is_visible().unwrap_or(false) {
+                return;
+            }
+            // 隠れている間にディスプレイ構成が変わっていることがあるため置き直してから出す
+            reposition_panel_on_main(&app2, true);
+            // サブクラスが SWP_NOACTIVATE を足すため、表示してもアクティブにならない
+            if let Err(e) = panel.show() {
+                log::warn!("パネルを表示できません: {e}");
+                return;
+            }
+            log::info!("パネルを表示");
+        })
+        .context("メインスレッドに送れません")
+    }
+
+    /// フロントエンドが決めた大きさにする。アンカー点は保ち、表示中のディスプレイに収める。
+    pub fn set_panel_size(app: &AppHandle, width: f64, height: f64) -> Result<()> {
+        if !width.is_finite() || !height.is_finite() {
+            anyhow::bail!("大きさが不正です");
+        }
+        // 整数の px にする (端数があると中央揃えの丸めでアンカー点がずれる)。内容が収まるよう切り上げる
+        let w = width.clamp(1.0, 4000.0).ceil();
+        let h = height.clamp(1.0, 4000.0).ceil();
+        windows(app).geom().size = (w, h);
+        let app2 = app.clone();
+        app.run_on_main_thread(move || apply_panel_frame(&app2))
+            .context("メインスレッドに送れません")?;
+        Ok(())
+    }
+
+    /// 保存位置 (なければ既定位置) にパネルを置く。`force` でなければ同じディスプレイの同じ位置には動かさない。
+    fn reposition_panel_on_main(app: &AppHandle, force: bool) {
+        let ds = displays(app);
+        let win = windows(app);
+        let (saved, size) = {
+            let g = win.geom();
+            (g.saved.clone(), g.size)
+        };
+        let from_saved = saved
+            .as_ref()
+            .and_then(|p| Some((ds.iter().find(|d| d.id == p.display_id)?, p)));
+        let target = match from_saved {
+            Some((d, p)) => {
+                let local = d.local();
+                let pos = if p.version < PanelPosition::CURRENT_VERSION {
+                    // 旧形式は Mac のものだけ (Windows 版は最初から現行の版で保存する) だが、同じ扱いにしておく
+                    let migrated = geometry::migrate(p, size, &local);
+                    win.geom().saved = Some(migrated.clone());
+                    persist_panel_position(app, migrated.clone());
+                    migrated
+                } else {
+                    p.clone()
+                };
+                Some((d, geometry::from_relative(&pos, &local.frame)))
+            }
+            // 保存位置がない (またはそのディスプレイが外された) 場合は前面ウィンドウのディスプレイの既定位置
+            None => {
+                let primary = app
+                    .primary_monitor()
+                    .ok()
+                    .flatten()
+                    .and_then(|m| m.name().cloned());
+                pp::foreground_monitor_name()
+                    .and_then(|n| ds.iter().find(|d| d.id == n))
+                    .or_else(|| primary.and_then(|n| ds.iter().find(|d| d.id == n)))
+                    .or_else(|| ds.first())
+                    .map(|d| (d, geometry::default_point(&d.local().visible)))
+            }
+        };
+        let Some((d, desired)) = target else {
+            return;
+        };
+        let sig = screens_signature(&ds);
+        let mut g = win.geom();
+        let same = g.display_id.as_deref() == Some(d.id.as_str())
+            && g.desired.is_some_and(|a| a.approx_eq(&desired))
+            && g.screens_sig.as_deref() == Some(sig.as_str());
+        if !force && same {
+            return;
+        }
+        g.desired = Some(desired);
+        g.display_id = Some(d.id.clone());
+        g.screens_sig = Some(sig);
+        drop(g);
+        apply_panel_frame(app);
+    }
+
+    /// 利用者の位置と大きさから、表示中のディスプレイに収めたフレームを設定する (メインスレッド)。
+    fn apply_panel_frame(app: &AppHandle) {
+        let Some(panel) = panel_window(app) else {
+            return;
+        };
+        let Ok(hwnd) = panel.hwnd() else {
+            return;
+        };
+        // タスクバーの大きさ・位置は変わりうるため、その都度ディスプレイの作業領域を読む
+        let ds = displays(app);
+        let win = windows(app);
+        let mut g = win.geom();
+        let Some(desired) = g.desired else {
+            return;
+        };
+        let Some(d) = g
+            .display_id
+            .as_deref()
+            .and_then(|id| ds.iter().find(|d| d.id == id))
+        else {
+            return;
+        };
+        let local = d.local();
+        let (r, anchor) = geometry::place(desired, g.size, &local.visible);
+        let changed_anchor = note_anchor(&mut g, anchor);
+        let current = match (panel.outer_position(), panel.outer_size()) {
+            (Ok(p), Ok(s)) => Some(d.rect_from_physical((p.x, p.y, s.width, s.height))),
+            _ => None,
+        };
+        let same_frame = g.last_frame == Some(r) && current.is_some_and(|c| c.approx_eq(&r));
+        if !same_frame {
+            // 移動通知 (on_panel_moved) が SetWindowPos の中から同期的に来ても自分の操作と分かるよう、先に記録する
+            g.last_frame = Some(r);
+        }
+        drop(g);
+        // 大きさを変える前に送る (フロントエンドが新しい基準で描き始められるように)
+        if let Some(a) = changed_anchor {
+            emit_anchor(app, a);
+        }
+        if same_frame {
+            return;
+        }
+        let (x, y, w, h) = d.rect_to_physical(&r);
+        if cfg!(debug_assertions) {
+            // 開発時の確認用 (パネルのクリック試験で位置を知るため)
+            log::info!("panel frame: x={x} y={y} w={w} h={h} anchor={anchor:?}");
+        }
+        // 倍率の違うディスプレイへ移る時は、先に位置だけ移して OS の倍率の切り替え (WM_DPICHANGED による
+        // 大きさの変更) を済ませてから大きさを合わせる (同時に変えると切り替えで大きさが二重に変わる)
+        let current_scale = panel.scale_factor().unwrap_or(d.scale);
+        if (current_scale - d.scale).abs() > 0.001 {
+            if let Ok(s) = panel.outer_size() {
+                let _ = pp::set_frame(hwnd, x, y, s.width as i32, s.height as i32);
+            }
+        }
+        if let Err(e) = pp::set_frame(hwnd, x, y, w, h) {
+            log::warn!("{e:#}");
+        }
+    }
+
+    /// 表示位置の見直し (定期実行)。既定位置に追従している間は前面ウィンドウのディスプレイへ移る。
+    pub fn refresh_panel_position(app: &AppHandle) {
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if is_dragging(&windows(&app2).geom()) {
+                return;
+            }
+            reposition_panel_on_main(&app2, false)
+        });
+    }
+
+    /// 利用者がドラッグ中 (または離した直後) か
+    fn is_dragging(g: &PanelGeom) -> bool {
+        pp::primary_button_down() && g.last_drag.is_some()
+            || g.last_drag.is_some_and(|t| t.elapsed() < DRAG_GRACE)
+    }
+
+    /// パネルが動いた (Tauri の Moved)。メインスレッドで呼ばれる。
+    ///
+    /// 位置を保存するのは利用者のドラッグ (マウスボタンを押したままの移動) だけ。
+    /// ディスプレイの取り外し・解像度や倍率の変更で OS がパネルを動かした場合は保存せず、
+    /// 保存位置 (そのディスプレイがなければ既定位置) に置き直す。
+    pub fn on_panel_moved(app: &AppHandle) {
+        let Some(panel) = panel_window(app) else {
+            return;
+        };
+        let (Ok(pos), Ok(size)) = (panel.outer_position(), panel.outer_size()) else {
+            return;
+        };
+        let ds = displays(app);
+        // ディスプレイはピル (影の余白を除いた部分) の中心のおおよその位置 (ウィンドウの中心) で決める
+        let center = (
+            pos.x + (size.width / 2) as i32,
+            pos.y + (size.height / 2) as i32,
+        );
+        let Some(d) = display_at(&ds, center) else {
+            return;
+        };
+        let frame = d.rect_from_physical((pos.x, pos.y, size.width, size.height));
+        let win = windows(app);
+        let mut g = win.geom();
+        if g.display_id.as_deref() == Some(d.id.as_str())
+            && g.last_frame.is_some_and(|f| f.approx_eq(&frame))
+        {
+            // Rust が設定した位置 (大きさの変更を含む)
+            return;
+        }
+        let screens_changed = g.screens_sig.as_deref() != Some(screens_signature(&ds).as_str());
+        let pressed = pp::primary_button_down();
+        if screens_changed || !(pressed || is_dragging(&g)) {
+            drop(g);
+            log::info!("パネルがシステムにより移動された (ディスプレイ構成・倍率の変化等)。保存せず置き直す");
+            reposition_panel_on_main(app, true);
+            return;
+        }
+        if pressed {
+            g.last_drag = Some(Instant::now());
+        }
+        let local = d.local();
+        let (point, anchor) = geometry::point_of_frame(&frame, &local.visible);
+        g.last_frame = Some(frame);
+        g.desired = Some(point);
+        g.display_id = Some(d.id.clone());
+        // 見回りがドラッグ中に保存位置へ引き戻さないよう、保存前でも利用者の位置として持つ
+        g.saved = Some(geometry::to_relative(point, &local));
+        let changed_anchor = note_anchor(&mut g, anchor);
+        drop(g);
+        if let Some(a) = changed_anchor {
+            emit_anchor(app, a);
+        }
+        // ドラッグ中は何度も呼ばれるため、止まってから保存する
+        let generation = win.save_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        schedule_drag_end(app.clone(), generation);
+    }
+
+    fn schedule_drag_end(app: AppHandle, generation: u64) {
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(SAVE_POSITION_DELAY).await;
+            let app2 = app.clone();
+            let _ = app.run_on_main_thread(move || finish_drag(&app2, generation));
+        });
+    }
+
+    /// ドラッグが止まった。ボタンを離していれば、画面内に収めた位置に置いて保存する (メインスレッド)。
+    fn finish_drag(app: &AppHandle, generation: u64) {
+        let win = windows(app);
+        if win.save_generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        if pp::primary_button_down() {
+            // 押したまま止まっている。離すまで待つ (ドラッグ中にパネルを動かさない)
+            schedule_drag_end(app.clone(), generation);
+            return;
+        }
+        let ds = displays(app);
+        let mut g = win.geom();
+        g.last_drag = None;
+        let (Some(desired), Some(id)) = (g.desired, g.display_id.clone()) else {
+            return;
+        };
+        let Some(d) = ds.iter().find(|d| d.id == id) else {
+            return;
+        };
+        let local = d.local();
+        // 画面外 (タスクバーの下) に置かれた分は収めてから保存する。
+        // ここで収めるのは利用者が置いた位置の補正なので保存する (大きさの変更による自動のずれとは別)
+        let (frame, _) = geometry::place(desired, g.size, &local.visible);
+        let (point, _) = geometry::point_of_frame(&frame, &local.visible);
+        let pos = geometry::to_relative(point, &local);
+        g.desired = Some(point);
+        g.saved = Some(pos.clone());
+        g.screens_sig = Some(screens_signature(&ds));
+        drop(g);
+        apply_panel_frame(app);
+        persist_panel_position(app, pos);
+    }
+
+    /// 設定の panelPosition が外から変わった (既定位置へ戻す等) 場合に反映する。
+    pub fn on_settings_panel_position(app: &AppHandle, pos: Option<PanelPosition>) {
+        let win = windows(app);
+        {
+            let mut g = win.geom();
+            if g.saved == pos {
+                return;
+            }
+            g.saved = pos;
+        }
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || reposition_panel_on_main(&app2, true));
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// 2560x1440 (倍率 1.5)、下に高さ 72px のタスクバー
+        fn display() -> Display {
+            Display {
+                id: r"\\.\DISPLAY1".into(),
+                scale: 1.5,
+                frame: (0, 0, 2560, 1440),
+                work: (0, 0, 2560, 1368),
+            }
+        }
+
+        #[test]
+        fn local_is_logical_bottom_left_origin() {
+            let s = display().local();
+            assert_eq!(
+                s.frame,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 2560.0 / 1.5,
+                    h: 960.0
+                }
+            );
+            // タスクバー (下 72px = 48 論理 px) を除いた領域は下から 48 の上
+            assert_eq!(s.visible.y, 48.0);
+            assert_eq!(s.visible.h, 912.0);
+            assert_eq!(s.visible.x, 0.0);
+        }
+
+        #[test]
+        fn physical_round_trip_on_secondary_display() {
+            // 主ディスプレイの左にある 125% のディスプレイ (上のタスクバー 60px)
+            let d = Display {
+                id: r"\\.\DISPLAY2".into(),
+                scale: 1.25,
+                frame: (-1920, 0, 1920, 1080),
+                work: (-1920, 60, 1920, 1020),
+            };
+            let s = d.local();
+            assert_eq!(s.visible.y, 0.0);
+            assert_eq!(s.visible.h, 816.0);
+            let r = Rect {
+                x: 100.0,
+                y: 40.0,
+                w: 288.0,
+                h: 84.0,
+            };
+            let (x, y, w, h) = d.rect_to_physical(&r);
+            assert_eq!((x, w, h), (-1920 + 125, 360, 105));
+            // 下から 40 論理 px = 上から 864 - 40 - 84 = 740 論理 px = 925 物理 px
+            assert_eq!(y, 925);
+            let back = d.rect_from_physical((x, y, w as u32, h as u32));
+            assert!(back.approx_eq(&r), "{back:?}");
+        }
+
+        /// 既定位置はタスクバーの上の中央 (Mac の Dock の上と同じ)
+        #[test]
+        fn default_position_is_above_taskbar() {
+            let d = display();
+            let s = d.local();
+            let p = geometry::default_point(&s.visible);
+            let (f, _) = geometry::place(p, (288.0, 84.0), &s.visible);
+            let (_, y, _, h) = d.rect_to_physical(&f);
+            // ピルの下端 (ウィンドウの下端から影の余白 32 上) がタスクバーの上端から 16 上
+            let pill_bottom = y + h - (geometry::MARGINS.bottom * 1.5) as i32;
+            assert_eq!(pill_bottom, 1368 - (16.0 * 1.5) as i32);
+        }
+
+        #[test]
+        fn display_at_picks_containing_or_nearest() {
+            let a = display();
+            let b = Display {
+                id: "b".into(),
+                scale: 1.0,
+                frame: (2560, 0, 1920, 1080),
+                work: (2560, 0, 1920, 1040),
+            };
+            let ds = [a.clone(), b.clone()];
+            assert_eq!(display_at(&ds, (100, 100)), Some(&a));
+            assert_eq!(display_at(&ds, (3000, 100)), Some(&b));
+            // どちらにも無い点 (右下の外) は近い方
+            assert_eq!(display_at(&ds, (5000, 1200)), Some(&b));
+        }
+    }
+}
+#[cfg(target_os = "windows")]
+pub use panel_win::{
+    create_panel, on_panel_moved, on_settings_panel_position, refresh_panel_position,
+    set_panel_size, show_panel,
+};
 
 // ---- settings / setup -------------------------------------------------------
 
@@ -557,18 +1130,24 @@ pub fn open_settings(app: &AppHandle, category: Option<SettingsCategory>) -> Res
         Some(c) => format!("index.html?category={}", c.as_str()),
         None => "index.html".into(),
     };
-    let w = WebviewWindowBuilder::new(app, SETTINGS, WebviewUrl::App(url.into()))
+    let builder = WebviewWindowBuilder::new(app, SETTINGS, WebviewUrl::App(url.into()))
         .title(Msg::WindowSettings.to_string())
         .inner_size(760.0, 560.0)
         .resizable(false)
-        .maximizable(false)
+        .maximizable(false);
+    // タイトルバーを隠して信号機ボタンだけ出す (macOS のみの API。Windows の枠は Phase 2/5 で決める)
+    #[cfg(target_os = "macos")]
+    let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
-        .traffic_light_position(LogicalPosition::new(14.0, 16.0))
+        .traffic_light_position(LogicalPosition::new(14.0, 16.0));
+    let w = builder
         .center()
         .visible(false)
         .build()
         .context("設定ウィンドウを作成できません")?;
+    #[cfg(target_os = "windows")]
+    guard_system_menu(&w);
     show_regular(app, &w)
 }
 
@@ -576,19 +1155,41 @@ pub fn open_setup(app: &AppHandle) -> Result<()> {
     if let Some(w) = app.get_webview_window(SETUP) {
         return show_regular(app, &w);
     }
-    let w = WebviewWindowBuilder::new(app, SETUP, WebviewUrl::App("index.html".into()))
+    let builder = WebviewWindowBuilder::new(app, SETUP, WebviewUrl::App("index.html".into()))
         .title(Msg::WindowSetup.to_string())
         .inner_size(560.0, 440.0)
         .resizable(false)
-        .maximizable(false)
+        .maximizable(false);
+    #[cfg(target_os = "macos")]
+    let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
-        .traffic_light_position(LogicalPosition::new(14.0, 12.0))
+        .traffic_light_position(LogicalPosition::new(14.0, 12.0));
+    let w = builder
         .center()
         .visible(false)
         .build()
         .context("セットアップウィンドウを作成できません")?;
+    #[cfg(target_os = "windows")]
+    guard_system_menu(&w);
     show_regular(app, &w)
+}
+
+/// ショートカットの記録中に Alt+Space でシステムメニューが開かないようにする (platform::sysmenu)。
+/// 失敗しても画面は使えるため、ログだけ残す
+#[cfg(target_os = "windows")]
+fn guard_system_menu(w: &tauri::WebviewWindow) {
+    match w.hwnd() {
+        Ok(hwnd) => {
+            if let Err(e) = crate::platform::sysmenu::guard_window(hwnd) {
+                log::warn!(
+                    "ウィンドウ ({}) のメニューの抑止を設定できません: {e:#}",
+                    w.label()
+                );
+            }
+        }
+        Err(e) => log::warn!("ウィンドウ ({}) のハンドルを取れません: {e}", w.label()),
+    }
 }
 
 /// Finder・Spotlight 等からの再度の起動 (Reopen) や2つ目のプロセスの起動時に、
@@ -630,8 +1231,12 @@ pub fn close_setup(app: &AppHandle) -> Result<()> {
 
 /// Dock に出してから表示・前面化する (Accessory のままだとウィンドウが前面に来ないことがある)。
 fn show_regular(app: &AppHandle, w: &tauri::WebviewWindow) -> Result<()> {
+    // Windows はウィンドウを開けばタスクバーに出るため切り替えは不要
+    #[cfg(target_os = "macos")]
     app.set_activation_policy(ActivationPolicy::Regular)
         .context("Dock 表示を切り替えられません")?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
     w.show().context("ウィンドウを表示できません")?;
     w.unminimize().ok();
     w.set_focus().context("ウィンドウを前面に出せません")?;
@@ -640,6 +1245,7 @@ fn show_regular(app: &AppHandle, w: &tauri::WebviewWindow) -> Result<()> {
 
 /// settings / setup が1つも表示されていなければ Dock から消す。
 /// ウィンドウの破棄 (Destroyed) の後に呼ぶ。
+#[cfg(target_os = "macos")]
 pub fn update_activation_policy(app: &AppHandle, closing: Option<&str>) {
     let any_visible = [SETTINGS, SETUP].iter().any(|label| {
         Some(*label) != closing
@@ -657,6 +1263,10 @@ pub fn update_activation_policy(app: &AppHandle, closing: Option<&str>) {
     }
 }
 
+/// Windows に Dock の表示の切り替えは無い
+#[cfg(not(target_os = "macos"))]
+pub fn update_activation_policy(_app: &AppHandle, _closing: Option<&str>) {}
+
 // ---- 位置計算 (テスト可能な純粋関数) -----------------------------------------
 
 /// パネルの位置の考え方:
@@ -673,8 +1283,17 @@ pub fn update_activation_policy(app: &AppHandle, closing: Option<&str>) {
 pub mod geometry {
     use serde::Serialize;
 
-    use crate::macos::screen::ScreenInfo;
     use crate::settings::PanelPosition;
+
+    /// ディスプレイ。座標は `Rect` と同じ
+    pub struct ScreenInfo {
+        /// settings.panelPosition.displayId に使う。macOS は CGDirectDisplayID (NSScreenNumber) の文字列、
+        /// Windows はモニターのデバイス名
+        pub id: String,
+        pub frame: Rect,
+        /// メニューバーと Dock (Windows はタスクバー) を除いた領域
+        pub visible: Rect,
+    }
 
     /// パネルのピルと Dock の上端の間 (デザイン 03)
     pub const DOCK_GAP: f64 = 16.0;
@@ -706,6 +1325,8 @@ pub mod geometry {
     }
 
     impl Rect {
+        // ディスプレイの判定 (macos/screen.rs) で使う。Windows は物理 px の Display で判定する
+        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
         pub fn contains(&self, (px, py): (f64, f64)) -> bool {
             px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
         }
@@ -722,6 +1343,7 @@ pub mod geometry {
                 && (self.h - o.h).abs() < 1.0
         }
 
+        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
         pub fn distance_sq(&self, (px, py): (f64, f64)) -> f64 {
             let dx = (self.x - px).max(0.0).max(px - (self.x + self.w));
             let dy = (self.y - py).max(0.0).max(py - (self.y + self.h));

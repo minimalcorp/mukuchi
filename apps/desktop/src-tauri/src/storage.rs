@@ -1,5 +1,9 @@
 //! ストレージ表示・「実行環境とモデルのみ削除」・完全なアンインストールの対象と削除
 //! (docs/architecture.md「識別子・パス」のアンインストール対象)。
+//!
+//! Windows はアプリ内でファイルを消さない (データの下の WebView2 のデータ・ログは実行中に使用中で消せないため)。
+//! 対象の表示と NSIS のアンインストーラーの起動までを行い、削除はアプリの終了後にアンインストーラー (とフック) が行う
+//! (docs/architecture.md「Windows 版」のアンインストール)。
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -7,9 +11,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 
+#[cfg(windows)]
+use crate::paths::{comparable, is_within, strip_verbatim};
 use crate::paths::{DataPaths, DATA_MARKER};
 
-/// 開発用: `1` ならアンインストールで何も消さず、消す対象と操作をログに出すだけにする (デバッグビルドのみ)
+/// 開発用: `1` ならアンインストールで何も消さず、消す対象と操作をログに出すだけにする (デバッグビルドのみ)。
+/// Windows の開発ビルドは uninstall.exe が無いため、指定がなくても常にこの動作 (core.rs)
+#[cfg_attr(windows, allow(dead_code))]
 pub const ENV_DEV_UNINSTALL_DRY_RUN: &str = "MUKUCHI_DEV_UNINSTALL_DRY_RUN";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -162,16 +170,20 @@ pub struct UninstallPlan {
     pub files: Vec<PathBuf>,
     /// `defaults delete` で消す設定 (plist) のドメインとファイル
     pub preferences: Option<(String, PathBuf)>,
-    /// ゴミ箱に入れるアプリ本体
+    /// ゴミ箱に入れるアプリ本体 (Windows はインストール先のフォルダ。アンインストーラーが消す)
     pub app_bundle: Option<PathBuf>,
+    /// Windows: スタートアップの登録 (レジストリの値。表示用)。Mac は空
+    pub registry: Vec<String>,
 }
 
 pub struct UninstallContext<'a> {
+    /// macOS の ~/Library の起点 (Windows は Tauri のパスから求めたデータ・ログだけを見る)
+    #[cfg_attr(windows, allow(dead_code))]
     pub home: &'a Path,
     pub bundle_id: &'a str,
     pub data_dir: &'a Path,
     pub log_dir: &'a Path,
-    /// 実行中のアプリ本体 (.app)。未バンドルの開発実行では None
+    /// 実行中のアプリ本体 (.app。Windows は NSIS で入れたインストール先のフォルダ)。未バンドルの開発実行では None
     pub app_bundle: Option<PathBuf>,
     /// 開発ビルド: 未バンドル実行 (tauri dev) で WebKit がプロダクト名で作る場所も含める。
     /// アプリ本体は `target_dir` の中にあるものだけを対象にする
@@ -185,37 +197,22 @@ pub struct DevScope<'a> {
 
 /// アンインストールの対象 (存在するものだけ)
 pub fn uninstall_plan(ctx: &UninstallContext) -> UninstallPlan {
-    let lib = ctx.home.join("Library");
-    let id = ctx.bundle_id;
     let mut candidates = Vec::new();
     match check_data_dir(ctx.data_dir) {
         Ok(()) => candidates.push(ctx.data_dir.to_path_buf()),
         Err(e) => log::warn!("{e:#}"),
     }
-    candidates.extend([
-        lib.join("Caches").join(id),
-        ctx.log_dir.to_path_buf(),
-        lib.join("WebKit").join(id),
-        lib.join("HTTPStorages").join(id),
-        lib.join("Saved Application State")
-            .join(format!("{id}.savedState")),
-    ]);
-    if let Some(dev) = &ctx.dev {
-        candidates.push(lib.join("Caches").join(dev.product_name));
-        candidates.push(lib.join("WebKit").join(dev.product_name));
-    }
-    let mut files = Vec::new();
+    candidates.extend(os_candidates(ctx));
+    let mut files: Vec<PathBuf> = Vec::new();
     for c in candidates {
-        if std::fs::symlink_metadata(&c).is_ok() && !files.contains(&c) {
+        if std::fs::symlink_metadata(&c).is_ok() && !covered(&files, &c) {
             files.push(c);
         }
     }
-    let plist = lib.join("Preferences").join(format!("{id}.plist"));
-    let preferences = plist.exists().then(|| (id.to_string(), plist));
     let app_bundle = ctx.app_bundle.clone().filter(|b| match &ctx.dev {
         None => true,
         Some(dev) => {
-            let inside = dev.target_dir.is_some_and(|t| b.starts_with(t));
+            let inside = dev.target_dir.is_some_and(|t| in_target(b, t));
             if !inside {
                 log::warn!(
                     "開発ビルドのため、target ディレクトリ外のアプリ本体は対象にしない: {}",
@@ -227,9 +224,96 @@ pub fn uninstall_plan(ctx: &UninstallContext) -> UninstallPlan {
     });
     UninstallPlan {
         files,
-        preferences,
+        preferences: preferences(ctx),
         app_bundle,
+        registry: registry_entries(),
     }
+}
+
+/// データディレクトリ以外の候補 (macOS: ~/Library 配下)
+#[cfg(not(windows))]
+fn os_candidates(ctx: &UninstallContext) -> Vec<PathBuf> {
+    let lib = ctx.home.join("Library");
+    let id = ctx.bundle_id;
+    let mut candidates = vec![
+        lib.join("Caches").join(id),
+        ctx.log_dir.to_path_buf(),
+        lib.join("WebKit").join(id),
+        lib.join("HTTPStorages").join(id),
+        lib.join("Saved Application State")
+            .join(format!("{id}.savedState")),
+    ];
+    if let Some(dev) = &ctx.dev {
+        candidates.push(lib.join("Caches").join(dev.product_name));
+        candidates.push(lib.join("WebKit").join(dev.product_name));
+    }
+    candidates
+}
+
+/// データディレクトリ以外の候補 (Windows): `%LOCALAPPDATA%\<バンドルID>` (WebView2 のデータ `EBWebView`・ログ)。
+/// 本番はデータディレクトリと同じ場所のため 1 つにまとまる。`MUKUCHI_DEV_DATA_DIR` で差し替えた開発では別に出る
+#[cfg(windows)]
+fn os_candidates(ctx: &UninstallContext) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = local_data_dir(ctx).into_iter().collect();
+    candidates.push(ctx.log_dir.to_path_buf());
+    candidates
+}
+
+/// Windows: Tauri の app_local_data_dir (`%LOCALAPPDATA%\<バンドルID>`)。app_log_dir はその下の `logs`
+/// (tauri の path の実装) のため、ログの親から求める。名前にバンドルIDを含む時だけ
+#[cfg(windows)]
+fn local_data_dir(ctx: &UninstallContext) -> Option<PathBuf> {
+    let dir = ctx.log_dir.parent()?;
+    let name = dir.file_name()?.to_str()?;
+    (name.eq_ignore_ascii_case(ctx.bundle_id)).then(|| dir.to_path_buf())
+}
+
+/// 既に対象のものと同じか、その中か (Mac は同じものだけを除く。Windows はデータの下のログ等を二重に出さない)
+#[cfg(not(windows))]
+fn covered(files: &[PathBuf], c: &Path) -> bool {
+    files.iter().any(|f| f == c)
+}
+
+#[cfg(windows)]
+fn covered(files: &[PathBuf], c: &Path) -> bool {
+    files.iter().any(|f| is_within(c, f))
+}
+
+#[cfg(not(windows))]
+fn in_target(bundle: &Path, target: &Path) -> bool {
+    bundle.starts_with(target)
+}
+
+#[cfg(windows)]
+fn in_target(bundle: &Path, target: &Path) -> bool {
+    is_within(bundle, target)
+}
+
+/// `defaults delete` で消す設定 (macOS のみ)
+#[cfg(not(windows))]
+fn preferences(ctx: &UninstallContext) -> Option<(String, PathBuf)> {
+    let id = ctx.bundle_id;
+    let plist = ctx
+        .home
+        .join("Library")
+        .join("Preferences")
+        .join(format!("{id}.plist"));
+    plist.exists().then(|| (id.to_string(), plist))
+}
+
+#[cfg(windows)]
+fn preferences(_ctx: &UninstallContext) -> Option<(String, PathBuf)> {
+    None
+}
+
+#[cfg(not(windows))]
+fn registry_entries() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(windows)]
+fn registry_entries() -> Vec<String> {
+    crate::autostart::registry_entries()
 }
 
 impl UninstallPlan {
@@ -242,17 +326,24 @@ impl UninstallPlan {
         if let Some(b) = &self.app_bundle {
             all.push(b);
         }
-        all.into_iter()
+        let mut targets: Vec<UninstallTarget> = all
+            .into_iter()
             .map(|p| UninstallTarget {
                 path: p.display().to_string(),
                 bytes: disk_usage(std::slice::from_ref(p)),
             })
-            .collect()
+            .collect();
+        targets.extend(self.registry.iter().map(|r| UninstallTarget {
+            path: r.clone(),
+            bytes: 0,
+        }));
+        targets
     }
 }
 
 /// 誤って無関係の場所を消さないための確認: 名前にバンドルID (開発はプロダクト名) を含み、
 /// ホームの Library 配下かデータディレクトリであること
+#[cfg(not(windows))]
 pub fn check_safe_target(p: &Path, ctx: &UninstallContext) -> Result<()> {
     let name = p
         .file_name()
@@ -273,9 +364,36 @@ pub fn check_safe_target(p: &Path, ctx: &UninstallContext) -> Result<()> {
     Ok(())
 }
 
+/// Windows: データディレクトリ (目印あり) か、`%LOCALAPPDATA%\<バンドルID>` (またはその中) であること。
+/// 比較は大文字小文字・`\\?\`・8.3 の短い名前を正規化して行う。Windows のアプリ内のアンインストールは
+/// ファイルを消さないため、ここは dry-run の表示での確認と、将来アプリ側で消す場合の安全策
+#[cfg(windows)]
+pub fn check_safe_target(p: &Path, ctx: &UninstallContext) -> Result<()> {
+    let name = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow!("名前のないパス: {}", p.display()))?;
+    let is_data = comparable(p) == comparable(ctx.data_dir);
+    let lower = name.to_lowercase();
+    let data_named = lower.contains(&ctx.bundle_id.to_lowercase())
+        || ctx
+            .dev
+            .as_ref()
+            .is_some_and(|d| lower.contains(&d.product_name.to_lowercase()));
+    let in_local = local_data_dir(ctx).is_some_and(|l| is_within(p, &l));
+    if !((is_data && data_named) || in_local) || comparable(p).components().count() < 4 {
+        bail!("削除対象として不正: {}", p.display());
+    }
+    if is_data {
+        check_data_dir(p)?;
+    }
+    Ok(())
+}
+
 /// 本番のアンインストールの前提: 実行中のアプリ本体が分かり、App Translocation
 /// (ダウンロードしたアプリを移動せずに開いた時に、読み取り専用の一時的な場所から実行される) でないこと。
 /// 満たさない場合は何も消さずにエラーにする (データだけ消えて本体が残るのを防ぐ)
+#[cfg(not(windows))]
 pub fn check_app_bundle(app_bundle: Option<&Path>, dev: bool) -> Result<()> {
     if dev {
         return Ok(());
@@ -289,8 +407,22 @@ pub fn check_app_bundle(app_bundle: Option<&Path>, dev: bool) -> Result<()> {
     Ok(())
 }
 
+/// Windows の本番のアンインストールの前提: NSIS で入れたもの (実行ファイルの隣に uninstall.exe がある) であること。
+/// `target\release` から直接動かした等で無ければ何もせずエラー (設定 > アプリ から消してもらう)
+#[cfg(windows)]
+pub fn check_app_bundle(app_bundle: Option<&Path>, dev: bool) -> Result<()> {
+    if dev {
+        return Ok(());
+    }
+    match app_bundle {
+        Some(dir) if dir.join(UNINSTALLER).is_file() => Ok(()),
+        _ => bail!(crate::i18n::Msg::UninstallerMissing),
+    }
+}
+
 /// App Translocation の実行場所か。`SecTranslocateIsTranslocatedURL` は公開ヘッダにない (SPI) ため、
 /// 実行場所のパス (`/private/var/folders/.../AppTranslocation/<UUID>/d/<name>.app`) で判定する
+#[cfg(not(windows))]
 pub fn is_translocated(bundle: &Path) -> bool {
     bundle
         .components()
@@ -321,6 +453,7 @@ pub fn delete_files(plan: &UninstallPlan, ctx: &UninstallContext, dry_run: bool)
 }
 
 /// 実行中のアプリ本体 (.app) のパス。未バンドルの実行では None
+#[cfg(not(windows))]
 pub fn current_app_bundle() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
     // <name>.app/Contents/MacOS/<exe>
@@ -329,6 +462,37 @@ pub fn current_app_bundle() -> Option<PathBuf> {
         && exe.parent()?.file_name()? == "MacOS"
         && exe.parent()?.parent()?.file_name()? == "Contents")
         .then(|| bundle.to_path_buf())
+}
+
+/// NSIS のアンインストーラー。インストール先 (`$INSTDIR`、currentUser の既定は `%LOCALAPPDATA%\<productName>`) の
+/// 直下に置かれる (Tauri の NSIS テンプレート installer.nsi の `WriteUninstaller "$INSTDIR\uninstall.exe"`)
+#[cfg(windows)]
+pub const UNINSTALLER: &str = "uninstall.exe";
+
+/// アンインストーラーに渡す引数。`/P`: 確認のページを出さず進捗だけ出して自動で閉じる (アプリの確認ダイアログで
+/// 同意済みのため。Tauri のテンプレートの passive)。`/MUKUCHI_PURGE`: データも消す印 (NSIS のフックが見る。
+/// テンプレートの GetOptions は前方一致のため、既存の `/P` `/UPDATE` `/NS` `/R` `/ARGS` で始まらない名前にする)
+#[cfg(windows)]
+pub const UNINSTALLER_ARGS: &str = "/P /MUKUCHI_PURGE";
+
+/// Windows: NSIS で入れたもの (実行ファイルの隣に uninstall.exe がある) ならインストール先のフォルダ。
+/// `tauri dev`・`target\release` からの実行では None (アップデート・アンインストールの対象にしない)
+#[cfg(windows)]
+pub fn current_app_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = strip_verbatim(exe.parent()?);
+    dir.join(UNINSTALLER).is_file().then_some(dir)
+}
+
+/// Windows: アンインストーラーを起動する (待たない)。作業ディレクトリはインストール先にしない
+/// (どれかのプロセスの作業ディレクトリになっているフォルダは消せないため)
+#[cfg(windows)]
+pub fn launch_uninstaller(install_dir: &Path) -> Result<()> {
+    crate::platform::shell_run(
+        &install_dir.join(UNINSTALLER),
+        UNINSTALLER_ARGS,
+        &std::env::temp_dir(),
+    )
 }
 
 /// このビルドの target ディレクトリ (build.rs が埋め込む)
@@ -401,6 +565,7 @@ mod tests {
 
     const ID: &str = "com.example.mukuchi.test";
 
+    #[cfg(not(windows))]
     fn fake_home(home: &Path) {
         let lib = home.join("Library");
         touch(
@@ -494,7 +659,9 @@ mod tests {
         assert!(lib.join("Caches/mukuchi").exists());
     }
 
+    /// ~/Library の構成 (macOS)。Windows は *_windows のテスト
     #[test]
+    #[cfg(not(windows))]
     fn dev_scope_limits_app_bundle_and_adds_product_dirs() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
@@ -518,7 +685,9 @@ mod tests {
         assert_eq!(uninstall_plan(&c).app_bundle, None);
     }
 
+    /// ~/Library の構成 (macOS)。Windows は *_windows のテスト
     #[test]
+    #[cfg(not(windows))]
     fn unsafe_targets_are_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
@@ -540,13 +709,16 @@ mod tests {
             files: vec![home.join("Library")],
             preferences: None,
             app_bundle: None,
+            registry: vec![],
         };
         std::fs::create_dir_all(home.join("Library")).unwrap();
         assert!(delete_files(&plan, &c, false).is_err());
         assert!(home.join("Library").exists());
     }
 
+    /// ~/Library の構成 (macOS)。Windows は *_windows のテスト
     #[test]
+    #[cfg(not(windows))]
     fn data_dir_without_marker_is_not_planned() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
@@ -565,6 +737,7 @@ mod tests {
             files: vec![data.clone()],
             preferences: None,
             app_bundle: None,
+            registry: vec![],
         };
         assert!(delete_files(&forced, &c, false).is_err());
         assert!(data.exists());
@@ -582,6 +755,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn release_uninstall_needs_real_app_location() {
         assert!(check_app_bundle(None, true).is_ok());
         assert!(check_app_bundle(None, false).is_err());
@@ -590,5 +764,138 @@ mod tests {
         let e = check_app_bundle(Some(t), false).unwrap_err();
         assert!(format!("{e}").contains("アプリケーション"), "{e}");
         assert!(check_app_bundle(Some(Path::new("/Applications/mukuchi.app")), false).is_ok());
+    }
+    /// Windows の構成: `%LOCALAPPDATA%\<ID>` (データ・WebView2・ログ) とインストール先
+    #[cfg(windows)]
+    fn fake_local(local: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let data = local.join(ID);
+        touch(&data.join(DATA_MARKER), 0);
+        touch(&data.join("settings.json"), 10);
+        touch(&data.join("models").join("hub").join("m"), 1000);
+        touch(&data.join("EBWebView").join("w"), 10);
+        touch(&data.join("logs").join("mukuchi.log"), 10);
+        let install = local.join("mukuchi");
+        touch(&install.join("mukuchi.exe"), 10);
+        touch(&install.join(UNINSTALLER), 10);
+        touch(&install.join("llama-server").join("llama-server.exe"), 10);
+        // 無関係のもの
+        touch(&local.join("com.other.app").join("x"), 10);
+        (data.clone(), data.join("logs"), install)
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn uninstall_targets_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("AppData").join("Local");
+        let (data, logs, install) = fake_local(&local);
+        let mut c = ctx(tmp.path(), &data, &logs);
+        c.app_bundle = Some(install.clone());
+        let plan = uninstall_plan(&c);
+        // ログ・WebView2 のデータはデータディレクトリの中のため 1 つにまとめる
+        assert_eq!(plan.files, vec![data.clone()]);
+        assert_eq!(plan.preferences, None);
+        assert_eq!(plan.app_bundle, Some(install.clone()));
+        let paths: Vec<String> = plan
+            .targets()
+            .into_iter()
+            .filter(|t| !t.path.starts_with("HKCU"))
+            .map(|t| t.path)
+            .collect();
+        assert_eq!(
+            paths,
+            vec![data.display().to_string(), install.display().to_string()]
+        );
+        delete_files(&plan, &c, true).unwrap();
+        assert!(data.join("EBWebView").exists(), "dry-run では消さない");
+        delete_files(&plan, &c, false).unwrap();
+        assert!(!data.exists());
+        assert!(local.join("com.other.app").exists());
+        assert!(install.exists(), "本体はアンインストーラーが消す");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn dev_data_dir_override_adds_local_dir_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("Local");
+        let id_dir = local.join(ID);
+        touch(&id_dir.join("EBWebView").join("w"), 10);
+        touch(&id_dir.join("logs").join("mukuchi.log"), 10);
+        let data = tmp.path().join("dev-mukuchi-data");
+        touch(&data.join(DATA_MARKER), 0);
+        let logs = id_dir.join("logs");
+        let target = tmp.path().join("target");
+        let mut c = ctx(tmp.path(), &data, &logs);
+        c.dev = Some(DevScope {
+            product_name: "mukuchi",
+            target_dir: Some(&target),
+        });
+        // target の外の本体は対象にしない。大文字小文字が違っても target の中なら対象
+        c.app_bundle = Some(tmp.path().join("installed"));
+        let plan = uninstall_plan(&c);
+        assert_eq!(plan.files, vec![data.clone(), id_dir.clone()]);
+        assert_eq!(plan.app_bundle, None);
+        c.app_bundle = Some(PathBuf::from(
+            target.join("debug").display().to_string().to_uppercase(),
+        ));
+        assert!(uninstall_plan(&c).app_bundle.is_some());
+        for p in &plan.files {
+            check_safe_target(p, &c).unwrap();
+        }
+        check_safe_target(&logs, &c).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn unsafe_targets_are_refused_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("AppData").join("Local");
+        let (data, logs, install) = fake_local(&local);
+        let c = ctx(tmp.path(), &data, &logs);
+        let ok = |p: &Path| check_safe_target(p, &c).is_ok();
+        assert!(ok(&data));
+        assert!(ok(&data.join("EBWebView")));
+        assert!(ok(&logs));
+        // 表記の違い (大文字・`\\?\`) でも同じものとして扱う
+        assert!(ok(&PathBuf::from(
+            data.display().to_string().to_uppercase()
+        )));
+        assert!(ok(&data.canonicalize().unwrap()));
+        assert!(!ok(&local));
+        assert!(!ok(&local.join("com.other.app")));
+        assert!(!ok(&install));
+        assert!(!ok(tmp.path()));
+        assert!(!ok(Path::new(r"C:\")));
+        assert!(!ok(&PathBuf::from(format!(r"C:\{ID}"))));
+        std::fs::remove_file(data.join(DATA_MARKER)).unwrap();
+        assert!(!ok(&data), "目印がない");
+        touch(&data.join(DATA_MARKER), 0);
+        std::fs::create_dir_all(data.join(".git")).unwrap();
+        assert!(!ok(&data), "リポジトリ");
+        let plan = UninstallPlan {
+            files: vec![local.clone()],
+            preferences: None,
+            app_bundle: None,
+            registry: vec![],
+        };
+        assert!(delete_files(&plan, &c, false).is_err());
+        assert!(local.exists());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn release_uninstall_needs_uninstaller_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(check_app_bundle(None, true).is_ok());
+        let e = check_app_bundle(None, false).unwrap_err();
+        assert_eq!(
+            e.downcast_ref::<crate::i18n::Msg>(),
+            Some(&crate::i18n::Msg::UninstallerMissing)
+        );
+        assert!(check_app_bundle(Some(tmp.path()), false).is_err());
+        touch(&tmp.path().join(UNINSTALLER), 1);
+        assert!(check_app_bundle(Some(tmp.path()), false).is_ok());
+        assert_eq!(UNINSTALLER_ARGS, "/P /MUKUCHI_PURGE");
     }
 }

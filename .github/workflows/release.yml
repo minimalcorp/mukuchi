@@ -8,8 +8,11 @@
 #   approve … 承認を待つだけ (Environment release-approval)。以降の job はすべて prepare 経由でこれを待つ
 #   prepare … 開始時の main (github.sha) の上に版上げコミットをローカルで作る (scripts/release-commit.sh)。
 #             作者・日時を固定するため、後の job で同じ入力から作り直すと同じコミット ID になる
-#   desktop … build (secret なし) → sign (production-desktop) → publish-desktop (production-desktop)
+#   desktop … build (secret なし) → sign (production-desktop) ─┐
+#             verify-wav → build-windows (secret なし) ────────────┴→ publish-desktop (production-desktop)
 #             → deploy-web-for-desktop (production-web。LP の版の表示を合わせる。版上げ・タグなし)
+#             macOS と Windows を並行でビルドし、publish-desktop は両方が成功した時だけ動く (片方でも失敗したら
+#             Release・タグ・版上げを作らない。docs/plans/windows-plan.md §9)
 #   web     … deploy-web (production-web) → publish-web (production-web)
 #   publish の job だけが Deploy Key (RELEASE_DEPLOY_KEY。両 Environment の secret) を読み、版上げコミットと注釈付きタグ
 #   (desktop-v<ver> / web-v<ver>) を main へ push する。main が開始時から進んでいたら rebase せず止める
@@ -36,6 +39,11 @@
 #           ビルドした本体を実行する検証 (verify-macos.sh の --print-uv-path) は資格情報を片付けた後に行う
 # 同じ job の別 step にしないのは、ビルド中に起動されたプロセスが job の終わりまで残り、後の step の secret や
 # 解錠したキーチェーンに触れうるため (runner は job の終わりにプロセスを片付ける)
+#
+# Windows (build-windows): NSIS のインストーラー (mukuchi_x64-setup.exe) を作る。Authenticode の署名はしない (証明書が無い。
+#   SignPath は不承認。docs/release.md の「Windows」)。updater の署名 (minisign) は Mac と同じく publish-desktop が行う。
+#   依存 (pnpm・cargo) が動くため secret を渡さない (environment も付けない)。verify.wav (セットアップの動作確認用の
+#   合成音声) は GitHub の Windows ランナーに日本語音声 (Haruka) が無いため、macOS の Kyoko で作ったものを verify-wav から受け取る
 #
 # production-desktop の secret:
 #   APPLE_CERTIFICATE           Developer ID Application 証明書と秘密鍵の .p12 を base64 にしたもの
@@ -323,13 +331,104 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Windows のインストーラーに入れる verify.wav (「確認します。」の合成音声。Mac の .app と同じもの) を作る。
+  # Mac の build と同じく Kyoko の有無を確かめてから作る。依存を入れない (macOS 標準の say・python3 のみ)
+  verify-wav:
+    name: Make verify.wav (Kyoko)
+    needs: prepare
+    if: inputs.target == 'desktop'
+    runs-on: macos-15
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Make verify.wav
+        run: |
+          set -euo pipefail
+          if ! /usr/bin/say -v '?' | grep -q '^Kyoko '; then
+            echo "::error::このランナーに音声 Kyoko がない (verify.wav を作れない)。docs/release.md の「verify.wav の音声」を参照"
+            exit 1
+          fi
+          apps/desktop/scripts/make-verify-wav.sh "$RUNNER_TEMP/verify.wav"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verify-wav
+          path: ${{ runner.temp }}/verify.wav
+          if-no-files-found: error
+          retention-days: 1
+
+  # Windows 版のインストーラー (NSIS、署名なし)。apps/desktop/scripts/build-windows.mjs が仮の値の検査・同梱物
+  # (llama-server・VC++ ランタイム)・依存の確認 (check-windows-dlls.mjs)・tauri build・同梱物の確認をして、
+  # 版なしの名前 mukuchi_x64-setup.exe (と .sha256) を作る
+  build-windows:
+    name: Build Windows installer (unsigned)
+    needs: [prepare, verify-wav]
+    if: inputs.target == 'desktop'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Windows の Git の既定 (core.autocrlf=true) だと作業ツリーが CRLF になり、版上げコミットの ID が prepare と変わりうる
+      # (bump-version.mjs が書き戻す行末)。checkout の前に切る
+      - name: Disable autocrlf
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      # 引数なしの toolchain install は rust-toolchain.toml の版と components を入れる
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+      # prepare と同じ版上げコミットを作ってからビルドする (インストーラーの版・埋め込むコミットの短縮ハッシュがこのコミットになる)
+      - name: Bump version (same commit as prepare)
+        env:
+          BUMP: ${{ inputs.bump }}
+          EPOCH: ${{ needs.prepare.outputs.epoch }}
+          COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: scripts/release-commit.sh desktop "$BUMP" "$EPOCH" "$COMMIT"
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: verify-wav
+          path: ${{ runner.temp }}/verify-wav
+      - name: Build (NSIS, unsigned)
+        run: node apps/desktop/scripts/build-windows.mjs --verify-wav "$RUNNER_TEMP/verify-wav/verify.wav"
+      - name: Check installer version
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          dir=apps/desktop/src-tauri/target/release/bundle
+          # tauri の成果物名に版が入る (mukuchi_<版>_x64-setup.exe)。版なしの名前は build-windows.mjs がそれを写したもの
+          [ -n "$VERSION" ] && [ -f "$dir/nsis/mukuchi_${VERSION}_x64-setup.exe" ] || { echo "::error::$VERSION のインストーラーがない"; ls -l "$dir/nsis"; exit 1; }
+          cmp "$dir/nsis/mukuchi_${VERSION}_x64-setup.exe" "$dir/windows-release/mukuchi_x64-setup.exe"
+          (cd "$dir/windows-release" && sha256sum -c mukuchi_x64-setup.exe.sha256 && ls -l)
+      # publish が失敗した時に手で Release を作り直せるよう数日残す (Mac の mukuchi-dmg-signed と同じ)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mukuchi-windows-unsigned
+          path: apps/desktop/src-tauri/target/release/bundle/windows-release/
+          if-no-files-found: error
+          retention-days: 7
+
   # 順序: 版上げコミットを作り直して build と同じ ID か確かめる → main が開始時のままでタグがないことを確かめる →
   # 下書きの Release を作って .dmg を添付 (アップロードの失敗はここで起き、main・タグは変わらない) →
   # main とタグを atomic に push (失敗したら下書きを消す。公開されない) → 下書きを公開して Latest にする。
   # 下書きはタグを作らないため、push の前に作ってよい。公開の時点ではタグが既にあるのでそれに結び付く
   publish-desktop:
     name: Publish desktop (push tag, GitHub Release)
-    needs: [prepare, sign]
+    needs: [prepare, sign, build-windows]
     runs-on: ubuntu-24.04
     environment: production-desktop
     permissions:
@@ -353,12 +452,18 @@ jobs:
         with:
           name: mukuchi-dmg-signed
           path: ${{ runner.temp }}/release
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mukuchi-windows-unsigned
+          path: ${{ runner.temp }}/release
       - name: Check assets
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/release"
           ls -l
-          sha256sum -c mukuchi_aarch64.dmg.sha256 mukuchi_aarch64.app.tar.gz.sha256
+          sha256sum -c mukuchi_aarch64.dmg.sha256 mukuchi_aarch64.app.tar.gz.sha256 mukuchi_x64-setup.exe.sha256
+          # Windows の更新物は PE (tauri-plugin-updater は PE なら NSIS として /UPDATE 付きで起動する)
+          [ "$(head -c 2 mukuchi_x64-setup.exe)" = MZ ] || { echo "::error::mukuchi_x64-setup.exe が PE でない"; exit 1; }
       - name: Bump version (same commit as build)
         env:
           BUMP: ${{ inputs.bump }}
@@ -369,9 +474,10 @@ jobs:
         run: scripts/release-push.sh --check-only "$TAG" "$GITHUB_SHA"
       # updater の署名と latest.json (docs/architecture.md「アップデート」)。署名鍵はこの step にだけ渡す。
       # scripts/sign-updater.mjs は Node の標準ライブラリだけで minisign 形式の署名を作り、tauri.conf.json の
-      # plugins.updater.pubkey (このコミットの .app に入っている公開鍵) で検証してから書く。
-      # trusted comment に版を入れる (requireSignedVersion)。url は版付き (Latest が変わっても版と中身がずれない)
-      - name: Sign updater archive (latest.json)
+      # plugins.updater.pubkey (このコミットの .app・.exe に入っている公開鍵) で検証してから書く。
+      # trusted comment に版を入れる (requireSignedVersion)。url は版付き (Latest が変わっても版と中身がずれない)。
+      # Mac (.app.tar.gz) と Windows (NSIS の .exe そのもの) を同じ鍵で署名し、latest.json に両方を載せる
+      - name: Sign updater artifacts (latest.json)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -379,10 +485,14 @@ jobs:
           set -euo pipefail
           out="$RUNNER_TEMP/updater"
           mkdir -p "$out"
-          node scripts/sign-updater.mjs --file "$RUNNER_TEMP/release/mukuchi_aarch64.app.tar.gz" --version "$VERSION" \
-            --url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/mukuchi_aarch64.app.tar.gz" \
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          node scripts/sign-updater.mjs --version "$VERSION" \
+            --file "darwin-aarch64=$RUNNER_TEMP/release/mukuchi_aarch64.app.tar.gz" --url "darwin-aarch64=$base/mukuchi_aarch64.app.tar.gz" \
+            --file "windows-x86_64=$RUNNER_TEMP/release/mukuchi_x64-setup.exe" --url "windows-x86_64=$base/mukuchi_x64-setup.exe" \
             --pubkey-config apps/desktop/src-tauri/tauri.conf.json --out "$out"
           cat "$out/latest.json"
+          # 2 プラットフォームが揃っていること (片方だけの latest.json を公開すると、もう片方の利用者に更新が届かない)
+          node -e 'const j=require(process.argv[1]); const k=Object.keys(j.platforms).join(","); if (k !== "darwin-aarch64,windows-x86_64") { console.error("platforms: " + k); process.exit(1); }' "$out/latest.json"
       # 下書きは contents: write のトークンでないと見えないため、ここで下書きを含めて確かめる
       - name: Create draft release
         id: draft
@@ -401,11 +511,16 @@ jobs:
             start=(--notes-start-tag "desktop-v$PREVIOUS")
           fi
           out="$RUNNER_TEMP/release"
+          notes="$(printf '%s\n' \
+            "- macOS (Apple Silicon): mukuchi_aarch64.dmg (Developer ID 署名・公証済み)" \
+            "- Windows 11 (x64): mukuchi_x64-setup.exe (コード署名なし。初回に Microsoft Defender SmartScreen の警告が出たら「詳細情報」→「実行」。Smart App Control が有効な PC ではインストールできない)")"
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
-            --title "mukuchi $VERSION" --notes "macOS (Apple Silicon) / Developer ID 署名・公証済み" \
+            --title "mukuchi $VERSION" --notes "$notes" \
             --generate-notes "${start[@]}" \
             "$out/mukuchi_aarch64.dmg" "$out/mukuchi_aarch64.dmg.sha256" \
-            "$out/mukuchi_aarch64.app.tar.gz" "$RUNNER_TEMP/updater/latest.json"
+            "$out/mukuchi_aarch64.app.tar.gz" "$RUNNER_TEMP/updater/mukuchi_aarch64.app.tar.gz.sig" \
+            "$out/mukuchi_x64-setup.exe" "$out/mukuchi_x64-setup.exe.sha256" "$RUNNER_TEMP/updater/mukuchi_x64-setup.exe.sig" \
+            "$RUNNER_TEMP/updater/latest.json"
       - name: Push version bump and tag
         id: push
         run: scripts/release-push.sh "$TAG" "$GITHUB_SHA"

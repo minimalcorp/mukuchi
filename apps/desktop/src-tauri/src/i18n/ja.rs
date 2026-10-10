@@ -80,6 +80,8 @@ pub(super) fn text(m: &Msg) -> String {
             format!("削除できないものがあります: {}", names.join("・"))
         }
         AppBundleUnknown => s("アプリ本体の場所が分からないため、アンインストールできません"),
+        UninstallerMissing => s("アンインストーラーが見つからないため、アンインストールできません。Windows の設定 > アプリ > インストールされているアプリ から mukuchi をアンインストールしてください"),
+        UninstallerLaunchFailed => s("アンインストーラーを起動できません"),
         AppTranslocated => s("アプリが一時的な場所から実行されています。mukuchi を「アプリケーション」フォルダに移動して開き直してから、もう一度アンインストールしてください"),
         Internal => s("内部エラーが発生しました"),
         OpenSystemSettingsFailed => s("システム設定を開けません"),

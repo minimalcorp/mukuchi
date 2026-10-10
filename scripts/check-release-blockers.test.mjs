@@ -39,6 +39,8 @@ function run(root) {
 
 const PLACEHOLDER = 'pub const REVISION_PENDING: &str = "TODO-i18n-pin-commit-after-hf-publish";\n';
 const PINNED = 'revision: "698eff963b084561b12a045c95bc4a208898337f",\n';
+// mustContain (Mac・Windows の候補の定義がこのファイルにあること) を満たす最小の中身
+const IDS = 'id: "ja-8bit",\nid: "ja-gguf",\nid: "base-gguf",\n';
 
 test("実ファイルを読める (移動・改名で検査が素通りしない)", () => {
   assert.ok(Array.isArray(findBlockers({ root: repo, target: "desktop" })));
@@ -46,7 +48,7 @@ test("実ファイルを読める (移動・改名で検査が素通りしない
 
 test("プレースホルダがあれば行番号付きで見つける", (t) => {
   const dir = tempRoot(t);
-  writeModels(dir, `// x\n${PINNED}${PLACEHOLDER}`);
+  writeModels(dir, `// x\n${PINNED}${PLACEHOLDER}${IDS}`);
   const found = findBlockers({ root: dir, target: "desktop" });
   assert.equal(found.length, 1);
   assert.equal(found[0].file, MODELS);
@@ -55,19 +57,39 @@ test("プレースホルダがあれば行番号付きで見つける", (t) => {
 
 test("接頭辞で見る (文言が変わっても捕まえる)", (t) => {
   const dir = tempRoot(t);
-  writeModels(dir, 'const X: &str = "TODO-i18n-pin-commit";\n');
+  writeModels(dir, `const X: &str = "TODO-i18n-pin-commit";\n${IDS}`);
   assert.equal(findBlockers({ root: dir, target: "desktop" }).length, 1);
 });
 
 test("commit に差し替え済みなら何も見つけない", (t) => {
   const dir = tempRoot(t);
-  writeModels(dir, PINNED);
+  writeModels(dir, PINNED + IDS);
   assert.deepEqual(findBlockers({ root: dir, target: "desktop" }), []);
 });
 
 test("対象のファイルが無ければ止める", (t) => {
   const dir = tempRoot(t);
   assert.throws(() => findBlockers({ root: dir, target: "desktop" }), /を読めない/);
+});
+
+test("Mac・Windows の候補の定義が無ければ止める (別のファイルへ移って検査から漏れない)", (t) => {
+  const dir = tempRoot(t);
+  writeModels(dir, PINNED + 'id: "ja-8bit",\n');
+  assert.throws(() => findBlockers({ root: dir, target: "desktop" }), /ja-gguf.*base-gguf/);
+});
+
+test("Windows の候補 (GGUF) の revision がプレースホルダでも止める", (t) => {
+  const dir = tempRoot(t);
+  const orig = readFileSync(path.join(repo, MODELS), "utf8");
+  // ja-gguf の項目の revision だけを仮の値にする
+  const i = orig.indexOf('id: "ja-gguf"');
+  assert.ok(i >= 0);
+  const j = orig.indexOf("revision:", i);
+  const k = orig.indexOf("\n", j);
+  writeModels(dir, `${orig.slice(0, j)}revision: "TODO-i18n-pin-commit-after-hf-publish",${orig.slice(k)}`);
+  const found = findBlockers({ root: dir, target: "desktop" });
+  assert.equal(found.length, 1);
+  assert.equal(found[0].line, orig.slice(0, j).split("\n").length);
 });
 
 test("未知の target は止める", () => {

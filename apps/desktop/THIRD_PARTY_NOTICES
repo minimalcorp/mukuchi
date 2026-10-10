@@ -553,3 +553,20 @@ conditions of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
 PARTICULAR PURPOSE.
 
 ==============================================================================
+
+================================================================================
+9. Microsoft Visual C++ Runtime (vcruntime140.dll・vcruntime140_1.dll・msvcp140.dll) — Microsoft Software License Terms
+   使用箇所: Windows 版の llama-server と同じフォルダ (llama.cpp の公式リリースのバイナリが依存する。
+            Microsoft Visual C++ 2015-2022 再頒布可能パッケージ (x64) 14.44.35112 の同梱の DLL を改変せず同梱)
+================================================================================
+
+These files are "Distributable Code" of Microsoft Visual Studio 2022 (the "REDIST
+list" at https://learn.microsoft.com/visualstudio/releases/2022/redistribution,
+"Visual C++ Runtime Files") and are redistributed unmodified, as part of the
+installation package of this program, subject to the Microsoft Software License
+Terms for Visual Studio 2022 (https://visualstudio.microsoft.com/license-terms/).
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+These files are not covered by mukuchi's license (Apache License 2.0). Microsoft
+is not affiliated with mukuchi and does not support it.

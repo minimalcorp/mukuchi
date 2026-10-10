@@ -5,6 +5,7 @@
 //! - GPU が使えず CPU 実行への同意も無い間は、何も取得せずに止める (`precheck`。フロントが同意画面を出す)
 //! - CPU 版は GitHub Release の zip を sha256 で確かめ、Windows 標準の tar (bsdtar) で展開して
 //!   `<データ>/llama-cpu/` に必要なファイルだけを置く
+//! - CPU 版の zip には VC++ ランタイムが無いため、同梱の `llama-server/` から写す (`sync_vc_runtime`)
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,6 +40,9 @@ fn cpu_keep(name: &str) -> bool {
 }
 /// CPU 版を置いたことの印 (中身は zip の sha256)。途中で止まった展開を済みとみなさないため最後に書く
 const CPU_STAMP: &str = ".mukuchi-llama-cpu";
+/// CPU 版も依存する VC++ ランタイム (同梱の llama-server/ に置かれている。
+/// apps/desktop/scripts/fetch-vc-runtime.mjs の LLAMA_VC と合わせる)
+const VC_RUNTIME: [&str; 3] = ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"];
 
 pub struct LlamaRuntime {
     pub paths: DataPaths,
@@ -53,6 +57,55 @@ pub fn cpu_present(dir: &Path) -> bool {
     dir.join(SERVER_EXE).is_file()
         && std::fs::read_to_string(dir.join(CPU_STAMP))
             .is_ok_and(|s| s.trim() == llama::CPU_ZIP_SHA256)
+}
+
+impl LlamaRuntime {
+    /// 同梱の llama-server/ (VC++ ランタイムの写し元)
+    fn bundled_dir(&self) -> PathBuf {
+        self.bundled_exe
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default()
+    }
+}
+
+/// 同梱の `src` にある VC++ ランタイムが `dest` に同じ中身で揃っているか (`src` に無いものは問わない)
+fn vc_runtime_synced(src: &Path, dest: &Path) -> bool {
+    VC_RUNTIME
+        .iter()
+        .all(|name| match std::fs::read(src.join(name)) {
+            Ok(want) => std::fs::read(dest.join(name)).is_ok_and(|have| have == want),
+            Err(_) => true,
+        })
+}
+
+/// 同梱の `src` から VC++ ランタイムを `dest` へ写す (同じ中身なら上書きしない)。
+/// 写せなくてもエラーにしない: 開発ビルドでは同梱物に無いことがあり、システムに入っていれば動くため
+/// (動くかは呼び出し側の起動確認で分かる)。写したファイルの数を返す
+fn sync_vc_runtime(src: &Path, dest: &Path) -> usize {
+    let mut copied = 0;
+    for name in VC_RUNTIME {
+        let from = src.join(name);
+        let want = match std::fs::read(&from) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("VC++ ランタイムの写し元が無い ({name}): {e}");
+                continue;
+            }
+        };
+        let to = dest.join(name);
+        if std::fs::read(&to).is_ok_and(|have| have == want) {
+            continue;
+        }
+        match std::fs::write(&to, &want) {
+            Ok(()) => copied += 1,
+            Err(e) => log::warn!("VC++ ランタイムを写せない ({name}): {e}"),
+        }
+    }
+    if copied > 0 {
+        log::info!("CPU 版へ VC++ ランタイムを写した ({copied} ファイル)");
+    }
+    copied
 }
 
 impl RuntimeStep for LlamaRuntime {
@@ -86,23 +139,31 @@ impl RuntimeStep for LlamaRuntime {
     }
 
     fn is_present(&self) -> bool {
-        self.bundled_exe.is_file() && (!self.gpu.uses_cpu() || cpu_present(&self.paths.llama_cpu()))
+        // VC++ ランタイムを写す前に置いた CPU 版 (や同梱側の更新) は、install で写し直させるため未導入とみなす
+        self.bundled_exe.is_file()
+            && (!self.gpu.uses_cpu() || {
+                let dir = self.paths.llama_cpu();
+                cpu_present(&dir) && vc_runtime_synced(&self.bundled_dir(), &dir)
+            })
     }
 
     fn install(&self, cancel: Cancel) -> BoxFuture<Result<(), StepError>> {
         let paths = self.paths.clone();
         let gpu = self.gpu.clone();
         let http = self.http.clone();
+        let bundled_dir = self.bundled_dir();
         Box::pin(async move {
             if !gpu.uses_cpu() {
                 return Ok(());
             }
             let dir = paths.llama_cpu();
-            if cpu_present(&dir) {
-                return Ok(());
+            if !cpu_present(&dir) {
+                log::info!("CPU 版の llama-server を取得する");
+                install_cpu(&http, &paths, &cancel).await?;
             }
-            log::info!("CPU 版の llama-server を取得する");
-            install_cpu(&http, &paths, &cancel).await?;
+            let (src, dest) = (bundled_dir.clone(), dir.clone());
+            let _ =
+                tauri::async_runtime::spawn_blocking(move || sync_vc_runtime(&src, &dest)).await;
             // 置いたものが起動できるか (DLL が揃っているか) を確かめる
             llama::list_devices(&dir.join(SERVER_EXE))
                 .await
@@ -290,6 +351,45 @@ mod tests {
         assert!(!cpu_present(d), "別の版");
         std::fs::write(d.join(CPU_STAMP), llama::CPU_ZIP_SHA256).unwrap();
         assert!(cpu_present(d));
+    }
+
+    #[test]
+    fn vc_runtime_is_copied_from_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, dest) = (tmp.path().join("bundle"), tmp.path().join("cpu"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        // 写し元なし: エラーにせず何もしない。揃っている扱い (再導入を繰り返さない)
+        assert_eq!(sync_vc_runtime(&src, &dest), 0);
+        assert!(vc_runtime_synced(&src, &dest));
+        assert!(!dest.join("vcruntime140.dll").exists());
+
+        // 写し元あり: 3 つとも写す
+        for n in VC_RUNTIME {
+            std::fs::write(src.join(n), n.as_bytes()).unwrap();
+        }
+        assert!(!vc_runtime_synced(&src, &dest));
+        assert_eq!(sync_vc_runtime(&src, &dest), 3);
+        assert!(vc_runtime_synced(&src, &dest));
+        for n in VC_RUNTIME {
+            assert_eq!(std::fs::read(dest.join(n)).unwrap(), n.as_bytes());
+        }
+
+        // 写し済み: 上書きしない。中身が違うもの (同梱側の更新) だけ写し直す
+        assert_eq!(sync_vc_runtime(&src, &dest), 0);
+        std::fs::write(src.join("msvcp140.dll"), b"new").unwrap();
+        assert!(!vc_runtime_synced(&src, &dest));
+        assert_eq!(sync_vc_runtime(&src, &dest), 1);
+        assert_eq!(std::fs::read(dest.join("msvcp140.dll")).unwrap(), b"new");
+
+        // 写し先が無い (書けない): エラーにしない
+        assert_eq!(sync_vc_runtime(&src, &tmp.path().join("missing")), 0);
+
+        // DLL を足しても CPU 版の印による判定は変わらない
+        std::fs::write(dest.join(SERVER_EXE), b"").unwrap();
+        std::fs::write(dest.join(CPU_STAMP), llama::CPU_ZIP_SHA256).unwrap();
+        assert!(cpu_present(&dest));
     }
 
     /// 手動の通し確認 (`cargo test -- --ignored real_provision_windows --nocapture`)。実機の GPU・ネットワークを使う。

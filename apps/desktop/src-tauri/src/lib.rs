@@ -45,6 +45,11 @@ const ARG_UNREGISTER_LOGIN_ITEM: &str = "--unregister-login-item";
 /// 検証用 (隠し): 同梱 uv の解決結果を表示して終了する (UI は起動しない)。
 /// リリースビルドは `MUKUCHI_DEV_*` を無視するため、ビルドした .app が Helpers/uv を指すかをこれで確かめる
 const ARG_PRINT_UV_PATH: &str = "--print-uv-path";
+/// 検証用 (隠し、Windows): 同梱物 (llama-server・verify.wav) とアンインストーラーの解決結果を表示して終了する
+/// (UI は起動しない。終了コード 0=同梱物が揃っている 1=欠けている)。リリースビルドは `MUKUCHI_DEV_*` を無視するため、
+/// NSIS の配置 (実行ファイルの隣に resources) で正しく解決できるかをこれで確かめる
+#[cfg(target_os = "windows")]
+const ARG_PRINT_RESOURCE_PATHS: &str = "--print-resource-paths";
 
 /// 同梱 uv を解決する。`resource` は Resource 相対パスの解決 (.app 外でのみ使う)
 fn resolve_uv(
@@ -94,6 +99,10 @@ pub fn run() {
             }
         };
         std::process::exit(code);
+    }
+    #[cfg(target_os = "windows")]
+    if std::env::args_os().any(|a| a == ARG_PRINT_RESOURCE_PATHS) {
+        std::process::exit(print_resource_paths(context.package_info()));
     }
     let builder = tauri::Builder::default()
         // アプリのメニューバーは表示言語で自分で組む (app_menu.rs)。既定のメニューは英語に固定のため使わない
@@ -325,6 +334,45 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+/// `--print-resource-paths` の本体。App を作らずに Resource を解決する (PathResolver::resource_dir と同じ関数。
+/// Windows は実行ファイルのフォルダ)。出力は ASCII (GUI サブシステムの出力をコンソールの文字コードに左右させない)
+#[cfg(target_os = "windows")]
+fn print_resource_paths(package_info: &tauri::PackageInfo) -> i32 {
+    let dir = match tauri::utils::platform::resource_dir(package_info, &tauri::Env::default()) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("resource dir: {e}");
+            return 1;
+        }
+    };
+    let r = paths::Resources::resolve(Some(&dir), std::path::PathBuf::new());
+    let mut ok = true;
+    for (name, p) in [
+        ("llama-server", r.llama_server.join(llama::SERVER_EXE)),
+        ("verify.wav", r.verify_wav),
+    ] {
+        let found = p.is_file();
+        ok &= found;
+        println!(
+            "{name}\t{}\t{}",
+            if found { "ok" } else { "missing" },
+            p.display()
+        );
+    }
+    match storage::current_app_bundle() {
+        Some(d) => println!(
+            "uninstaller\tok\t{}",
+            d.join(storage::UNINSTALLER).display()
+        ),
+        None => println!("uninstaller\tnone\t(not installed by the NSIS installer)"),
+    }
+    if ok {
+        0
+    } else {
+        1
+    }
 }
 
 /// 起動時に、システム設定でのログイン項目の変更を設定に取り込む (本番ビルドのみ。autostart.rs)。

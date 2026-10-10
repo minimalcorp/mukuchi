@@ -10,11 +10,15 @@
 //   node apps/desktop/scripts/fetch-llama-server.mjs [--out <dir>]
 //
 // Node の標準ライブラリだけを使う (CI で依存を入れずに動かすため)。zip の展開は Windows 標準の tar (bsdtar) を使う。
+// VC++ ランタイム (zip には入っていない) も用意する (fetch-vc-runtime.mjs): llama-server が使うものを同じフォルダに、
+// mukuchi.exe が使うものを src-tauri/bundle-resources/vc-runtime/ に (tauri.windows.conf.json がインストール先の直下に置く)。
+// 依存の確認は check-windows-dlls.mjs (CI・リリースで実行)。
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { APP_VC, LLAMA_VC, placeVcRuntime } from "./fetch-vc-runtime.mjs";
 
 const TAG = "b11408";
 const ASSET = `llama-${TAG}-bin-win-vulkan-x64.zip`;
@@ -48,7 +52,17 @@ const stamp = path.join(out, ".version");
 
 const sha256 = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
 
+// vc-runtime/ は llama-server/ の隣 (--out を変えた時もその隣)
+const placeVc = () =>
+  placeVcRuntime(out, LLAMA_VC)
+    .then(() => placeVcRuntime(path.join(path.dirname(out), "vc-runtime"), APP_VC))
+    .catch((e) => {
+      console.error(`error: ${e.message}`);
+      process.exit(1);
+    });
+
 if (existsSync(stamp) && readFileSync(stamp, "utf8").trim() === `${TAG} ${SHA256}` && existsSync(path.join(out, "llama-server.exe"))) {
+  await placeVc();
   console.log(out);
   process.exit(0);
 }
@@ -92,4 +106,5 @@ try {
 } finally {
   rmSync(tmp, { recursive: true, force: true });
 }
+await placeVc();
 console.log(out);

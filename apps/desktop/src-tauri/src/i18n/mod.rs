@@ -168,8 +168,9 @@ pub enum ModelText {
     BaseGguf,
 }
 
-/// アンインストールで消せなかったもの
+/// アンインストールで消せなかったもの (macOS。Windows はアプリ内で消さない)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub enum UninstallPart {
     LoginItem,
     Data,
@@ -264,9 +265,19 @@ pub enum Msg {
         next: String,
         prev: String,
     },
+    // macOS のアンインストールでだけ使う
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     UninstallIncomplete(Vec<UninstallPart>),
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     AppBundleUnknown,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     AppTranslocated,
+    /// Windows: 実行ファイルの隣に uninstall.exe が無い (NSIS で入れたものでない)
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    UninstallerMissing,
+    /// Windows: uninstall.exe を起動できない
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    UninstallerLaunchFailed,
     /// 想定外の失敗 (詳細はログ)
     Internal,
     OpenSystemSettingsFailed,
@@ -533,6 +544,8 @@ mod tests {
             ]),
             AppBundleUnknown,
             AppTranslocated,
+            UninstallerMissing,
+            UninstallerLaunchFailed,
             Internal,
             OpenSystemSettingsFailed,
             OpenLogsFailed,
@@ -755,9 +768,11 @@ mod tests {
             LlamaServerBroken => 122,
             CpuRuntimeFailed => 123,
             ErrInsertElevated => 124,
+            UninstallerMissing => 125,
+            UninstallerLaunchFailed => 126,
         }
     }
-    const VARIANTS: usize = 125;
+    const VARIANTS: usize = 127;
 
     fn has_japanese(s: &str) -> bool {
         s.chars().any(|c| {

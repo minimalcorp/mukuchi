@@ -208,6 +208,23 @@ pub fn set_enabled(enabled: bool) -> Result<()> {
     }
 }
 
+/// アンインストールの確認ダイアログの一覧用: 残っているスタートアップの登録 (`HKCU\<キー>\<値の名前>`)。
+/// Run だけでなく、利用者がオフにした記録 (StartupApproved\Run) も消す対象のため出す
+#[cfg(target_os = "windows")]
+pub fn registry_entries() -> Vec<String> {
+    use windows_registry::CURRENT_USER;
+    [win::RUN, win::APPROVED]
+        .into_iter()
+        .filter(|key| {
+            CURRENT_USER
+                .open(key)
+                .and_then(|k| k.get_value(win::NAME))
+                .is_ok()
+        })
+        .map(|key| format!(r"HKCU\{key}\{}", win::NAME))
+        .collect()
+}
+
 /// 「設定 > アプリ > スタートアップ」を開く
 #[cfg(target_os = "windows")]
 pub fn open_login_items_settings() -> Result<()> {

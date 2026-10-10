@@ -74,8 +74,8 @@ jobs:
             '^rust-toolchain\.toml$'
             # CI の Prepare bundle resources で使う
             '^apps/desktop/scripts/(prepare-bundle-resources|fetch-uv|make-verify-wav)\.sh$'
-            # rust-windows の Prepare bundle resources で使う
-            '^apps/desktop/scripts/fetch-llama-server\.mjs$'
+            # rust-windows の Prepare bundle resources・installer-windows で使う
+            '^apps/desktop/scripts/(fetch-llama-server|fetch-vc-runtime|check-windows-dlls|build-windows)\.mjs$'
             # tauri.conf.json の bundle.resources (tauri-build が要求する)
             '^apps/desktop/THIRD_PARTY_NOTICES$'
             '^(LICENSE|NOTICE)$'
@@ -205,12 +205,13 @@ jobs:
             ~/.cargo/git/db
             apps/desktop/src-tauri/target
             apps/desktop/.build-cache/llama-server
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/scripts/fetch-llama-server.mjs') }}
+            apps/desktop/.build-cache/vc-runtime
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/scripts/fetch-llama-server.mjs', 'apps/desktop/scripts/fetch-vc-runtime.mjs') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
       # 引数なしの toolchain install は rust-toolchain.toml の版と components を入れる
       - name: Install Rust toolchain
         run: rustup toolchain install
-      # tauri-build は bundle.resources (tauri.windows.conf.json で llama-server/ を足したもの) と frontendDist を要求する。
+      # tauri-build は bundle.resources (tauri.windows.conf.json で llama-server/・vc-runtime/ を足したもの) と frontendDist を要求する。
       # verify.wav は日本語の SAPI 音声 (make-verify-wav.ps1) が runner に無いことがあり、テストでは使わないため空のファイルを置く。
       # frontendDist は空のディレクトリでよい (macOS の job と同じ)
       - name: Prepare bundle resources
@@ -224,6 +225,96 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
       - name: cargo test
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+  # Windows のフロントエンド。Windows の WebView2 (Chromium) に近い chromium で、Windows の表示 (@windows。
+  # playwright.config.ts の win-ja / win-en) を確かめる。Mac の frontend job (webkit) とは別に動かす
+  frontend-windows:
+    name: Frontend Windows (lint, build, e2e)
+    needs: changes
+    # changes が成功しなかったら (失敗・タイムアウト) 判定に頼らず動かす
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.frontend == 'true') }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: apps/desktop
+    steps:
+      # Windows の Git の既定 (core.autocrlf=true) だと CRLF になり、prettier 等の検査が Mac と変わる
+      - name: Disable autocrlf
+        working-directory: .
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/AppData/Local/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: playwright-${{ runner.os }}-${{ runner.arch }}-
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+      - name: lint
+        run: pnpm run lint
+      # tsc (型検査) + vite build
+      - name: build
+        run: pnpm run build
+      # playwright.config.ts はホストが Windows なら win-ja / win-en (chromium) だけを回す
+      - name: Playwright (chromium)
+        run: |
+          pnpm exec playwright install chromium
+          pnpm exec playwright test
+
+  # Windows のインストーラー (NSIS、署名なし) が作れること。release.yml の build-windows と同じ
+  # apps/desktop/scripts/build-windows.mjs で、同梱物 (llama-server・VC++ ランタイム) の依存の確認
+  # (check-windows-dlls.mjs) とインストーラーの中身の確認までを行う。仮の値の検査 (check-release-blockers) は
+  # リリースの時だけ (--no-blockers)。verify.wav はランナーに日本語音声が無いことがあるため空のものを置く (配布しない)
+  installer-windows:
+    name: Windows installer (NSIS, unsigned)
+    needs: changes
+    # changes が成功しなかったら (失敗・タイムアウト) 判定に頼らず動かす
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true') }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Disable autocrlf
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      # release (opt-level 等) は rust-windows (debug) と成果物が違うため、キャッシュの key を分ける
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            apps/desktop/src-tauri/target
+            apps/desktop/.build-cache/llama-server
+            apps/desktop/.build-cache/vc-runtime
+          key: cargo-release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/scripts/fetch-llama-server.mjs', 'apps/desktop/scripts/fetch-vc-runtime.mjs') }}
+          restore-keys: cargo-release-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+      - name: Build installer
+        run: node apps/desktop/scripts/build-windows.mjs --no-blockers --placeholder-verify-wav
+      - name: Installer size
+        run: Get-ChildItem apps/desktop/src-tauri/target/release/bundle/windows-release | Format-Table Name, Length
 
   frontend:
     name: Frontend (lint, build, e2e)

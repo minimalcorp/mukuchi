@@ -178,12 +178,35 @@ pub fn open_url(url: &str) -> Result<()> {
     shell_open(url)
 }
 
+/// 実行ファイルを引数付きで起動して待たない (アンインストーラー)。CreateProcess ではなく ShellExecuteW を使うのは、
+/// 起動先のマニフェストが管理者権限を求める場合 (perMachine で入れた NSIS) にも UAC の確認を経て起動できるため
+/// (tauri-plugin-updater もインストーラーを同じ方法で起動する)。`dir` は作業ディレクトリ
+pub fn shell_run(exe: &std::path::Path, params: &str, dir: &std::path::Path) -> Result<()> {
+    // SAFETY: 文字列は呼び出しの間生きている
+    let r = unsafe {
+        ShellExecuteW(
+            None,
+            &HSTRING::from("open"),
+            &HSTRING::from(exe.as_os_str()),
+            &HSTRING::from(params),
+            &HSTRING::from(dir.as_os_str()),
+            SW_SHOWNORMAL,
+        )
+    };
+    if r.0 as isize <= 32 {
+        bail!("起動できません ({}): {}", r.0 as isize, exe.display());
+    }
+    Ok(())
+}
+
 /// フォルダをエクスプローラーで開く
 pub fn open_path(path: &std::path::Path) -> Result<()> {
     shell_open(&path.to_string_lossy())
 }
 
-/// ごみ箱へ移す (元に戻せる。確認・進捗のダイアログは出さない)
+/// ごみ箱へ移す (元に戻せる。確認・進捗のダイアログは出さない)。
+/// Mac の窓口と同じ形で置く。Windows のアンインストールは本体の削除をアンインストーラーに任せるため今は使わない
+#[allow(dead_code)]
 pub fn trash(path: &std::path::Path) -> Result<()> {
     // pFrom は二重 NUL 終端の並び
     let from: Vec<u16> = path

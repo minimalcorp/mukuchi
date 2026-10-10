@@ -1,6 +1,7 @@
 # リリース (署名・公証)
 
-配布物は Developer ID 署名 + 公証 (notarization) + staple 済みの `.dmg` と、自動アップデート用の同じ .app の `.app.tar.gz` (Mac App Store は対象外)。
+配布物は Developer ID 署名 + 公証 (notarization) + staple 済みの `.dmg` と、自動アップデート用の同じ .app の `.app.tar.gz` (Mac App Store は対象外)、
+Windows の NSIS インストーラー `mukuchi_x64-setup.exe` (コード署名なし。下記「Windows」)。1 つの Release に両 OS の成果物を載せる。
 証明書・API キー・パスワードはリポジトリに置かない。
 
 ## 流れ (`make build` = `apps/desktop/scripts/build-macos.sh`)
@@ -24,14 +25,15 @@
 
 ### アップデートの配布物
 
-仕様は docs/architecture.md の「アップデート」。Release `desktop-v<X.Y.Z>` に次の2つを添付する (.dmg と .dmg.sha256 に加えて):
+仕様は docs/architecture.md の「アップデート」。Release `desktop-v<X.Y.Z>` に次を添付する (.dmg と .dmg.sha256、Windows の `mukuchi_x64-setup.exe` と .sha256 に加えて):
 
 - `mukuchi_aarch64.app.tar.gz`: 公証・staple 済みの .app。最上位は `mukuchi.app/` (tauri-plugin-updater 2.13 は各エントリの先頭のパス要素を1つ捨てて展開し、.app と置き換える。`install_inner`)。`COPYFILE_DISABLE=1 /usr/bin/tar --no-mac-metadata --no-xattrs --no-acls --no-fflags` で AppleDouble (`._*`)・xattr を入れない。`apps/desktop/scripts/check-updater-archive.py` が最上位・余計なエントリがないこと・中身が .app と同じことを確かめる
-- `latest.json`: `{"version","pub_date","platforms":{"darwin-aarch64":{"signature","url"}}}`。url は版付き `https://github.com/minimalcorp/mukuchi/releases/download/desktop-v<X.Y.Z>/mukuchi_aarch64.app.tar.gz`。notes は書かない
+- `latest.json`: `{"version","pub_date","platforms":{"darwin-aarch64":{"signature","url"},"windows-x86_64":{"signature","url"}}}`。url は版付き `https://github.com/minimalcorp/mukuchi/releases/download/desktop-v<X.Y.Z>/mukuchi_aarch64.app.tar.gz` (Windows は `.../mukuchi_x64-setup.exe`)。notes は書かない。publish-desktop は 2 プラットフォームが揃っていなければ止まる
+- `mukuchi_aarch64.app.tar.gz.sig`・`mukuchi_x64-setup.exe.sig`: 各更新物の署名 (中身は `latest.json` の `signature` と同じ。手での確認用)
 
 アプリは `https://github.com/minimalcorp/mukuchi/releases/latest/download/latest.json` を見る (公開済み・非プレリリースの Latest の添付)。
 
-platforms のキー: plugin は macOS で `darwin-aarch64-app` → `darwin-aarch64` の順に探す (`updater.rs` の `get_urls`。.app/.dmg は `app`)。前者のみだとバンドルの種類の判定 (`tauri_utils::platform::bundle_type`) に依存するため、後者だけを書く。
+platforms のキー: plugin は `{os}-{arch}-{installer}` → `{os}-{arch}` の順に探す (`updater.rs` の `get_urls`。macOS の .app/.dmg は `darwin-aarch64-app`、Windows の NSIS は `windows-x86_64-nsis`)。前者のみだとバンドルの種類の判定 (`tauri_utils::platform::bundle_type`) に依存するため、後者 (`darwin-aarch64`・`windows-x86_64`) だけを書く。
 
 #### アップデートの署名
 
@@ -39,7 +41,8 @@ platforms のキー: plugin は macOS で `darwin-aarch64-app` → `darwin-aarch
 
 - 秘密鍵 (`TAURI_SIGNING_PRIVATE_KEY`): 鍵ファイルの中身 = base64 で包んだ minisign の秘密鍵 (`Ed`・`Sc` (scrypt)・`B2` (BLAKE2b-256 のチェックサム))。scrypt の N・r・p は鍵の opslimit・memlimit から minisign と同じ方法で決める (`tauri signer generate` の既定は N=2^15, r=8, p=1)
 - 署名: prehashed Ed25519 (`ED`。本体はファイルの BLAKE2b-512 に対する署名)。global signature は本体 + trusted comment に対する署名
-- trusted comment: `timestamp:<unix秒>\tfile:mukuchi_aarch64.app.tar.gz\tversion:<X.Y.Z>` (`tauri signer sign --app-version` と同じ)。plugin の `requireSignedVersion: true` が `version:` と `latest.json` の版の一致を見る
+- trusted comment: `timestamp:<unix秒>\tfile:<ファイル名>\tversion:<X.Y.Z>` (`tauri signer sign --app-version` と同じ)。plugin の `requireSignedVersion: true` が `version:` と `latest.json` の版の一致を見る
+- 複数のプラットフォーム: `--file <プラットフォーム>=<ファイル> --url <プラットフォーム>=<URL>` をプラットフォームごとに渡す (`darwin-aarch64`・`windows-x86_64`)。同じ鍵・同じ版・同じ timestamp で署名し、すべて署名・検証できてから `.sig` と `latest.json` を書く
 - 書く前に `tauri.conf.json` の `plugins.updater.pubkey` で検証する (鍵の取り違えをリリース前に止める)
 - tauri signer は Ed25519 の nonce に乱数を混ぜるため、同じ入力でも署名のバイト列は毎回変わる (sign-updater.mjs は RFC 8032 どおり決定的)。どちらも同じ公開鍵で検証できる。テストは tauri signer の出力 (フィクスチャ) との形式の一致と相互の検証を確かめる。テストの鍵は `scripts/fixtures/updater-test-key/` のテスト専用の鍵 (本番と無関係)
 
@@ -166,16 +169,19 @@ Apple の secret の登録:
 
 ### desktop
 
-jobs: `approve` (承認) → `prepare` → `build` → `sign` → `publish-desktop` → `deploy-web-for-desktop`
+jobs: `approve` (承認) → `prepare` → (`build` → `sign`) と (`verify-wav` → `build-windows`) を並行 → `publish-desktop` (両方が成功した時だけ) → `deploy-web-for-desktop`
 
 1. `Approve` (`release-approval`): 承認を待つだけ。承認後の job は承認を求めない
 2. `Prepare`: main 以外からの実行を止める → `scripts/check-release-blockers.mjs desktop` (配布してはいけない仮の値。今は HF 未公開のモデルの revision のプレースホルダ `TODO-i18n-pin-commit*`) が残っていれば止める → 版上げコミットをローカルで作る → 同じタグ・公開済みの Release があれば止める
 3. `Build unsigned .app` (secret なし): Kyoko の有無を確認 → 同じ版上げコミットを作る (ID を確認) → `pnpm install --frozen-lockfile` → `build-macos.sh --build-only`。.app と .dmg テンプレートを artifact で渡す
 4. `Sign and notarize (.dmg)` (`production-desktop`): .app の版を確認 → 証明書を一時キーチェーンに入れて `build-macos.sh --sign-only` (updater 用の tar.gz も作る) → 資格情報を削除 → `verify-macos.sh` → 添付を用意して artifact `mukuchi-dmg-signed` (7日保存) にする。中身は `mukuchi_aarch64.dmg`・`mukuchi_aarch64.dmg.sha256`・`mukuchi_aarch64.app.tar.gz`・`mukuchi_aarch64.app.tar.gz.sha256` (版番号なし。LP の固定 URL 用。版は Release のタイトル・タグで分かる。tar.gz の .sha256 は publish での確認用で添付しない)
-5. `Publish desktop` (`production-desktop`。Deploy Key で checkout し、第三者のパッケージを入れない):
-   1. sha256 を確認 → 同じ版上げコミットを作る (ID を確認) → main が開始時のままでタグがないことを確認
-   2. `scripts/sign-updater.mjs` で tar.gz に署名して `latest.json` を作る (署名鍵はこの step にだけ渡す。`tauri.conf.json` の公開鍵で検証してから書く)
-   3. 下書きの Release `desktop-v<version>` を作って4つ (.dmg・.dmg.sha256・.app.tar.gz・latest.json) を添付する (下書きはタグを作らない。アップロードの失敗はここで起き、main は変わらない)
+   3・4 と並行して Windows:
+   - `Make verify.wav (Kyoko)` (macos-15、secret なし): Windows のインストーラーに入れる `verify.wav` を Mac と同じ Kyoko で作る (GitHub の Windows ランナーに日本語音声 Haruka があるかは公式に記載がないため)
+   - `Build Windows installer (unsigned)` (windows-latest、secret なし・environment なし): `core.autocrlf=false` にしてから checkout (CRLF だと版上げコミットが作れない。実測) → 同じ版上げコミットを作る (ID を確認) → `pnpm install --frozen-lockfile` → `apps/desktop/scripts/build-windows.mjs --verify-wav <受け取ったもの>` (下記「Windows」) → 版を確認 → artifact `mukuchi-windows-unsigned` (7日保存。`mukuchi_x64-setup.exe`・`.sha256`)
+5. `Publish desktop` (`production-desktop`。Deploy Key で checkout し、第三者のパッケージを入れない。sign と build-windows の両方の成功が条件):
+   1. sha256 を確認 (Mac・Windows) → 同じ版上げコミットを作る (ID を確認) → main が開始時のままでタグがないことを確認
+   2. `scripts/sign-updater.mjs` で tar.gz と Windows の .exe に署名して `latest.json` (2 プラットフォーム) を作る (署名鍵はこの step にだけ渡す。`tauri.conf.json` の公開鍵で検証してから書く)
+   3. 下書きの Release `desktop-v<version>` を作って添付する (.dmg・.dmg.sha256・.app.tar.gz・.app.tar.gz.sig・mukuchi_x64-setup.exe・.exe.sha256・.exe.sig・latest.json。リリースノートの先頭に両 OS の説明と Windows の SmartScreen の案内。下書きはタグを作らない。アップロードの失敗はここで起き、main は変わらない)
    4. 版上げコミットとタグを push (失敗したら下書きを消して止める。公開されない)
    5. 下書きを公開して Latest にし、`releases/latest` がこのタグであることを確かめる
    6. `releases/latest/download/latest.json` (アプリの endpoint) が今回の `latest.json` と同じ中身を返すことを確かめる (10秒おきに最大6回。合わなくても job は失敗にせず警告を出す。LP の更新 (次の job) を止めないため)
@@ -212,7 +218,7 @@ jobs: `approve` (承認) → `prepare` → `deploy-web` → `publish-web`
 
 | 失敗した所 | 状態 | 対処 |
 |---|---|---|
-| approve (拒否・期限切れ)・prepare・build・sign・deploy-web | main・タグ・Release は変わらない (web の deploy 中の失敗はデプロイが途中の可能性あり) | 原因を直して実行し直す |
+| approve (拒否・期限切れ)・prepare・build・sign・verify-wav・build-windows・deploy-web | main・タグ・Release は変わらない (片方の OS だけが成功しても公開しない。web の deploy 中の失敗はデプロイが途中の可能性あり) | 原因を直して実行し直す |
 | publish-desktop の push まで (main が進んだ等) | main・タグは変わらない。下書きは消す | 実行し直す |
 | publish-desktop の updater の署名 (鍵・パスワード違い、公開鍵と対でない) | main・タグ・Release は変わらない | secret と `tauri.conf.json` の `pubkey` を確認して実行し直す (公開鍵を替えると既存の利用者に届かない。「3. updater の署名鍵」) |
 | publish-desktop の公開 (push 後) | main・タグは push 済み。下書きの Release が残る (deploy-web-for-desktop は動かない) | 下書き `desktop-v<version>` を確認して手で公開し、Latest にする。LP は web をリリースして合わせる |
@@ -233,6 +239,66 @@ jobs: `approve` (承認) → `prepare` → `deploy-web` → `publish-web`
 - ランナーにある他の日本語音声 (一覧に `ja_JP` があれば) に切り替える。ASR が「確認します。」と認識できるかを確かめる
 - self-hosted runner (Kyoko を入れた Mac) で build job を動かす
 
+## Windows (NSIS、署名なし)
+
+仕様は docs/architecture.md の「同梱物・配布 (Windows)」、計画は docs/plans/windows-plan.md §8・§9。
+
+### 作り方 (`make build` / `make build-local` (Windows) = `apps/desktop/scripts/build-windows.mjs`)
+
+Windows ネイティブ専用 (WSL・macOS は不可)。前提は開発と同じ (Rust・VS Build Tools・Node・pnpm)。
+
+1. `scripts/check-release-blockers.mjs desktop` (`build-local`・CI は `--no-blockers` で省く)
+2. 同梱物: `fetch-llama-server.mjs` (llama.cpp b11408 の Vulkan 版、sha256 固定) と VC++ ランタイム (下記)、`verify.wav` (`--verify-wav <file>` > 既存の `bundle-resources/verify.wav` > `make-verify-wav.ps1` (Haruka))
+3. `check-windows-dlls.mjs` で `llama-server/` の依存を確認 (下記)
+4. `tauri build --bundles nsis --ci` (署名しない)
+5. `mukuchi.exe` + インストール先の直下の VC++ ランタイムの依存を確認し、生成された `installer.nsi` に同梱物がすべて入っていることを確かめる
+6. 版なしの名前で置く
+
+生成物 (`apps/desktop/src-tauri/target/release/bundle/`。`CARGO_TARGET_DIR` があればその下):
+
+- `nsis/mukuchi_<version>_x64-setup.exe` (tauri の名前。`<productName>_<version>_<arch>-setup.exe`)
+- `windows-release/mukuchi_x64-setup.exe` と `.sha256` (Release に添付する名前。LP は `https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_x64-setup.exe`)
+
+実測 (2026-10-10、v0.4.2、RTX 3080 Ti の開発機): 27.5 MiB (展開後 約 122 MiB、44 ファイル。LZMA の solid 圧縮)。`tauri build` は cargo のキャッシュなしで約 5 分、`mukuchi` だけの再ビルドで約 4 分。
+
+### インストーラーの設定 (`apps/desktop/src-tauri/tauri.windows.conf.json`)
+
+- `bundle.targets: ["nsis"]`、`nsis.installMode: "currentUser"` (管理者権限不要。インストール先は `%LOCALAPPDATA%\mukuchi`、アンインストール情報は HKCU)。`languages: ["English", "Japanese"]` (OS の言語で選び、どちらでもなければ先頭の English)
+- `webviewInstallMode: downloadBootstrapper` (silent。Tauri の既定と同じ値を明示)。インストーラーは WebView2 Runtime が入っているか (EdgeUpdate のレジストリの `pv`) を先に見て、入っていれば何もしない。Windows 11 には標準で入っているため通常はダウンロードしない。無い時だけ Microsoft のブートストラッパーを取得する (offline・embed はインストーラーが約 127MB / 1.8MB 大きくなるため使わない)
+- resources: `llama-server/` (llama.cpp + VC++ ランタイム) と、インストール先の直下に VC++ ランタイム (mukuchi.exe 用)
+- 更新 (`/UPDATE`) では NSIS が同じ場所に上書きする (アンインストーラーのアプリデータ削除・Run キー削除は更新では動かない)
+- フック `installerHooks: windows/installer-hooks.nsh` (アンインストール。役割の分担は docs/architecture.md「同梱物・配布 (Windows)」): `NSIS_HOOK_PREUNINSTALL` は `/MUKUCHI_PURGE` があり `/UPDATE` でなければ「アプリデータを削除」を有効にする (`/P` では確認ページが出ずチェックが入らないため)。`NSIS_HOOK_POSTUNINSTALL` は `/UPDATE` でなければ HKCU `Explorer\StartupApproved\Run` の値 `mukuchi` を消し、`/MUKUCHI_PURGE` の時は `%LOCALAPPDATA%\<ID>` が消し残っていれば 0.5 秒おきに最大 20 回消し直す (WebView2 が `EBWebView` を掴んでいることがあるため)。`NSIS_HOOK_POSTINSTALL` は HKCU `Software\minimalcorp\mukuchi` に `Installer Language` を書く (テンプレートは言語の選択画面を出した時しか書かず、無いとアンインストーラーが `/S` 以外で言語を選ぶダイアログを出して止まる。2 言語の構成で実測)。`build-windows.mjs` は生成された `installer.nsi` がフックを読むことを確かめる
+- フックの検証 (2026-10-10、この PC。本番・dev と別の ID・製品名 `com.minimalcorp.mukuchi.nsistest` / `mukuchi-nsistest` を `--config` で重ねたインストーラーを一時フォルダに `/S /D=` で入れ、アプリは起動しない): `/P /MUKUCHI_PURGE` でデータ・Run・StartupApproved・本体・アンインストール情報・ショートカットが消える (アンインストーラーが一時フォルダに写して起動し直しても `/MUKUCHI_PURGE` は引き継がれる)。`/P` だけではデータが残り StartupApproved は消える。`/P /UPDATE /MUKUCHI_PURGE` ではデータ・Run・StartupApproved が残る。データの下のファイルを 3 秒掴んでいても再試行で消える
+
+### VC++ ランタイム (app-local)
+
+llama.cpp の公式バイナリ (llama-server と DLL) は `vcruntime140.dll`・`vcruntime140_1.dll`・`msvcp140.dll` を、mukuchi.exe も `msvcp140.dll`・`msvcp140_1.dll` (ort = ONNX Runtime の静的ライブラリ由来) を import する (PE の import を `check-windows-dlls.mjs` で解析。クリーンな Windows 11 には無い)。DLL は実行ファイルのフォルダから先に探されるため、使うフォルダごとに置く (`llama-server/` に 3 つ、直下に 4 つ)。
+
+- 取得元: Microsoft の Visual C++ 2015-2022 再頒布可能パッケージ (x64) 14.44.35112 の版付きの URL (`https://aka.ms/vs/17/release/vc_redist.x64.exe` の転送先。パスに sha256 を含み内容が変わらない)。`apps/desktop/scripts/fetch-vc-runtime.mjs` が exe の sha256 を確かめ、中の cab を Windows 標準の tar で展開し、**DLL ごとの sha256** で選んで置く (VS Build Tools の `VC\Redist\MSVC\14.44.35112\x64\Microsoft.VC143.CRT` の同名のファイルと同じバイト列であることを確認済み)。リポジトリにバイナリを置かない
+- 再頒布の根拠: VS 2022 の Distributable Code (REDIST list の「Visual C++ Runtime Files」: `VC\redist` 配下のファイルを改変せずプログラムと一緒に配布できる。[Visual Studio 2022 Redistribution](https://learn.microsoft.com/visualstudio/releases/2022/redistribution))。アプリのフォルダに置く方式 (app-local) は Microsoft が「サービス (自動更新) の面で推奨しない」が可能な方式 ([Redistribute Visual C++ Files](https://learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files))。推奨の再頒布可能パッケージの導入は管理者権限が要り、`currentUser` (管理者権限不要) と合わないため使わない。**配布は「ライセンスを持つ Visual Studio の利用者」に限られる** (同ページ)。minimalcorp の Visual Studio のライセンス (Community の条件を含む) で満たすことの確認は利用者 (ユーザー) が行う (未確認)
+- `THIRD_PARTY_NOTICES` の 9 に記載。Microsoft の更新 (セキュリティ修正) は自動では入らないため、`fetch-vc-runtime.mjs` の版・sha256 を上げてリリースし直す
+- Tauri の `bundle.windows.bundleVCRuntime` は使わない (ビルドマシンの VS の最新版を入れるため版を固定できず、直下にしか置けない)
+- CPU 版 llama-server (同意後に `<データ>/llama-cpu/` に取得) も同じ 3 つに依存する。zip には無いため、runtime の導入時に同梱の `llama-server/` から写す (`provisioning/llama_runtime.rs`。写し元が無い開発ビルド等ではログのみで続行)
+
+### 依存の確認 (`apps/desktop/scripts/check-windows-dlls.mjs`)
+
+インストール後に同じフォルダに並ぶもの (グループ) ごとに、PE の import (通常・遅延読み込み) がすべて「同じグループの DLL」・API Set (`api-ms-win-*`。ユニバーサル CRT を含む)・Windows 11 の標準の DLL (スクリプト内の一覧)・GPU ドライバーの `vulkan-1.dll` のどれかに解決できることを確かめる。ビルドマシンの System32 は見ない (VS の入ったマシンでは vcruntime140.dll 等があり、同梱漏れを見逃すため)。知らない DLL が現れたら失敗するので、一覧に足すか同梱するかを決める。Node の標準ライブラリのみで OS に依存しない。
+
+```sh
+node apps/desktop/scripts/check-windows-dlls.mjs                                  # llama-server/
+node apps/desktop/scripts/check-windows-dlls.mjs <target>/release/mukuchi.exe apps/desktop/src-tauri/bundle-resources/vc-runtime
+```
+
+### 署名なし (SmartScreen)
+
+- Authenticode の署名はしない (SignPath は不承認。証明書を取れたら build-windows に署名の工程を足し、minisign はその後のファイルに対して行う)
+- 利用者には初回に Microsoft Defender SmartScreen の警告が出る (「詳細情報」→「実行」)。**Smart App Control が有効な PC ではインストールできない** (回避手段なし)。リリースノート (release.yml が先頭に書く)・LP に書く
+- 自動アップデートは minisign (updater の鍵) で検証するため署名なしでも成立する。updater は取得した `.exe` を一時フォルダに置いて `/UPDATE` 付きで起動する (`updater.rs` の `extract_exe`・`install_inner`)。この時に SmartScreen が出るかは**未確認** (インターネットから取得した印 (Zone.Identifier) を updater は付けない)
+
+### 手元で作る (確認用)
+
+Windows で `make build-local` (仮の値の検査を省く) または `make build`。インストールして確かめる時は、本番のデータ (`%LOCALAPPDATA%\com.minimalcorp.mukuchi`) と dev のデータ (`...\com.minimalcorp.mukuchi.dev`) が分かれていることと、アンインストールで戻せることを先に確かめる (アンインストーラーの「アプリデータを削除」は `%APPDATA%\<ID>` と `%LOCALAPPDATA%\<ID>` を消す)。中身だけを見るなら 7-Zip (`7z l mukuchi_x64-setup.exe`) で展開せずに一覧できる。
+
 ## main の required status checks
 
 `.github/workflows/ci.yml` の job 名 (ruleset の context。job 名を変えたら ruleset も直す):
@@ -241,6 +307,8 @@ jobs: `approve` (承認) → `prepare` → `deploy-web` → `publish-web`
 - `Frontend (lint, build, e2e)`
 - `ASR server (ruff, pytest)`
 - `Web (lint, typecheck, build)`
+
+Windows の job (`Rust Windows (fmt, clippy, test)`・`Frontend Windows (lint, build, e2e)`・`Windows installer (NSIS, unsigned)`) は今は required にしていない (足す時は ruleset に追加する)。
 
 ## 確認コマンド (`make verify` の内容)
 
@@ -262,3 +330,6 @@ jobs: `approve` (承認) → `prepare` → `deploy-web` → `publish-web`
 - updater の署名: tauri-cli 2.12.0 `crates/tauri-cli/src/helpers/updater_signature.rs` (`sign_file`・`secret_key`)。minisign crate 0.9.1 (tauri-cli の Cargo.lock の版。`src/{lib,secret_key,helpers,signature_box,constants}.rs`: `sign`・`prehash`・`SecretKey::from_box`・`raw_scrypt_params`)。[minisign の形式](https://jedisct1.github.io/minisign/)
 - updater の検証・展開: tauri-plugin-updater 2.13.1 `src/updater.rs` (`verify_signature`・`verify_signed_version`・`get_urls`・`install_inner`)、minisign-verify 0.2.5。tar.gz の作り方は tauri-bundler `src/bundle/updater_bundle.rs` (`create_tar_from_src`)
 - [Tauri: Updater](https://v2.tauri.app/plugin/updater/)
+- Windows の updater: tauri-plugin-updater 2.13.1 `src/updater.rs` (`get_urls` の `{os}-{arch}-{installer}`、Windows の `extract_exe` (PE なら NSIS)・`install_inner` (`ShellExecuteW` で `/UPDATE`))
+- NSIS: tauri-cli 2.12.0 `crates/tauri-bundler/src/bundle/windows/nsis/{mod.rs,installer.nsi}` (成果物名 `<productName>_<version>_<arch>-setup.exe`、`currentUser` の既定のインストール先 `$LOCALAPPDATA\<productName>`、WebView2 の確認と `downloadBootstrapper`、アンインストールのアプリデータ削除・Run キー削除)、`util.rs` (`bundleVCRuntime`)。[Tauri: Windows Installer](https://v2.tauri.app/distribute/windows-installer/)
+- VC++ ランタイム: [Redistribute Visual C++ Files](https://learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files)、[Visual Studio 2022 Redistribution](https://learn.microsoft.com/visualstudio/releases/2022/redistribution)、[Universal CRT deployment](https://learn.microsoft.com/cpp/windows/universal-crt-deployment)

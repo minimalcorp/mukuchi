@@ -101,8 +101,17 @@ impl Availability {
 
 /// .app を置き換えてよい場所か。App Translocation (移動せずに開いた) は読み取り専用の一時的な場所、
 /// `/Volumes/` 配下は dmg から直接起動したもので、どちらも置き換えても次の起動に残らない
+#[cfg(not(target_os = "windows"))]
 pub fn installable_location(bundle: &Path) -> bool {
     !crate::storage::is_translocated(bundle) && !bundle.starts_with("/Volumes")
+}
+
+/// Windows: 場所では判定しない。`bundle` は NSIS で入れたインストール先 (storage::current_app_bundle が
+/// uninstall.exe のある場所だけを返す) で、インストーラーが同じ場所 (レジストリに記録したインストール先) に入れ直す。
+/// 書き込めない場所ならインストーラーがエラーを出す (アプリは終了した後のため、アプリには戻らない)
+#[cfg(target_os = "windows")]
+pub fn installable_location(_bundle: &Path) -> bool {
+    true
 }
 
 /// 自動確認をする時期か。`last_attempt` は前回の確認の開始 (UNIX 秒、手動を含む)
@@ -323,7 +332,7 @@ impl<P: Clone> Machine<P> {
 
 // ---- 本体 -----------------------------------------------------------------------
 
-/// 取得済みの本体。updater の Update と検証済みの中身 (約40MB。メモリに持ち、終了で捨てる)
+/// 取得済みの本体。updater の Update と検証済みの中身 (約40MB。メモリに持ち、終了で捨てる。Windows は NSIS のインストーラー)
 #[derive(Clone)]
 struct Payload {
     update: Update,
@@ -345,6 +354,10 @@ pub struct UpdateManager {
     op: Arc<tokio::sync::Mutex<()>>,
     /// 自動確認の条件 (設定・セットアップ完了) が変わった時に見直させる
     wake: tokio::sync::Notify,
+    /// Windows: install の中で終了前の後始末 (ASR の停止) を済ませたか。その後に install が失敗したら
+    /// アプリは止めたままのため起動し直す
+    #[cfg(target_os = "windows")]
+    exiting: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn now_secs() -> u64 {
@@ -388,6 +401,8 @@ impl UpdateManager {
             }),
             op: Arc::new(tokio::sync::Mutex::new(())),
             wake: tokio::sync::Notify::new(),
+            #[cfg(target_os = "windows")]
+            exiting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -519,6 +534,24 @@ impl UpdateManager {
                 .endpoints(vec![url.clone()])
                 .context("開発用の確認先を設定できません")?;
         }
+        // Windows の install はインストーラーを起動して std::process::exit(0) で終わり、RunEvent::Exit を経ない
+        // (tauri-plugin-updater 2.13 の updater.rs)。そのため lib.rs の終了時の後始末 (ASR = llama-server の停止) を
+        // 直前のフックで行う。Job Object (KILL_ON_JOB_CLOSE) でもプロセスの終了で子は終わるが、インストーラーが
+        // インストール先の llama-server を上書きする前に確実に止めておく。プラグイン既定のフック
+        // (cleanup_before_exit: トレイ・ウィンドウの片付け) はこれで置き換わるため、ここでも呼ぶ
+        #[cfg(target_os = "windows")]
+        {
+            let app = self.app.clone();
+            let exiting = self.exiting.clone();
+            b = b.on_before_exit(move || {
+                exiting.store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Some(core) = tauri::Manager::try_state::<Arc<crate::core::Core>>(&app) {
+                    core.shutdown();
+                }
+                log::info!("アップデートのインストーラーを起動して終了する");
+                app.cleanup_before_exit();
+            });
+        }
         b.build().context("updater を作成できません")
     }
 
@@ -602,7 +635,9 @@ impl UpdateManager {
         }
         log::info!("アップデートをインストールする: {}", payload.update.version);
         // .app の置き換え (書き込めなければ管理者の確認を AppleScript で出し、メインスレッドの完了を待つ) は
-        // ブロッキングのため async ランタイムの外で行う
+        // ブロッキングのため async ランタイムの外で行う。
+        // Windows はインストーラー (passive: 進捗だけ出し、終わるとアプリを起動し直す `/P /R`) を起動して
+        // このプロセスを終了するため、成功すると戻らない。再起動もインストーラーが行う
         let result = tauri::async_runtime::spawn_blocking(move || {
             payload.update.install(payload.bytes.as_slice())
         })
@@ -619,6 +654,16 @@ impl UpdateManager {
             Ok(Err(e)) => {
                 log::error!("アップデートをインストールできません: {e}");
                 self.update(|m| m.install_failed(Msg::UpdateInstallFailed));
+                // Windows: 終了前の後始末 (ASR の停止) の後にインストーラーを起動できなかった。止めたままにせず、
+                // 今の版のまま起動し直す (取得したものは捨てたため、次の確認で取り直す)
+                #[cfg(target_os = "windows")]
+                if self
+                    .exiting
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    log::warn!("後始末の後のため、今の版のまま起動し直す");
+                    self.app.request_restart();
+                }
                 Err(anyhow!(Msg::UpdateInstallFailed))
             }
             Err(e) => {
@@ -656,6 +701,8 @@ mod tests {
             Availability::resolve(false, None, Some(&home)),
             Availability::Production
         );
+        // Windows は場所で判定しない (NSIS で入れたものかは storage::current_app_bundle が決める)
+        #[cfg(not(target_os = "windows"))]
         for p in [
             "/private/var/folders/ab/x/T/AppTranslocation/1234-ABCD/d/mukuchi.app",
             "/Volumes/mukuchi/mukuchi.app",
@@ -691,6 +738,17 @@ mod tests {
         );
         // "/Volumes" という名前の前方一致だけで判定しない
         assert!(installable_location(Path::new("/VolumesX/mukuchi.app")));
+        #[cfg(target_os = "windows")]
+        {
+            let installed = PathBuf::from(r"C:\Users\a\AppData\Local\mukuchi");
+            assert_eq!(
+                Availability::resolve(false, None, Some(&installed)),
+                Availability::Production
+            );
+            assert!(installable_location(Path::new(
+                "/Volumes/mukuchi/mukuchi.app"
+            )));
+        }
     }
 
     #[test]

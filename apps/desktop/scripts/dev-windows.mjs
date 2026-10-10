@@ -325,7 +325,7 @@ switch (cmd) {
   case "notice":
     console.log(
       {
-        help: "  (Windows: make・process-compose は apps/desktop/scripts/install-dev-tools-windows.ps1 で導入。build 系は macOS 専用)",
+        help: "  (Windows: make・process-compose は apps/desktop/scripts/install-dev-tools-windows.ps1 で導入。build・build-local は NSIS のインストーラー (署名なし)、dmg-local・verify は macOS 専用)",
         "skip-ruff": "skip: asr-server の ruff (Windows では uv を使わない。Mac・CI で検査される)",
         "skip-pytest": "skip: asr-server の pytest (Windows では uv を使わない。Mac・CI で検査される)",
       }[arg] ?? arg,
@@ -333,7 +333,7 @@ switch (cmd) {
     break;
   case "macos-only":
     die(
-      `make ${arg} は macOS 専用 (Developer ID 署名・公証・.dmg)。Windows のパッケージ (NSIS) は Phase 4 で実装予定 (docs/plans/windows-plan.md)`,
+      `make ${arg} は macOS 専用 (.dmg・署名と公証の検証)。Windows のインストーラーは make build / make build-local (NSIS、署名なし。docs/release.md の「Windows」)`,
     );
     break;
   default:

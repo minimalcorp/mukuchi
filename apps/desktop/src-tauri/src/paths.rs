@@ -36,20 +36,26 @@ pub const DATA_MARKER: &str = ".mukuchi-data";
 /// - 存在しない・空・目印がある のいずれか (既存の無関係なディレクトリを使わない)
 /// - `.git` を含まない (リポジトリ)
 /// - `protected` (target・asr-server 等) と同じか、その祖先でない (削除で巻き込まないため)
+/// - Windows: ドライブ・共有の直下でない。比較は [`comparable`] (大文字小文字・`\\?\`・8.3 の短い名前を正規化)
 pub fn validate_dev_data_dir(dir: &Path, protected: &[PathBuf]) -> Result<PathBuf> {
     if !dir.is_absolute() {
         bail!("絶対パスで指定してください: {}", dir.display());
     }
-    if dir.components().any(|c| c == Component::ParentDir) {
+    if has_parent_dir(dir) {
         bail!("`..` を含むパスは使えません: {}", dir.display());
     }
     let resolved = resolve_existing(dir);
+    let cmp = comparable(dir);
+    // ドライブ直下 (C:\) は保護対象と別のドライブだと祖先の判定にかからないため、それ自体を拒む
+    #[cfg(windows)]
+    if cmp.parent().is_none() {
+        bail!("ドライブ・共有の直下は使えません: {}", dir.display());
+    }
     if resolved.join(".git").exists() {
         bail!("git リポジトリは使えません: {}", dir.display());
     }
     for p in protected {
-        let p = resolve_existing(p);
-        if p.starts_with(&resolved) {
+        if comparable(p).starts_with(&cmp) {
             bail!(
                 "{} を含むディレクトリは使えません: {}",
                 p.display(),
@@ -72,6 +78,64 @@ pub fn validate_dev_data_dir(dir: &Path, protected: &[PathBuf]) -> Result<PathBu
         }
     }
     Ok(dir.to_path_buf())
+}
+
+/// `..` を含むか。Windows の `\\?\` 付きのパスは `/` を区切りとみなさず、`a/../b` が 1 つの要素になって
+/// `Component::ParentDir` に現れない (Win32 は開く時に `/` を区切りとして扱いうる) ため、文字列でも確かめる
+fn has_parent_dir(p: &Path) -> bool {
+    if p.components().any(|c| c == Component::ParentDir) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        p.to_string_lossy().split(['\\', '/']).any(|s| s == "..")
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// 比較用のパス。実在する部分はシンボリックリンクを解決する ([`resolve_existing`])。
+/// Windows は canonicalize が 8.3 の短い名前を長い名前に、大文字小文字をディスク上の表記にそろえるが、
+/// 実在しない部分はそのままのため、`\\?\` を剥がし、区切りを `\` にそろえ、全体を小文字にして比べる
+/// (NTFS は大文字小文字を区別しない)。表示やファイル操作には使わない
+pub fn comparable(p: &Path) -> PathBuf {
+    let resolved = resolve_existing(p);
+    #[cfg(windows)]
+    {
+        PathBuf::from(
+            strip_verbatim(&resolved)
+                .to_string_lossy()
+                .replace('/', "\\")
+                .to_lowercase(),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        resolved
+    }
+}
+
+/// Windows: `\\?\C:\x` → `C:\x`、`\\?\UNC\server\share\x` → `\\server\share\x` (canonicalize が付ける接頭辞を外す)。
+/// 表示用にも使う (利用者に `\\?\` を見せない)
+#[cfg(windows)]
+pub fn strip_verbatim(p: &Path) -> PathBuf {
+    let s = p.as_os_str().to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p.to_path_buf()
+    }
+}
+
+/// `p` が `base` と同じかその中か ([`comparable`] で比べる)
+// Windows の削除の安全策で使う (Mac は従来どおり Path::starts_with で比べる)
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn is_within(p: &Path, base: &Path) -> bool {
+    comparable(p).starts_with(comparable(base))
 }
 
 /// 実在する最も深い祖先までシンボリックリンクを解決し、残りをつなげる (比較用)
@@ -338,6 +402,98 @@ mod tests {
         }
         // 保護対象の中 (祖先ではない) は構わない
         assert!(ok(&target.join("dev-data")));
+    }
+
+    /// Windows のパスの正規化 (`\\?\`・大文字小文字・8.3 の短い名前・ドライブ直下)
+    #[test]
+    #[cfg(windows)]
+    fn dev_data_dir_rules_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = strip_verbatim(&tmp.path().canonicalize().unwrap());
+        let target = base.join("repo").join("src-tauri").join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // 存在しない保護対象 (同梱物の差し替え先の指定を誤った等) も、存在しない祖先の指定と比べる
+        let missing = base.join("missing").join("asr-server");
+        let protected = vec![target.clone(), home.clone(), missing];
+        let ok = |p: &Path| validate_dev_data_dir(p, &protected).is_ok();
+        let verbatim = |p: &Path| PathBuf::from(format!(r"\\?\{}", p.display()));
+
+        assert!(ok(&base.join("new-data")));
+        assert!(ok(&verbatim(&base.join("new-data"))));
+        // `\\?\` 付きでは `/` が区切りにならず、`..` が要素として現れない
+        let sneaky = verbatim(&base.join("empty")).join("x/../..");
+        assert!(
+            !sneaky.components().any(|c| c == Component::ParentDir),
+            "前提: {}",
+            sneaky.display()
+        );
+        assert!(!ok(&sneaky));
+        assert!(!ok(&base.join(r"a\..\b")));
+        assert!(!ok(&base.join("a/../b")));
+        // 大文字小文字の違い (存在しない部分も含めて) で保護対象の祖先を通さない
+        let upper = |p: &Path| PathBuf::from(p.display().to_string().to_uppercase());
+        assert!(!ok(&upper(&base.join("repo"))));
+        assert!(!ok(&verbatim(&upper(&base.join("repo")))));
+        assert!(!ok(&base.join("MISSING")));
+        assert!(!ok(&upper(&home)));
+        // ドライブ直下
+        let drive = PathBuf::from(format!("{}\\", &base.display().to_string()[..2]));
+        assert!(!ok(&drive));
+        assert!(!ok(&verbatim(&drive)));
+        // 8.3 の短い名前 (ボリュームで無効なら作られないため、その時は確かめられない)
+        let long = base.join("a-long-directory-name");
+        std::fs::create_dir_all(long.join("target")).unwrap();
+        let protected = vec![long.join("target")];
+        let short = short_path(&long);
+        if short != long {
+            assert!(validate_dev_data_dir(&short, &protected).is_err());
+            assert!(is_within(&short.join("target"), &long));
+        } else {
+            eprintln!("8.3 の短い名前が作られないボリュームのため短い名前の確認を省く");
+        }
+        assert!(validate_dev_data_dir(&long, &protected).is_err());
+    }
+
+    #[cfg(windows)]
+    fn short_path(p: &Path) -> PathBuf {
+        use ::windows::core::PCWSTR;
+        use ::windows::Win32::Storage::FileSystem::GetShortPathNameW;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let wide: Vec<u16> = p.as_os_str().encode_wide().chain([0]).collect();
+        let mut buf = vec![0u16; 1024];
+        // SAFETY: wide は NUL 終端、buf はこの呼び出しの間有効
+        let n = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+        if n == 0 || n > buf.len() {
+            return p.to_path_buf();
+        }
+        PathBuf::from(std::ffi::OsString::from_wide(&buf[..n]))
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn verbatim_prefix_is_stripped() {
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\C:\Users\a")),
+            PathBuf::from(r"C:\Users\a")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\UNC\srv\share\x")),
+            PathBuf::from(r"\\srv\share\x")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"C:\Users\a")),
+            PathBuf::from(r"C:\Users\a")
+        );
+        assert!(is_within(
+            Path::new(r"\\?\C:\NoSuchDir-Mukuchi\A\b"),
+            Path::new(r"c:\nosuchdir-mukuchi/a")
+        ));
+        assert!(!is_within(
+            Path::new(r"C:\NoSuchDir-Mukuchi\ab"),
+            Path::new(r"C:\NoSuchDir-Mukuchi\a")
+        ));
     }
 
     /// .app の構成・実行権限・symlink を使うため macOS のみ (uv は Mac の実行環境)

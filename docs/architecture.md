@@ -158,7 +158,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 - 配信: Release `desktop-v<X.Y.Z>` に `mukuchi_aarch64.app.tar.gz` (公証・staple 済みの .app。最上位は `mukuchi.app/`) と `latest.json` を添付する (作り方は docs/release.md)。endpoint は `https://github.com/minimalcorp/mukuchi/releases/latest/download/latest.json` 固定 (web は GitHub Release を作らないため Latest は常に desktop)。`latest.json` の url は版付きの `releases/download/desktop-v<X.Y.Z>/...` (Latest が途中で変わっても版と中身がずれない)
 - 署名: minisign (tauri の updater 鍵)。公開鍵は `tauri.conf.json` の `plugins.updater.pubkey`、秘密鍵は Environment `production-desktop` の secret のみ。`requireSignedVersion: true` (署名の trusted comment の版と `latest.json` の版が一致しなければ拒否。古い署名済みファイルへの巻き戻し防止)。**鍵を失うと既存の利用者に更新を届けられない**
 - 対象: 本番ビルドのみ。開発ビルドは確認・取得・インストールをしない (`UpdateStatus.state` = `unavailable`)。ただしデバッグビルドで `MUKUCHI_DEV_UPDATE_ENDPOINT=<url>` があれば確認・取得まで行う (http 可。インストールは常にしない。UI の確認用)
-- 場所の確認: 実行中の .app のパスに `/AppTranslocation/` を含む、または `/Volumes/` 配下 (dmg から直接起動) なら確認・取得をせず `unavailable` (理由「アプリケーションフォルダに移動すると自動でアップデートできます」)。書き込めない場所 (他の管理者が入れた等) は updater が管理者のパスワードを求める
+- 場所の確認: 実行中の .app のパスに `/AppTranslocation/` を含む、または `/Volumes/` 配下 (dmg から直接起動) なら確認・取得をせず `unavailable` (理由「アプリケーションフォルダに移動すると自動でアップデートできます」)。書き込めない場所 (他の管理者が入れた等) は updater が管理者のパスワードを求める。Windows の対象・インストールの流れは「Windows 版」の「同梱物・配布 (Windows)」
 - 確認の時期: セットアップ完了後、`Settings.autoCheckUpdates` が true なら起動30秒後と、前回の確認から6時間ごと (10分ごとに経過を見る。スリープ明けにも追いつく)。`check_for_update` (手動) は設定によらずいつでも。同時に1つだけ (確認・取得中の再要求は何もしない)
 - 取得: 新しい版が見つかれば続けて取得する (約40MB。取得したものはメモリに保持し、アプリを終了すると捨てる。次の起動で取り直す)。署名の検証は取得時に updater が必ず行う。取得済み (`ready`) の後の確認で、取得済みより新しい版 (semver で比較) があれば取り直す。同じか古い版 (Latest の取り下げ等) なら取得済みを残す
 - インストール (`install_update`): `ready` の時のみ。`ready` のまま裏で確認・取り直しをしている間はそれが終わるのを待ち、終わった時点で `ready` なら進める (そうでなければ「インストールできるアップデートがありません」)。`ready` でない確認・取得中はエラー (「アップデートを確認しています。しばらくしてからもう一度お試しください」)。セットアップ・モデルの取得・切り替え・削除・アンインストールの実行中はエラー (「ダウンロード・削除の実行中は更新できません」)。インストール中 (`installing`、置き換え後の再起動待ちを含む) は `start_provisioning` を無視し、`download_model`・`select_model`・`delete_model`・`restart_asr`・`delete_runtime_and_model`・`uninstall` をエラーにする (「アップデートをインストールしています」)。音声入力を OFF にしてから updater の install (.app を一時領域に退避して置き換える) → `AppHandle::request_restart` (`RunEvent::Exit` で ASR を止めてから起動し直す)。install に失敗したら `error` にして再起動しない
@@ -225,16 +225,30 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 | | 値 |
 |---|---|
 | バンドルID | `com.minimalcorp.mukuchi` / `.dev` (Mac と同じ) |
-| データ | `%LOCALAPPDATA%\<バンドルID>\` (Tauri の `app_local_data_dir`。移動プロファイルに載せない)。配下の構成は Mac と同じ (`llama-server` は同梱を `Program Files` 側から使うためコピーしない。Python・venv・uv はない) |
-| ログ | `app_log_dir` (`%LOCALAPPDATA%\<バンドルID>\logs`) |
-| 削除の安全策 | 目印 `.mukuchi-data` などは Mac と同じ。パスの比較は大文字小文字を区別せず、`\\?\` と短い名前 (8.3) を正規化する |
+| データ | `%LOCALAPPDATA%\<バンドルID>\` (Tauri の `app_local_data_dir`。移動プロファイルに載せない)。配下の構成は Mac と同じ (`llama-server` は同梱をインストール先から使うためコピーしない。Python・venv・uv はない)。WebView2 のデータ (`EBWebView\`) も Tauri がここに置く |
+| ログ | `app_log_dir` (`%LOCALAPPDATA%\<バンドルID>\logs`。データの中) |
+| インストール先 | NSIS (`currentUser`) の既定は `%LOCALAPPDATA%\<productName>\` = `%LOCALAPPDATA%\mukuchi\` (Tauri 2.12 の installer.nsi の `$LOCALAPPDATA\${PRODUCTNAME}`。`Programs\` の下ではない)。`mukuchi.exe`・`uninstall.exe`・同梱物 (Resource は実行ファイルのフォルダ)。アンインストール情報は `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\mukuchi` (`UninstallString` = `"<インストール先>\uninstall.exe"`) |
+| 削除の安全策 | 目印 `.mukuchi-data` などは Mac と同じ。パスの比較は大文字小文字を区別せず、`\\?\` を外し、実在する部分は canonicalize で 8.3 の短い名前を長い名前にする (`paths::comparable`)。`..` は `\\?\` 付きで `/` が区切りにならない場合も文字列で拒む。`MUKUCHI_DEV_DATA_DIR` はドライブ・共有の直下も拒む |
 
 ### 同梱物・配布 (Windows)
 
-- インストーラー: NSIS (`currentUser`、管理者権限不要)。成果物名は `mukuchi_x64-setup.exe` で固定 (LP の最新版リンク `releases/latest/download/mukuchi_x64-setup.exe`)。**署名しない** (SignPath 不承認。SmartScreen の警告が出る。Smart App Control が有効な PC では起動できない)
-- 同梱: `llama-server/` (Vulkan 版の最小構成 24 ファイル、約 86MB。`apps/desktop/scripts/fetch-llama-server.mjs` が b11408 の zip を sha256 固定で取得して `src-tauri/bundle-resources/llama-server/` に展開)、`verify.wav` (`scripts/make-verify-wav.ps1`)、`THIRD_PARTY_NOTICES` (llama.cpp・nlohmann/json・LLVM OpenMP を含む)。`tauri.windows.conf.json` が Windows のビルドだけ同梱物とアイコン (`icon.ico`) を差し替える。VC++ ランタイム (`vcruntime140` `msvcp140`) への依存は同梱か NSIS で解決する (未検証)
-- アップデート: tauri-plugin-updater (minisign。Authenticode ではない)。`latest.json` に `darwin-aarch64` と `windows-x86_64`。両 OS のビルドが成功した時だけ Release を公開する
-- アンインストール: 「完全にアンインストール」は `uninstall.exe` を起動してアプリを終了する。NSIS のフックでデータ・ログ・WebView2 のデータ・Run キー (`StartupApproved\Run` を含む) を削除する。「実行環境とモデルのみ削除」は Mac と同じ
+- インストーラー: NSIS (`currentUser`、管理者権限不要。インストール先は `%LOCALAPPDATA%\mukuchi` (tauri の既定 `$LOCALAPPDATA\<productName>`)、アンインストール情報は HKCU)。成果物名は `mukuchi_x64-setup.exe` で固定 (LP の最新版リンク `releases/latest/download/mukuchi_x64-setup.exe`)。言語は English・Japanese (OS の言語で選ぶ)。WebView2 は入っていれば何もしない (Windows 11 は標準で入っている。無い時だけブートストラッパーを取得: `downloadBootstrapper`)。**署名しない** (SignPath 不承認。SmartScreen の警告が出る。Smart App Control が有効な PC では起動できない)。作り方は `apps/desktop/scripts/build-windows.mjs` (`make build` (Windows)・release.yml の build-windows。docs/release.md の「Windows」)。フック (アンインストール) は `src-tauri/windows/installer-hooks.nsh`
+- 同梱 (インストール先の構成。`tauri.windows.conf.json` が Windows のビルドだけ同梱物・アイコン (`icon.ico`)・`bundle.targets` (`nsis`)・NSIS の設定を差し替える):
+  - 直下: `mukuchi.exe`、VC++ ランタイム `vcruntime140.dll`・`vcruntime140_1.dll`・`msvcp140.dll`・`msvcp140_1.dll` (mukuchi.exe が ort 由来で `msvcp140*.dll` を import する)、`verify.wav`、`LICENSE`・`NOTICE`・`THIRD_PARTY_NOTICES` (llama.cpp・nlohmann/json・LLVM OpenMP・VC++ ランタイムを含む)・`licenses/`
+  - `llama-server/`: Vulkan 版の最小構成 (`apps/desktop/scripts/fetch-llama-server.mjs` が b11408 の zip を sha256 固定で取得して `src-tauri/bundle-resources/llama-server/` に展開) + VC++ ランタイム `vcruntime140.dll`・`vcruntime140_1.dll`・`msvcp140.dll`。計 27 ファイル、約 86MB
+  - VC++ ランタイムは app-local (DLL は実行ファイルのフォルダから先に探されるため、使うフォルダごとに置く)。Microsoft の再頒布可能パッケージ 14.44.35112 から DLL ごとの sha256 で取り出す (`fetch-vc-runtime.mjs`)。PE の import がすべて同梱か Windows 標準に解決できることを `check-windows-dlls.mjs` で機械的に確かめる (クリーンな環境 (VM 等) での起動は未確認)。CPU 版 (`<データ>/llama-cpu/`) も同じ 3 つに依存するため、runtime の導入時に同梱の `llama-server/` から写す (同じ中身なら上書きしない。写し元が無い・写せない時はログのみで続行。揃っていなければ runtime を未導入とみなして写し直す)
+- アップデート: tauri-plugin-updater (minisign。Authenticode ではない)。`latest.json` に `darwin-aarch64` と `windows-x86_64` (updater は `windows-x86_64-nsis`、無ければ `windows-x86_64` を探す)。両 OS のビルドが成功した時だけ Release を公開する。成果物はインストーラー (`mukuchi_x64-setup.exe` とその `.sig`)
+  - 対象: NSIS で入れたもの (実行ファイルの隣に `uninstall.exe` がある) の本番ビルド。`target\release` から直接動かしたもの等は `unavailable` (「アプリの場所が分からない…」)。置き場所 (Mac の /Volumes・App Translocation) の判定はしない
+  - `install_update`: 音声入力 OFF → updater の install。Windows の install は取得したインストーラーを一時フォルダに書き、`on_before_exit` のフック → `ShellExecuteW` でインストーラーを `/P /UPDATE /R /ARGS …` で起動 → `std::process::exit(0)` (**RunEvent::Exit を経ない**。tauri-plugin-updater 2.13 の updater.rs)。そのためフックで `Core::shutdown` (セットアップ・取得・ASR (llama-server) の停止。インストーラーが上書きする前に止める) と、プラグイン既定のフックの `cleanup_before_exit` を行う。Job Object でも終了時に子は終わるが、上書きとの順序を確実にするため。再起動はインストーラーが行う (`/R`)。フックの後にインストーラーを起動できなかった場合は `error` にして今の版のまま `request_restart` する
+  - `installMode` は既定の `passive` (`/P`: 進捗だけ出して確認なし。インストーラーは起動中の mukuchi.exe を Restart Manager で終了させる) のまま (tauri.conf に書かない)
+  - 更新後の起動: `provisioned.json` の `runtime.version` (`llama.cpp-<tag>+vulkan-<同梱 zip の sha256>`) が変わっていれば runtime をやり直し (同梱の確認・GPU 判定)、CPU 版は印 (`.mukuchi-llama-cpu` の sha256) が違えば取り直す
+- アンインストール (アプリ内「完全にアンインストール」): 役割を分ける。アプリは実行中にデータの下の `EBWebView`・ログ・インストール先の llama-server を消せないため、**削除はすべてアプリの終了後にアンインストーラー (NSIS) が行う**
+  - Rust (`uninstall`): (本番) 実行ファイルの隣に `uninstall.exe` が無ければ何もせずエラー (「アンインストーラーが見つからない…設定 > アプリ から」) → 音声入力 OFF・セットアップ停止・ASR 停止 → `uninstall.exe /P /MUKUCHI_PURGE` を `ShellExecuteW` で起動 (作業ディレクトリは一時フォルダ。起動できなければ止めたものを戻してエラー) → スタートアップの登録 (HKCU `Run` と `Explorer\StartupApproved\Run` の値 `mukuchi`) を解除 → 終了。ファイルは消さない。開発ビルドは `uninstall.exe` が無いため常に dry-run (対象と起動するコマンドをログに出すだけ。macOS の `defaults`・`tccutil` は呼ばない。終了しない)
+  - NSIS (テンプレート + フック。担当は配布): テンプレートが `$INSTDIR` の本体・同梱物・`uninstall.exe`・ショートカット・`HKCU\...\Uninstall\mukuchi`・HKCU `Run` の値 `mukuchi` を消す (`/UPDATE` でない時)。「アプリのデータを削除する」(確認ページのチェック) が入っている時だけ `$APPDATA\<バンドルID>` と `$LOCALAPPDATA\<バンドルID>` (データ・モデル・ログ・EBWebView) を消すが、`/P` では確認ページが出ずチェックは入らない。そのためフックで: `NSIS_HOOK_PREUNINSTALL` で `/MUKUCHI_PURGE` があれば (`/UPDATE` でない時) `$DeleteAppDataCheckboxState` を 1 にしてテンプレートに消させる、`NSIS_HOOK_POSTUNINSTALL` で (`/UPDATE` でない時) HKCU `Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run` の値 `mukuchi` を消す。オプション名は GetOptions が前方一致のため `/P` `/UPDATE` `/NS` `/R` `/ARGS` で始まらないものにする。アプリ終了直後は WebView2 のプロセスが `EBWebView` を掴んでいることがあるため、消し残ったら少し待って再試行する
+  - 設定 > アプリ からのアンインストール (`/MUKUCHI_PURGE` なし): データはチェックを入れた時だけ消える (Tauri の既定どおり)。StartupApproved の値はフックが消す
+  - `get_uninstall_targets` (確認ダイアログ): インストール先 (NSIS で入れたもの)・データ (`%LOCALAPPDATA%\<バンドルID>`。モデル・ログ・EBWebView を含めて 1 つ。`MUKUCHI_DEV_DATA_DIR` の時は差し替え先と別に出す)・残っているスタートアップの登録 (`HKCU\<キー>\mukuchi`、bytes 0)
+- 「実行環境とモデルのみ削除」は Mac と同じ (`llama-cpu\`・`models\`・`provisioned.json`。同梱の llama-server・設定・ログ・EBWebView は残す)
+- `mukuchi.exe --print-resource-paths` (隠し・UI なし): 同梱物 (llama-server・verify.wav) とアンインストーラーの解決結果を表示して終了 (0=同梱物が揃っている 1=欠けている)。インストール後の配置の確認用
 
 ## インターフェース
 
@@ -247,7 +261,7 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 - `POST /transcribe` — body: 16kHz/mono/16bit PCMのWAV (`Content-Type: audio/wav`)。query: `language` (既定 `Japanese`。アプリは `Settings.speechLanguage` から `Japanese` | `English` を常に付ける)、`context` (認識のヒント = `Settings.asrContext` をそのまま。任意。Qwen3-ASR のシステムメッセージにそのまま入る) → `200 {"text":"...","elapsed_ms":123}`
   - `elapsed_ms`: サーバーがbodyを受信し終えてから応答するまでの時間 (WAVデコード + 推論待ち + 推論)。ネットワーク転送は含まない
   - エラー: 不正なWAV/形式違い → `400`、body が 5MiB (約120秒分+余裕) を超える → `413`
-- 開発用 (デバッグビルドのみ): `MUKUCHI_DEV_AUDIO_FILE=<wav>` でマイクの代わりにWAVを実時間で流す (その後は無音)。`MUKUCHI_DEV_AUTO_LISTEN=1` でASR準備完了後に自動でONにする (セットアップ画面は開かない)。`MUKUCHI_ASR_URL` 使用中はセットアップ不要とみなし、起動時にセットアップを開かずpanelを表示する (トレイの「セットアップを開く…」からは開ける)。`MUKUCHI_DEV_SHOW_SETUP=1` でそれをやめ本番と同じ判定にする (セットアップ画面の確認用)。`MUKUCHI_DEV_TARGET_BUNDLE=<bundle id>` でそのアプリが前面の時だけ入力する (自動テストで他のアプリに入力しないため)。`MUKUCHI_DEV_NO_PARTIAL=1` で途中表示を送らない (遅延の比較用)。`MUKUCHI_ASR_URL` もデバッグビルドのみ有効で、ループバックの http のみ受け付ける。`MUKUCHI_DEV_DATA_DIR=<dir>` でデータディレクトリを差し替える (本物のデータ・モデルに触れずに検証するため。受け付ける条件は「識別子・パス」の削除の安全策)。`MUKUCHI_DEV_UV` `MUKUCHI_DEV_ASR_SERVER_DIR` `MUKUCHI_DEV_VERIFY_WAV` で同梱物 (uv・asr-server/・verify.wav) を個別に差し替える。`MUKUCHI_DEV_UNINSTALL_DRY_RUN=1` でアンインストールは何も消さず対象と操作をログに出すだけ (アプリも終了しない)。Windows: `MUKUCHI_DEV_FORCE_GPU=none|integrated|driver_missing|ok` で GPU の判定結果を差し替える (同意の流れの確認用)、`MUKUCHI_DEV_LLAMA_SERVER_DIR` で同梱の llama-server/ を差し替える、`VK_DRIVER_FILES`・`VK_ICD_FILENAMES` を llama-server に引き継ぐ (存在しないファイルを指すと Vulkan が空になり、実機の経路のまま driver_missing を確かめられる)。`MUKUCHI_ASR_URL` は Windows では llama-server (`/v1/chat/completions`) とみなす
+- 開発用 (デバッグビルドのみ): `MUKUCHI_DEV_AUDIO_FILE=<wav>` でマイクの代わりにWAVを実時間で流す (その後は無音)。`MUKUCHI_DEV_AUTO_LISTEN=1` でASR準備完了後に自動でONにする (セットアップ画面は開かない)。`MUKUCHI_ASR_URL` 使用中はセットアップ不要とみなし、起動時にセットアップを開かずpanelを表示する (トレイの「セットアップを開く…」からは開ける)。`MUKUCHI_DEV_SHOW_SETUP=1` でそれをやめ本番と同じ判定にする (セットアップ画面の確認用)。`MUKUCHI_DEV_TARGET_BUNDLE=<bundle id>` でそのアプリが前面の時だけ入力する (自動テストで他のアプリに入力しないため)。`MUKUCHI_DEV_NO_PARTIAL=1` で途中表示を送らない (遅延の比較用)。`MUKUCHI_ASR_URL` もデバッグビルドのみ有効で、ループバックの http のみ受け付ける。`MUKUCHI_DEV_DATA_DIR=<dir>` でデータディレクトリを差し替える (本物のデータ・モデルに触れずに検証するため。受け付ける条件は「識別子・パス」の削除の安全策)。`MUKUCHI_DEV_UV` `MUKUCHI_DEV_ASR_SERVER_DIR` `MUKUCHI_DEV_VERIFY_WAV` で同梱物 (uv・asr-server/・verify.wav) を個別に差し替える。`MUKUCHI_DEV_UNINSTALL_DRY_RUN=1` でアンインストールは何も消さず対象と操作をログに出すだけ (アプリも終了しない。Windows の開発ビルドは指定がなくても常にこの動作)。Windows: `MUKUCHI_DEV_FORCE_GPU=none|integrated|driver_missing|ok` で GPU の判定結果を差し替える (同意の流れの確認用)、`MUKUCHI_DEV_LLAMA_SERVER_DIR` で同梱の llama-server/ を差し替える、`VK_DRIVER_FILES`・`VK_ICD_FILENAMES` を llama-server に引き継ぐ (存在しないファイルを指すと Vulkan が空になり、実機の経路のまま driver_missing を確かめられる)。`MUKUCHI_ASR_URL` は Windows では llama-server (`/v1/chat/completions`) とみなす
 - 推論は直列実行 (MLXはスレッド束縛のため、読み込み・ウォームアップ・全推論を専用の1スレッドで行う)。無音由来の定型ハルシネーション除外はサーバー側で行う
 - リアルタイムプレビューも同じ `/transcribe` を使う(専用APIは設けない)
 
@@ -408,8 +422,8 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `pause_model_download` | `{ id: string }` → `()` | 一時停止 (止まるまで待って返る)。途中のファイルは残す。取得中でなければ何もしない |
 | `cancel_model_download` | `{ id: string }` → `()` | 中止。取得中なら止めてから、途中のファイルを消して `not_downloaded` にする。取得済みならエラー (削除は `delete_model`)。開発ビルドが本番のバンドルIDで動いている時はエラー |
 | `delete_model` | `{ id: string }` → `()` | 取得済み (または paused・error) のモデルを消して `not_downloaded` にする。選択中・取得中はエラー |
-| `get_uninstall_targets` | → `{ path: string; bytes: number }[]` | 確認ダイアログの一覧 (存在するものだけ。bytes はディスク上の使用量) |
-| `uninstall` | → `()` | 完全にアンインストール(完了後にアプリ終了) |
+| `get_uninstall_targets` | → `{ path: string; bytes: number }[]` | 確認ダイアログの一覧 (存在するものだけ。bytes はディスク上の使用量)。Windows はスタートアップの登録 (`HKCU\…\Run\mukuchi` の形、bytes 0) も含む |
+| `uninstall` | → `()` | 完全にアンインストール(完了後にアプリ終了)。Windows はアンインストーラーを起動して終了する (削除はその後にアンインストーラーが行う。「Windows 版」) |
 | `list_running_apps` | → `{ bundleId: string; name: string }[]` | 入力しないアプリの追加候補 |
 | `open_logs_folder` | → `()` | Finder (Windows はエクスプローラー) で開く |
 | `get_app_info` | → `AppInfo` | |

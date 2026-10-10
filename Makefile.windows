@@ -2,7 +2,8 @@
 # 前提: Windows ネイティブ (WSL ではない)・Git for Windows・Node・pnpm・Rust (rustup)・VS Build Tools (C++)。
 # GNU make と process-compose は apps/desktop/scripts/install-dev-tools-windows.ps1 で %USERPROFILE%\bin に入れる。nix は使わない。
 # Mac との違い: ASR は llama-server (Vulkan、GGUF)・process-compose は TCP のループバック + トークン (UDS・-D が無いため)・
-# asr-server (Python) の ruff・pytest は省く (uv が無い。Mac・CI で検査される)・build 系は macOS 専用。
+# asr-server (Python) の ruff・pytest は省く (uv が無い。Mac・CI で検査される)・build / build-local は NSIS のインストーラー
+# (署名なし)、dmg-local・verify は macOS 専用。
 .DEFAULT_GOAL := help
 
 # レシピのシェルは Git for Windows の sh.exe。System32 の bash.exe は WSL のランチャーなので使わない。
@@ -96,9 +97,18 @@ test: ## 全アプリのテスト (Playwright・cargo test・リリース用ス�
 	cargo test --manifest-path $(DESKTOP)/src-tauri/Cargo.toml --locked
 	@$(DEV) notice skip-pytest
 
+# Windows のインストーラー (NSIS、署名なし。Authenticode の証明書が無いため)。中身は apps/desktop/scripts/build-windows.mjs
+# (同梱物 (llama-server・VC++ ランタイム) の用意と依存の確認・tauri build・中身の確認)。成果物は
+# <target>/release/bundle/windows-release/mukuchi_x64-setup.exe (.sha256)。リリースは .github/workflows/release.yml (build-windows)
+build: ## 配布用のインストーラー (NSIS、署名なし。仮の値が残っていれば止める)
+	node $(DESKTOP_SCRIPTS)/build-windows.mjs
+
+build-local: ## 手元確認用のインストーラー (build と同じ。仮の値の検査だけ省く)
+	node $(DESKTOP_SCRIPTS)/build-windows.mjs --no-blockers
+
 # 黙って何もしないと成功に見えるため、明確に失敗させる。
 # レシピのコマンド行に日本語を書かない (make (32 ビット版) がコマンド行を ANSI のコードページで渡し、文字化けするため。実測)。文言は dev-windows.mjs が出す
-build build-local dmg-local verify: ## (macOS 専用。Windows のパッケージ (NSIS) は Phase 4 で実装予定)
+dmg-local verify: ## (macOS 専用)
 	@$(DEV) macos-only $@
 
 web-build: ## web の静的ビルド (apps/web/build/client)

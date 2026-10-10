@@ -81,6 +81,8 @@ pub(super) fn text(m: &Msg) -> String {
             format!("Some items couldn’t be deleted: {}", names.join(", "))
         }
         AppBundleUnknown => s("Can’t uninstall because the app’s location is unknown"),
+        UninstallerMissing => s("Can’t uninstall because the uninstaller is missing. Uninstall mukuchi from Windows Settings > Apps > Installed apps."),
+        UninstallerLaunchFailed => s("Can’t start the uninstaller"),
         AppTranslocated => s("mukuchi is running from a temporary location. Move it to the Applications folder, open it again, and then uninstall."),
         Internal => s("An internal error occurred"),
         OpenSystemSettingsFailed => s("Couldn’t open System Settings"),

@@ -14,7 +14,7 @@ use crate::asr::{self, AsrBackend, Transcript};
 use crate::asr_process::{AsrEvent, AsrProcess, LaunchSpec};
 use crate::audio::{self, Source};
 use crate::gpu::{GpuManager, GpuStatus};
-use crate::i18n::{self, Locale, Msg, UninstallPart};
+use crate::i18n::{self, Locale, Msg};
 use crate::insert::{InsertConfig, InsertQueue, Job, UtteranceResult};
 use crate::paths::{DataPaths, Resources};
 use crate::pipeline::{
@@ -836,6 +836,7 @@ impl Core {
 
     /// 完全にアンインストールする。本体をゴミ箱に入れたらアプリを終了する。
     /// 開発ビルドで MUKUCHI_DEV_UNINSTALL_DRY_RUN=1 なら何も変えずにログに出す
+    #[cfg(not(target_os = "windows"))]
     pub async fn uninstall(self: &Arc<Self>) -> Result<()> {
         // 開発ビルドが本番のバンドルIDで動いている時は、指定がなくても dry-run にする
         let dry_run =
@@ -878,6 +879,72 @@ impl Core {
             log::info!("アンインストール完了。終了する");
             self.app.exit(0);
         }
+        Ok(())
+    }
+
+    /// Windows の完全なアンインストール (docs/architecture.md「Windows 版」のアンインストール)。
+    /// アプリはファイルを消さない (WebView2 のデータ・ログ・同梱の llama-server は実行中は使用中で消せない)。
+    /// 音声入力 OFF・セットアップ停止・ASR 停止 → NSIS の uninstall.exe を `/P /MUKUCHI_PURGE` で起動 →
+    /// スタートアップの登録を解除 → 終了。データ・本体・レジストリの削除はアプリの終了後にアンインストーラーとフックが行う。
+    /// 開発ビルドには uninstall.exe が無い (target\debug から動く) ため、常に対象をログに出すだけにする
+    #[cfg(target_os = "windows")]
+    pub async fn uninstall(self: &Arc<Self>) -> Result<()> {
+        let dry_run = cfg!(debug_assertions);
+        // 何も止める前に確かめる (NSIS で入れたものでなければ中止)
+        let install_dir = self.with_uninstall_context(|ctx| {
+            storage::check_app_bundle(ctx.app_bundle.as_deref(), dry_run)
+                .map(|()| ctx.app_bundle.clone())
+        })??;
+        // モデルの切り替え中は行わない (切り替えの失敗で元のモデルを起動し直してしまうため)
+        let switch = self.lock_model_switch()?;
+        if dry_run {
+            // 削除の安全策の確認も通す (本番ではアンインストーラーが消すものと同じ範囲)
+            self.with_uninstall_context(|ctx| {
+                let plan = storage::uninstall_plan(ctx);
+                if let Err(e) = storage::delete_files(&plan, ctx, true) {
+                    log::error!("[dry-run] {e:#}");
+                }
+                for t in plan.targets() {
+                    log::info!("[dry-run] 対象: {} ({} bytes)", t.path, t.bytes);
+                }
+            })?;
+            match &install_dir {
+                Some(dir) => log::info!(
+                    "[dry-run] 起動: {} {}",
+                    dir.join(storage::UNINSTALLER).display(),
+                    storage::UNINSTALLER_ARGS
+                ),
+                None => log::info!("[dry-run] アンインストーラーなし (NSIS で入れたものでない)"),
+            }
+            log::info!("[dry-run] スタートアップの登録を解除して終了");
+            return Ok(());
+        }
+        let Some(install_dir) = install_dir else {
+            return Err(anyhow!(Msg::UninstallerMissing));
+        };
+        self.set_listening(false).await?;
+        let suspended = (
+            self.provisioning.suspend().await?,
+            self.models.suspend().await?,
+        );
+        // 同梱の llama-server はインストール先にあり、動いているとアンインストーラーが消せないため先に止める
+        self.asr_process.stop().await;
+        if let Err(e) = storage::launch_uninstaller(&install_dir) {
+            log::error!("アンインストーラーを起動できません: {e:#}");
+            // 何も消していない。止めたものを元に戻す
+            drop(suspended);
+            drop(switch);
+            self.start_managed_asr().await;
+            return Err(anyhow!(Msg::UninstallerLaunchFailed));
+        }
+        // アンインストーラーも Run の値は消すが、StartupApproved の値はフック任せのため、ここでも両方消しておく
+        if let Err(e) = crate::autostart::set_enabled(false) {
+            log::warn!("スタートアップの登録を解除できません: {e:#}");
+        }
+        log::info!("アンインストーラーを起動した。終了する");
+        // 停止 (suspended) は終了まで持つ (終了の前にセットアップ等を始めさせない)
+        self.app.exit(0);
+        drop(suspended);
         Ok(())
     }
 
@@ -1900,11 +1967,13 @@ fn runtime_step(
     }))
 }
 
-/// アンインストールの本体 (ブロッキング)。アプリ本体をゴミ箱に入れたかを返す。
+/// アンインストールの本体 (ブロッキング。macOS)。アプリ本体をゴミ箱に入れたかを返す。
 /// 順序: ログイン項目の解除 → ファイル削除 → 設定 (defaults) → TCC (LaunchServices に登録された
 /// アプリが要るため本体より先) → 本体をゴミ箱へ。途中で失敗しても残りは続け、最後にまとめて報告する
+#[cfg(not(target_os = "windows"))]
 fn uninstall_blocking(ctx: &UninstallContext, dry_run: bool) -> Result<bool> {
     let plan = storage::uninstall_plan(ctx);
+    use crate::i18n::UninstallPart;
     let mut errors: Vec<UninstallPart> = Vec::new();
     if dry_run {
         log::info!("[dry-run] ログイン項目を解除");
@@ -1954,6 +2023,7 @@ fn uninstall_blocking(ctx: &UninstallContext, dry_run: bool) -> Result<bool> {
 }
 
 /// 外部コマンドを実行し、成功したかを返す (出力はログへ)
+#[cfg(not(target_os = "windows"))]
 fn run_tool(program: &str, args: &[&str]) -> bool {
     match std::process::Command::new(program).args(args).output() {
         Ok(o) if o.status.success() => true,

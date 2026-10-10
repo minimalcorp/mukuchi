@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,7 +15,7 @@ import {
   decodePublicKey,
   decodeSecretKey,
   latestJson,
-  PLATFORM,
+  PLATFORMS,
   prehashFile,
   rfc3339,
   scryptParams,
@@ -118,53 +118,100 @@ test("trusted comment にタブ・改行を入れない", () => {
   assert.throws(() => trustedComment({ timestamp: 1, fileName: "a", version: "1.0.0\nx" }));
 });
 
-test("latest.json", () => {
-  const url = "https://github.com/minimalcorp/mukuchi/releases/download/desktop-v1.2.3/mukuchi_aarch64.app.tar.gz";
-  const j = JSON.parse(latestJson({ version: "1.2.3", url, signature: "SIG", pubDate: "2026-10-02T00:00:00Z" }));
-  assert.deepEqual(j, {
+test("latest.json: 両プラットフォームを PLATFORMS の順に書く", () => {
+  const mac = "https://github.com/minimalcorp/mukuchi/releases/download/desktop-v1.2.3/mukuchi_aarch64.app.tar.gz";
+  const win = "https://github.com/minimalcorp/mukuchi/releases/download/desktop-v1.2.3/mukuchi_x64-setup.exe";
+  const pubDate = "2026-10-02T00:00:00Z";
+  // 渡す順によらず darwin-aarch64 → windows-x86_64 の順
+  const text = latestJson({
     version: "1.2.3",
-    pub_date: "2026-10-02T00:00:00Z",
-    platforms: { [PLATFORM]: { signature: "SIG", url } },
+    platforms: { "windows-x86_64": { signature: "W", url: win }, "darwin-aarch64": { signature: "M", url: mac } },
+    pubDate,
   });
-  assert.equal(PLATFORM, "darwin-aarch64");
-  assert.throws(() => latestJson({ version: "1.2", url, signature: "S", pubDate: "2026-10-02T00:00:00Z" }));
-  assert.throws(() => latestJson({ version: "1.2.3", url: url.replace("https", "http"), signature: "S", pubDate: "2026-10-02T00:00:00Z" }));
+  assert.deepEqual(JSON.parse(text), {
+    version: "1.2.3",
+    pub_date: pubDate,
+    platforms: { "darwin-aarch64": { signature: "M", url: mac }, "windows-x86_64": { signature: "W", url: win } },
+  });
+  assert.deepEqual(Object.keys(JSON.parse(text).platforms), ["darwin-aarch64", "windows-x86_64"]);
+  assert.deepEqual(PLATFORMS, ["darwin-aarch64", "windows-x86_64"]);
+  // 1 プラットフォームだけでも書ける (手元の確認用)
+  assert.deepEqual(Object.keys(JSON.parse(latestJson({ version: "1.2.3", platforms: { "darwin-aarch64": { signature: "M", url: mac } }, pubDate })).platforms), ["darwin-aarch64"]);
+  const one = { "darwin-aarch64": { signature: "S", url: mac } };
+  assert.throws(() => latestJson({ version: "1.2", platforms: one, pubDate }));
+  assert.throws(() => latestJson({ version: "1.2.3", platforms: { "darwin-aarch64": { signature: "S", url: mac.replace("https", "http") } }, pubDate }));
+  assert.throws(() => latestJson({ version: "1.2.3", platforms: {}, pubDate }), /空/);
+  assert.throws(() => latestJson({ version: "1.2.3", platforms: { "linux-x86_64": { signature: "S", url: mac } }, pubDate }), /未知/);
   assert.equal(rfc3339(new Date(Date.UTC(2026, 9, 2, 1, 2, 3, 456))), "2026-10-02T01:02:03Z");
 });
 
-test("CLI: .sig と latest.json を書き、tauri.conf.json の公開鍵と対でない鍵は拒否する", (t) => {
+test("CLI: 両プラットフォームの .sig と latest.json を書き、tauri.conf.json の公開鍵と対でない鍵は拒否する", async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), "mukuchi-sign-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const conf = path.join(dir, "tauri.conf.json");
   writeFileSync(conf, JSON.stringify({ plugins: { updater: { pubkey: PUB } } }));
-  const url = "https://github.com/minimalcorp/mukuchi/releases/download/desktop-v1.2.3/mukuchi_aarch64.app.tar.gz";
+  // Windows の更新物 (NSIS のインストーラー) の代わり。中身は何でもよい (署名はバイト列に対して行う)
+  const exe = path.join(dir, "mukuchi_x64-setup.exe");
+  writeFileSync(exe, Buffer.concat([Buffer.from("MZ"), randomBytes(4096)]));
+  const base = "https://github.com/minimalcorp/mukuchi/releases/download/desktop-v1.2.3";
+  const mac = `${base}/mukuchi_aarch64.app.tar.gz`;
+  const win = `${base}/mukuchi_x64-setup.exe`;
+  const out = path.join(dir, "out");
+  mkdirSync(out);
+  const common = ["--version", "1.2.3", "--pubkey-config", conf, "--out", out, "--timestamp", "1790000000"];
   const args = [
     path.join(here, "sign-updater.mjs"),
-    ...["--file", DATA, "--version", "1.2.3", "--url", url, "--pubkey-config", conf, "--out", dir],
-    ...["--timestamp", "1790000000"],
+    ...["--file", `darwin-aarch64=${DATA}`, "--url", `darwin-aarch64=${mac}`],
+    ...["--file", `windows-x86_64=${exe}`, "--url", `windows-x86_64=${win}`],
+    ...common,
   ];
   const env = { ...process.env, TAURI_SIGNING_PRIVATE_KEY: KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD: PASSWORD };
   execFileSync(process.execPath, args, { env, stdio: "pipe" });
-  const sig = readFileSync(path.join(dir, "mukuchi_aarch64.app.tar.gz.sig"), "utf8");
-  const j = JSON.parse(readFileSync(path.join(dir, "latest.json"), "utf8"));
+  const macSig = readFileSync(path.join(out, "mukuchi_aarch64.app.tar.gz.sig"), "utf8");
+  const winSig = readFileSync(path.join(out, "mukuchi_x64-setup.exe.sig"), "utf8");
+  const j = JSON.parse(readFileSync(path.join(out, "latest.json"), "utf8"));
   assert.equal(j.version, "1.2.3");
   assert.equal(j.pub_date, "2026-09-21T14:13:20Z");
-  assert.deepEqual(j.platforms, { "darwin-aarch64": { signature: sig, url } });
-  assert.equal(lines(sig)[2], "trusted comment: timestamp:1790000000\tfile:mukuchi_aarch64.app.tar.gz\tversion:1.2.3");
+  assert.deepEqual(j.platforms, {
+    "darwin-aarch64": { signature: macSig, url: mac },
+    "windows-x86_64": { signature: winSig, url: win },
+  });
+  assert.equal(lines(macSig)[2], "trusted comment: timestamp:1790000000\tfile:mukuchi_aarch64.app.tar.gz\tversion:1.2.3");
+  assert.equal(lines(winSig)[2], "trusted comment: timestamp:1790000000\tfile:mukuchi_x64-setup.exe\tversion:1.2.3");
+  // それぞれ自分のファイルでだけ検証できる (取り違えていない)
+  assert.ok(verifySignature(winSig, PUB, await prehashFile(exe)));
+  const macHash = await prehashFile(DATA);
+  assert.throws(() => verifySignature(winSig, PUB, macHash), /一致しない/);
 
-  // 対でない公開鍵 (公開鍵を1バイト変えたもの) を tauri.conf.json に置くと止まる
+  const run = (a, e = env) => execFileSync(process.execPath, a, { env: e, stdio: "pipe" });
+  const fresh = () => {
+    rmSync(out, { recursive: true, force: true });
+    mkdirSync(out);
+  };
+  // 対でない公開鍵 (公開鍵を1バイト変えたもの) を tauri.conf.json に置くと止まり、何も書かない
   const raw = Buffer.from(PUB, "base64").toString("utf8").split("\n");
   const bin = Buffer.from(raw[1], "base64");
   bin[41] ^= 1;
   raw[1] = bin.toString("base64");
   writeFileSync(conf, JSON.stringify({ plugins: { updater: { pubkey: Buffer.from(raw.join("\n")).toString("base64") } } }));
-  assert.throws(() => execFileSync(process.execPath, args, { env, stdio: "pipe" }), /対でない/);
-  // url のファイル名が違う・パスワード違いも止まる
+  fresh();
+  assert.throws(() => run(args), /対でない/);
+  assert.deepEqual(readdirSync(out), []);
   writeFileSync(conf, JSON.stringify({ plugins: { updater: { pubkey: PUB } } }));
-  const badUrl = args.map((a) => (a === url ? url.replace("mukuchi_aarch64", "other") : a));
-  assert.throws(() => execFileSync(process.execPath, badUrl, { env, stdio: "pipe" }), /ファイル名/);
+  // url のファイル名が違う (片方だけでも) と止まり、何も書かない
+  fresh();
+  assert.throws(() => run(args.map((a) => (a === `windows-x86_64=${win}` ? `windows-x86_64=${base}/other.exe` : a))), /ファイル名/);
+  assert.deepEqual(readdirSync(out), []);
+  // パスワード違い
+  assert.throws(() => run(args, { ...env, TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "x" }), /パスワード/);
+  // --file と --url が対でない・未知のプラットフォーム・プラットフォームなし・重複
+  const sign = path.join(here, "sign-updater.mjs");
+  assert.throws(() => run([sign, "--file", `windows-x86_64=${exe}`, ...common]), /対で/);
+  assert.throws(() => run([sign, "--file", `linux-x86_64=${exe}`, "--url", `linux-x86_64=${win}`, ...common]), /の形/);
+  assert.throws(() => run([sign, "--file", exe, "--url", win, ...common]), /の形/);
+  assert.throws(() => run([sign, ...common]), /--file が必要/);
   assert.throws(
-    () => execFileSync(process.execPath, args, { env: { ...env, TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "x" }, stdio: "pipe" }),
-    /パスワード/,
+    () => run([sign, "--file", `windows-x86_64=${exe}`, "--file", `windows-x86_64=${exe}`, "--url", `windows-x86_64=${win}`, ...common]),
+    /2 回/,
   );
 });

@@ -75,7 +75,7 @@ jobs:
             # CI の Prepare bundle resources で使う
             '^apps/desktop/scripts/(prepare-bundle-resources|fetch-uv|make-verify-wav)\.sh$'
             # rust-windows の Prepare bundle resources・installer-windows で使う
-            '^apps/desktop/scripts/(fetch-llama-server|fetch-vc-runtime|check-windows-dlls|build-windows)\.mjs$'
+            '^apps/desktop/scripts/(fetch-llama-server|fetch-vc-runtime|check-windows-dlls|build-windows|windows-tar)\.mjs$'
             # tauri.conf.json の bundle.resources (tauri-build が要求する)
             '^apps/desktop/THIRD_PARTY_NOTICES$'
             '^(LICENSE|NOTICE)$'
@@ -311,7 +311,10 @@ jobs:
         run: rustup toolchain install
       - name: pnpm install
         run: pnpm install --frozen-lockfile
+      # release.yml の build-windows と同じ bash (Git for Windows) で動かす。シェルが違うと PATH 上の tar が変わり
+      # (pwsh は OS 標準の bsdtar、bash は Git 同梱の GNU tar)、Release でだけ失敗する不具合を見逃した
       - name: Build installer
+        shell: bash
         run: node apps/desktop/scripts/build-windows.mjs --no-blockers --placeholder-verify-wav
       - name: Installer size
         run: Get-ChildItem apps/desktop/src-tauri/target/release/bundle/windows-release | Format-Table Name, Length

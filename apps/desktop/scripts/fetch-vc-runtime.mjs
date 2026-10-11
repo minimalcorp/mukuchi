@@ -27,6 +27,7 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { tarCommand } from "./windows-tar.mjs";
 
 export const VC_VERSION = "14.44.35112";
 // https://aka.ms/vs/17/release/vc_redist.x64.exe の転送先 (2026-10-10。パスに sha256 を含む版付きの URL)。
@@ -61,7 +62,7 @@ export function findCabs(buf) {
 }
 
 function tarExtract(file, dir) {
-  const r = spawnSync("tar", ["-xf", file, "-C", dir], { stdio: ["ignore", "ignore", "pipe"] });
+  const r = spawnSync(tarCommand(), ["-xf", file, "-C", dir], { stdio: ["ignore", "ignore", "pipe"] });
   if (r.error || r.status !== 0) {
     throw new Error(`cab を展開できない (Windows 標準の tar が必要): ${r.error?.message ?? r.stderr}`);
   }

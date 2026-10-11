@@ -19,6 +19,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { APP_VC, LLAMA_VC, placeVcRuntime } from "./fetch-vc-runtime.mjs";
+import { tarCommand } from "./windows-tar.mjs";
 
 const TAG = "b11408";
 const ASSET = `llama-${TAG}-bin-win-vulkan-x64.zip`;
@@ -87,7 +88,7 @@ if (sha256(zip) !== SHA256) {
 
 const tmp = mkdtempSync(path.join(cache, "x-"));
 try {
-  const r = spawnSync("tar", ["-xf", zip, "-C", tmp], { stdio: "inherit" });
+  const r = spawnSync(tarCommand(), ["-xf", zip, "-C", tmp], { stdio: "inherit" });
   if (r.status !== 0) {
     console.error("error: zip の展開に失敗 (Windows 標準の tar が必要)");
     process.exit(1);

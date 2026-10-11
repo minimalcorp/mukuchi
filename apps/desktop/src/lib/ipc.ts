@@ -16,14 +16,20 @@ export type AppErrorCode =
   | "asr_stopped"
   | "runtime_missing"
   | "insert_failed"
-  | "vad_failed";
+  | "vad_failed"
+  /** Windows のみ: GPU が使えず CPU 実行への同意 (Settings.cpuInferenceAccepted) もない。action は accept_cpu / probe_gpu */
+  | "gpu_unavailable";
 
 export type AppErrorAction =
   | "open_accessibility"
   | "open_microphone"
   | "select_microphone"
   | "restart_asr"
-  | "start_setup";
+  | "start_setup"
+  /** Windows のみ (gpu_unavailable): CPU 実行の同意へ */
+  | "accept_cpu"
+  /** Windows のみ (gpu_unavailable): GPU の再検出 */
+  | "probe_gpu";
 
 export type AppError = {
   code: AppErrorCode;
@@ -32,7 +38,10 @@ export type AppError = {
   action: AppErrorAction | null;
 };
 
-/** login_items: launchAtLogin を ON にできなかった時 (承認待ち等) の案内用 */
+/**
+ * login_items: launchAtLogin を ON にできなかった時 (承認待ち等) の案内用。
+ * Windows は「設定」アプリを開く (microphone → ms-settings:privacy-microphone、login_items → ms-settings:startupapps。accessibility は使わない)
+ */
 export type SystemSettingsPane = "microphone" | "accessibility" | "login_items";
 
 export type AppStatus = {
@@ -61,6 +70,7 @@ export type UtteranceResult =
   | { kind: "failed"; id: number; text: string; error: AppError };
 
 export type KeyName = "enter" | "tab" | "escape" | "backspace";
+/** cmd は Windows では Win キー */
 export type Modifier = "cmd" | "shift" | "option" | "ctrl";
 export type KeyCombo = { key: KeyName; modifiers: Modifier[] };
 
@@ -89,20 +99,22 @@ export type Settings = {
   inputMode: InputMode;
   /** 貼り付けた発話の直後に送信キーを送る (docs/architecture.md「決定事項」の自動送信) */
   autoSubmit: boolean;
-  /** 自動送信の送信キー。modEnter は主修飾キー+Enter (macOS は ⌘+Enter) */
+  /** 自動送信の送信キー。modEnter は主修飾キー+Enter (macOS は ⌘+Enter、Windows は Ctrl+Enter) */
   autoSubmitKey: AutoSubmitKey;
   /** 自動でアップデートを確認・取得する (docs/architecture.md「アップデート」)。false でも手動の確認はできる */
   autoCheckUpdates: boolean;
   /**
    * グローバルショートカット。null は無効。形式は「修飾+…+キー」: 修飾は Ctrl・Alt・Shift・Cmd をこの順で1つ以上、
-   * キーは KeyboardEvent.code (例 "Alt+Space" "Shift+Cmd+KeyM")。
+   * キーは KeyboardEvent.code (例 "Alt+Space" "Shift+Cmd+KeyM")。Cmd は Windows では Win キー。
    * 登録できなければ (形式の誤り・OS が拒否) update_settings は保存せずに reject する。他アプリと同じキーでも登録は成功しうる (衝突は検出できない)
    */
   shortcut: string | null;
-  /** 表示言語。system は macOS の優先言語から Rust が解決する (get_locale / locale-changed) */
+  /** 表示言語。system は OS の優先言語から Rust が解決する (get_locale / locale-changed) */
   uiLanguage: "system" | Locale;
   /** 話す言語。ASR の language・推奨モデル・音声コマンドの既定を決める */
   speechLanguage: Locale;
+  /** Windows のみ: GPU が使えない PC で CPU 実行に利用者が同意した。Mac では使わない */
+  cpuInferenceAccepted: boolean;
 };
 
 /** 表示言語・話す言語 (docs/architecture.md「言語」)。対応表は src/i18n/locales.ts の LOCALES */
@@ -122,6 +134,7 @@ export type ShortcutStatus = { shortcut: string | null; registered: boolean; err
 export type MicrophonePermission = "granted" | "denied" | "not_determined";
 export type Permissions = {
   microphone: MicrophonePermission;
+  /** Windows にアクセシビリティの権限はないため常に true */
   accessibility: boolean;
 };
 
@@ -173,7 +186,23 @@ export type ModelInfo = {
   diskBytes: number;
 };
 export type AudioDevice = { id: string; name: string; isDefault: boolean };
-export type AppInfo = { version: string; build: string };
+/** platform: ビルドした OS。OS ごとの文言・キー表記の切り替えに使う (src/lib/platform.ts) */
+export type AppInfo = { version: string; build: string; platform: "macos" | "windows" };
+
+/**
+ * Windows のみ。ASR を動かす GPU の判定結果 (docs/architecture.md「GPU の判定と CPU 実行の同意」)。
+ * ok: 独立 GPU あり。integrated: 内蔵 GPU のみ。driver_missing: GPU はあるが推論に使えない (ドライバー)。none: GPU なし
+ */
+export type GpuKind = "ok" | "integrated" | "driver_missing" | "none";
+export type GpuStatus = {
+  kind: GpuKind;
+  /** Vulkan で推論に使えるもの。driver_missing・none は空 */
+  devices: { name: string; vramMb: number | null; integrated: boolean }[];
+  /** 使うデバイスの名前 (ok・integrated) */
+  selected: string | null;
+  /** 実際に使う実行先。cpu は kind が none・driver_missing で cpuInferenceAccepted の時だけ */
+  device: "gpu" | "cpu";
+};
 export type UpdateState = "unavailable" | "idle" | "checking" | "downloading" | "ready" | "installing" | "error";
 /** 自動アップデートの状態 (docs/architecture.md「アップデート」) */
 export type UpdateStatus = {
@@ -244,6 +273,10 @@ export const commands = {
   listInputDevices: () => call<AudioDevice[]>("list_input_devices"),
   getPermissions: () => call<Permissions>("get_permissions"),
   requestMicrophone: () => call<Permissions>("request_microphone"),
+  /** Windows のみ (Mac は常に ok)。GPU の判定結果 */
+  getGpuStatus: () => call<GpuStatus>("get_gpu_status"),
+  /** Windows のみ。GPU を判定し直して結果を返す */
+  probeGpu: () => call<GpuStatus>("probe_gpu"),
   openSystemSettings: (pane: SystemSettingsPane) => call<void>("open_system_settings", { pane }),
   restartAsr: () => call<void>("restart_asr"),
   getProvisioningStatus: () => call<ProvisioningStatus>("get_provisioning_status"),
@@ -302,6 +335,8 @@ export type EventMap = {
   "input-devices-changed": AudioDevice[];
   "models-changed": ModelInfo[];
   "update-status-changed": UpdateStatus;
+  /** Windows のみ。判定結果が変わった時 (起動時・再検出・同意) */
+  "gpu-status-changed": GpuStatus;
 };
 
 export type EventName = keyof EventMap;

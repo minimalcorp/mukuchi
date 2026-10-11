@@ -10,20 +10,22 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
 
-use crate::asr::{self, AsrClient, HttpAsrClient, Transcript};
+use crate::asr::{self, AsrBackend, Transcript};
 use crate::asr_process::{AsrEvent, AsrProcess, LaunchSpec};
 use crate::audio::{self, Source};
-use crate::i18n::{self, Locale, Msg, UninstallPart};
+use crate::gpu::{GpuManager, GpuStatus};
+use crate::i18n::{self, Locale, Msg};
 use crate::insert::{InsertConfig, InsertQueue, Job, UtteranceResult};
-use crate::macos::{self, MicAuthorization};
 use crate::paths::{DataPaths, Resources};
 use crate::pipeline::{
     self, PartialRequest, PipelineSink, Running, StartError, PARTIAL_CHUNK_MAX_SAMPLES,
 };
+use crate::platform::{self, MicAuthorization};
 use crate::provisioning::hf::HfModel;
 use crate::provisioning::models::{Catalog, ModelInfo, ModelManager};
+#[cfg(not(target_os = "windows"))]
 use crate::provisioning::runtime::UvRuntime;
-use crate::provisioning::{Provisioner, ServerVerify, Stage};
+use crate::provisioning::{Provisioner, RuntimeStep, ServerVerify, Stage};
 use crate::settings::{InputMode, Settings, SettingsStore};
 use crate::shortcut::{PluginRegistrar, ShortcutManager};
 use crate::state::{AppError, ErrorCode, StateManager, DONE_DISPLAY};
@@ -44,6 +46,9 @@ pub mod events {
     pub const MODELS_CHANGED: &str = "models-changed";
     pub const SHORTCUT_STATUS_CHANGED: &str = "shortcut-status-changed";
     pub const LOCALE_CHANGED: &str = "locale-changed";
+    /// Windows のみ (GPU の判定結果が変わった時)
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub const GPU_STATUS_CHANGED: &str = "gpu-status-changed";
 }
 
 /// 未バンドルの開発実行 (tauri dev) で WebKit がキャッシュ等に使う名前 (実行ファイル名)
@@ -195,7 +200,12 @@ pub struct Core {
     trying_model: std::sync::atomic::AtomicBool,
     /// アプリの終了中 (切り替えの失敗で元のモデルを起動し直さない)
     shutting_down: std::sync::atomic::AtomicBool,
-    asr: RwLock<Option<Arc<HttpAsrClient>>>,
+    asr: RwLock<Option<Arc<dyn AsrBackend>>>,
+    /// ASR を動かす GPU の判定 (Windows。Mac は常に ok)
+    pub gpu: Arc<GpuManager>,
+    /// GPU の変化による起動し直しの通番 (保留中に続けて変わったら最後のものだけ行う)
+    #[cfg(target_os = "windows")]
+    gpu_change_seq: AtomicU64,
     insert: Mutex<Option<InsertQueue>>,
     running: Mutex<Option<Capture>>,
     capture_generation: AtomicU64,
@@ -247,19 +257,22 @@ impl Core {
             let m = models.clone();
             move || m.selected().hf
         };
+        let gpu = Arc::new(new_gpu_manager(
+            &app,
+            &paths,
+            &resources,
+            initial.cpu_inference_accepted,
+        ));
         let spec = {
-            let (paths, log_dir, m) = (paths.clone(), log_dir.clone(), models.clone());
-            move || launch_spec(&paths, &log_dir, &m.selected().hf)
+            let (paths, log_dir, m, gpu) =
+                (paths.clone(), log_dir.clone(), models.clone(), gpu.clone());
+            move || launch_spec(&paths, &log_dir, &m.selected().hf, &gpu)
         };
         let emit_app = app.clone();
         let provisioning = Provisioner::new(
             paths.clone(),
             Arc::new(selected),
-            Arc::new(UvRuntime {
-                paths: paths.clone(),
-                resources: resources.clone(),
-                log_file: log_dir.join("provisioning.log"),
-            }),
+            runtime_step(&paths, &resources, &log_dir, &gpu)?,
             Arc::new(ServerVerify {
                 asr: asr_process.clone(),
                 spec: Arc::new(spec),
@@ -289,6 +302,9 @@ impl Core {
             trying_model: std::sync::atomic::AtomicBool::new(false),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             asr: RwLock::new(None),
+            gpu,
+            #[cfg(target_os = "windows")]
+            gpu_change_seq: AtomicU64::new(0),
             insert: Mutex::new(None),
             running: Mutex::new(None),
             capture_generation: AtomicU64::new(0),
@@ -385,10 +401,8 @@ impl Core {
 
         let weak_cfg = Arc::downgrade(self);
         let weak_res = Arc::downgrade(self);
-        let app = self.app.clone();
-        let inserter = macos::MacInserter::new(move || resolve_v_keycode(&app));
         let queue = InsertQueue::spawn(
-            Arc::new(inserter),
+            platform::inserter(self.app.clone()),
             move || {
                 weak_cfg
                     .upgrade()
@@ -443,10 +457,15 @@ impl Core {
 
     /// 選択中のモデルでの起動方法
     fn launch_spec(&self) -> LaunchSpec {
-        launch_spec(&self.paths, &self.log_dir, &self.models.selected().hf)
+        launch_spec(
+            &self.paths,
+            &self.log_dir,
+            &self.models.selected().hf,
+            &self.gpu,
+        )
     }
 
-    fn asr_client(&self) -> Option<Arc<HttpAsrClient>> {
+    fn asr_client(&self) -> Option<Arc<dyn AsrBackend>> {
         self.asr.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
@@ -455,8 +474,8 @@ impl Core {
             self.start_managed_asr().await;
             return;
         };
-        let client = match HttpAsrClient::new(url) {
-            Ok(c) => Arc::new(c),
+        let client = match asr::connect(url) {
+            Ok(c) => c,
             Err(e) => {
                 self.state
                     .set_error(AppError::asr_stopped(format!("{e:#}")));
@@ -498,6 +517,9 @@ impl Core {
     /// 本番: 導入済みならサーバーを起動する。
     /// 以前に導入済みでアプリの更新により版が変わった場合は、変わった段階だけ自動でやり直す (読み込み中の表示のまま)
     async fn start_managed_asr(self: &Arc<Self>) {
+        if !self.gpu_allows_asr().await {
+            return;
+        }
         if self.provisioning.is_done() {
             self.asr_process.start(self.launch_spec(), true).await;
         } else if self.settings.get().setup_completed && self.provisioning.has_record() {
@@ -509,7 +531,106 @@ impl Core {
         }
     }
 
-    fn set_asr_client(&self, client: Option<Arc<HttpAsrClient>>) {
+    /// Windows: GPU を判定し、GPU が使えず CPU 実行への同意も無ければ gpu_unavailable にして false を返す
+    /// (サーバーを起動しない・導入をやり直さない)。判定で使う llama-server (Vulkan 版か CPU 版) が決まるため、
+    /// 導入済みの判定も求め直す (CPU 版が無ければ runtime をやり直す)。Mac は何もしない
+    #[cfg(target_os = "windows")]
+    async fn gpu_allows_asr(&self) -> bool {
+        let status = self.gpu.status().await;
+        // 同梱の llama-server が無い・起動できない (ウイルス対策ソフトによる隔離等) のは GPU・ドライバーの問題ではない。
+        // Vulkan の列挙が空になり driver_missing に見えるため、先に見て入れ直し (セットアップ) を案内する
+        if let Some(e) = self.gpu.launch_error() {
+            log::error!(
+                "同梱の llama-server を起動できないため、文字起こしサーバーを起動しない: {e}"
+            );
+            self.state.set_error(AppError::runtime_missing());
+            return false;
+        }
+        self.provisioning.refresh();
+        if self.gpu.needs_consent() {
+            log::info!("GPU が使えず CPU 実行への同意が無いため、文字起こしサーバーを起動しない");
+            self.state.set_error(AppError::gpu_unavailable(
+                status.kind == crate::gpu::GpuKind::DriverMissing,
+            ));
+            return false;
+        }
+        true
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    async fn gpu_allows_asr(&self) -> bool {
+        true
+    }
+
+    /// GPU の再検出 (probe_gpu・gpu_unavailable の復旧)
+    pub async fn probe_gpu(self: &Arc<Self>) -> GpuStatus {
+        #[cfg(target_os = "windows")]
+        {
+            let before = self.gpu.exec();
+            let status = self.gpu.probe().await;
+            self.after_gpu_change(before);
+            status
+        }
+        #[cfg(not(target_os = "windows"))]
+        self.gpu.probe().await
+    }
+
+    /// Windows: GPU の判定・CPU 実行への同意が変わった後。
+    /// - gpu_unavailable の間に使えるようになった (GPU が戻った・同意した): 起動する
+    /// - 同意を取り消して GPU も無い: 止めて gpu_unavailable
+    /// - 使う llama-server・デバイスが変わった (GPU が使えるようになった等): 起動し直す (CPU 版が要れば導入し直す)
+    ///
+    /// モデルの切り替え (select_model) が新しいモデルで起動を確かめている間・セットアップの実行中に起動し直すと、
+    /// 試しているサーバーを止めて切り替え・動作確認を失敗させるため、それらが終わるまで保留する
+    /// (model_switch を取ってから判断する)。続けて変わった時は最後のものだけを行う
+    #[cfg(target_os = "windows")]
+    fn after_gpu_change(self: &Arc<Self>, before: (PathBuf, crate::llama::Exec)) {
+        if !self.managed_asr() {
+            return;
+        }
+        let seq = self.gpu_change_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let core = self.clone();
+        tauri::async_runtime::spawn(async move {
+            while core.provisioning.is_running() {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            let _switch = core.model_switch.lock().await;
+            if core.gpu_change_seq.load(Ordering::SeqCst) != seq {
+                return;
+            }
+            if core.provisioning.is_suspended()
+                || core.provisioning.is_running()
+                || core.updates.is_installing()
+                || core.shutting_down.load(Ordering::SeqCst)
+            {
+                log::info!("削除・セットアップ・アップデートの実行中のため、GPU の変化での起動し直しをしない");
+                return;
+            }
+            core.apply_gpu_change(before).await;
+        });
+    }
+
+    /// `after_gpu_change` の本体。model_switch を持って呼ぶ
+    #[cfg(target_os = "windows")]
+    async fn apply_gpu_change(self: &Arc<Self>, before: (PathBuf, crate::llama::Exec)) {
+        let gpu_error = self.state.error().map(|e| e.code) == Some(ErrorCode::GpuUnavailable);
+        if self.gpu.needs_consent() {
+            if !gpu_error {
+                self.asr_process.stop().await;
+                self.gpu_allows_asr().await;
+            }
+            return;
+        }
+        if gpu_error || (before != self.gpu.exec() && self.provisioning.is_done()) {
+            log::info!("GPU の判定・CPU 実行への同意が変わったため文字起こしサーバーを起動し直す");
+            if gpu_error {
+                self.state.clear_error();
+            }
+            self.start_managed_asr().await;
+        }
+    }
+
+    fn set_asr_client(&self, client: Option<Arc<dyn AsrBackend>>) {
         *self.asr.write().unwrap_or_else(|p| p.into_inner()) = client;
     }
 
@@ -517,7 +638,7 @@ impl Core {
     fn clear_asr_error(&self) {
         if matches!(
             self.state.error().map(|e| e.code),
-            Some(ErrorCode::RuntimeMissing | ErrorCode::AsrStopped)
+            Some(ErrorCode::RuntimeMissing | ErrorCode::AsrStopped | ErrorCode::GpuUnavailable)
         ) {
             self.state.clear_error();
         }
@@ -545,10 +666,10 @@ impl Core {
                 self.asr_unavailable();
                 self.clear_asr_error();
             }
-            AsrEvent::Ready(url) => match HttpAsrClient::new(url) {
+            AsrEvent::Ready(url) => match asr::connect(url) {
                 Ok(c) => {
                     log::info!("ASRサーバーに接続: {}", c.base_url());
-                    self.set_asr_client(Some(Arc::new(c)));
+                    self.set_asr_client(Some(c));
                     self.clear_asr_error();
                     if self.provisioning.is_done() {
                         self.asr_became_ready();
@@ -715,6 +836,7 @@ impl Core {
 
     /// 完全にアンインストールする。本体をゴミ箱に入れたらアプリを終了する。
     /// 開発ビルドで MUKUCHI_DEV_UNINSTALL_DRY_RUN=1 なら何も変えずにログに出す
+    #[cfg(not(target_os = "windows"))]
     pub async fn uninstall(self: &Arc<Self>) -> Result<()> {
         // 開発ビルドが本番のバンドルIDで動いている時は、指定がなくても dry-run にする
         let dry_run =
@@ -757,6 +879,72 @@ impl Core {
             log::info!("アンインストール完了。終了する");
             self.app.exit(0);
         }
+        Ok(())
+    }
+
+    /// Windows の完全なアンインストール (docs/architecture.md「Windows 版」のアンインストール)。
+    /// アプリはファイルを消さない (WebView2 のデータ・ログ・同梱の llama-server は実行中は使用中で消せない)。
+    /// 音声入力 OFF・セットアップ停止・ASR 停止 → NSIS の uninstall.exe を `/P /MUKUCHI_PURGE` で起動 →
+    /// スタートアップの登録を解除 → 終了。データ・本体・レジストリの削除はアプリの終了後にアンインストーラーとフックが行う。
+    /// 開発ビルドには uninstall.exe が無い (target\debug から動く) ため、常に対象をログに出すだけにする
+    #[cfg(target_os = "windows")]
+    pub async fn uninstall(self: &Arc<Self>) -> Result<()> {
+        let dry_run = cfg!(debug_assertions);
+        // 何も止める前に確かめる (NSIS で入れたものでなければ中止)
+        let install_dir = self.with_uninstall_context(|ctx| {
+            storage::check_app_bundle(ctx.app_bundle.as_deref(), dry_run)
+                .map(|()| ctx.app_bundle.clone())
+        })??;
+        // モデルの切り替え中は行わない (切り替えの失敗で元のモデルを起動し直してしまうため)
+        let switch = self.lock_model_switch()?;
+        if dry_run {
+            // 削除の安全策の確認も通す (本番ではアンインストーラーが消すものと同じ範囲)
+            self.with_uninstall_context(|ctx| {
+                let plan = storage::uninstall_plan(ctx);
+                if let Err(e) = storage::delete_files(&plan, ctx, true) {
+                    log::error!("[dry-run] {e:#}");
+                }
+                for t in plan.targets() {
+                    log::info!("[dry-run] 対象: {} ({} bytes)", t.path, t.bytes);
+                }
+            })?;
+            match &install_dir {
+                Some(dir) => log::info!(
+                    "[dry-run] 起動: {} {}",
+                    dir.join(storage::UNINSTALLER).display(),
+                    storage::UNINSTALLER_ARGS
+                ),
+                None => log::info!("[dry-run] アンインストーラーなし (NSIS で入れたものでない)"),
+            }
+            log::info!("[dry-run] スタートアップの登録を解除して終了");
+            return Ok(());
+        }
+        let Some(install_dir) = install_dir else {
+            return Err(anyhow!(Msg::UninstallerMissing));
+        };
+        self.set_listening(false).await?;
+        let suspended = (
+            self.provisioning.suspend().await?,
+            self.models.suspend().await?,
+        );
+        // 同梱の llama-server はインストール先にあり、動いているとアンインストーラーが消せないため先に止める
+        self.asr_process.stop().await;
+        if let Err(e) = storage::launch_uninstaller(&install_dir) {
+            log::error!("アンインストーラーを起動できません: {e:#}");
+            // 何も消していない。止めたものを元に戻す
+            drop(suspended);
+            drop(switch);
+            self.start_managed_asr().await;
+            return Err(anyhow!(Msg::UninstallerLaunchFailed));
+        }
+        // アンインストーラーも Run の値は消すが、StartupApproved の値はフック任せのため、ここでも両方消しておく
+        if let Err(e) = crate::autostart::set_enabled(false) {
+            log::warn!("スタートアップの登録を解除できません: {e:#}");
+        }
+        log::info!("アンインストーラーを起動した。終了する");
+        // 停止 (suspended) は終了まで持つ (終了の前にセットアップ等を始めさせない)
+        self.app.exit(0);
+        drop(suspended);
         Ok(())
     }
 
@@ -889,6 +1077,10 @@ impl Core {
             if !self.provisioning.is_done() {
                 return Err(anyhow!(Msg::ErrRuntimeMissing));
             }
+            #[cfg(target_os = "windows")]
+            if self.gpu.needs_consent() {
+                return Err(anyhow!(Msg::ErrGpuUnavailable));
+            }
             log::info!("文字起こしサーバーを起動し直す");
             self.asr_process.start(self.launch_spec(), true).await;
             return Ok(());
@@ -990,7 +1182,10 @@ impl Core {
             let _trying = Flag::set(&self.trying_model);
             // 読み込めるかを確かめる間は自動で起動し直さない (失敗したら元のモデルに戻すため)
             self.asr_process
-                .start(launch_spec(&self.paths, &self.log_dir, &next.hf), false)
+                .start(
+                    launch_spec(&self.paths, &self.log_dir, &next.hf, &self.gpu),
+                    false,
+                )
                 .await;
             // 送り手を持ち続ける (落とすと待つのをやめてしまう)
             let (_never_tx, never) = tokio::sync::watch::channel(false);
@@ -1071,16 +1266,16 @@ impl Core {
         self.state.clear_error();
 
         // 入力できない状態で聞き始めない (話した後に失敗するより、ONにする時点で知らせる)
-        if !macos::accessibility_trusted() {
+        if !platform::accessibility_trusted() {
             let e = AppError::accessibility_denied();
             self.state.set_error(e.clone());
             return Err(anyhow!(e.message));
         }
 
         if matches!(self.audio_source(), Source::Device(_)) {
-            let mut mic = macos::microphone_authorization();
+            let mut mic = platform::microphone_authorization();
             if mic == MicAuthorization::NotDetermined {
-                mic = macos::request_microphone().await;
+                mic = platform::request_microphone().await;
                 self.emit_permissions();
             }
             if mic != MicAuthorization::Granted {
@@ -1178,6 +1373,26 @@ impl Core {
     /// 「OFF なので ON」と扱われて無視される。押下は順に処理され、2回目は ON になった後の OFF になる
     pub async fn on_shortcut(self: &Arc<Self>) {
         let _guard = self.toggle_lock.lock().await;
+        // エラーを表示している間の押下は「OFF にする操作」: やり直さずに表示を消す。
+        // 録音を開始できないエラー (マイクが無い等) は押すたびに開始を試みて同じエラーを出し直すため、
+        // 利用者は表示を消せず (消えるのを待つしかなく)、出し直しで表示の時間も延びていた
+        // (ASR の停止・実行環境の欠落・GPU は状態そのものを表すため対象外。消すと別の表示 (読み込み中等) になる)
+        if !self.state.is_listening()
+            && self.state.error_displayed()
+            && self.state.error().is_some_and(|e| {
+                matches!(
+                    e.code,
+                    ErrorCode::MicrophoneMissing
+                        | ErrorCode::MicrophoneDenied
+                        | ErrorCode::AccessibilityDenied
+                        | ErrorCode::VadFailed
+                )
+            })
+        {
+            log::info!("ショートカット: エラー表示を消す");
+            self.state.clear_error();
+            return;
+        }
         let result = if !self.state.is_listening() {
             log::info!("ショートカット: ON");
             self.set_listening_locked(true).await
@@ -1350,6 +1565,13 @@ impl Core {
         }
         if before.speech_language != next.speech_language {
             self.on_speech_language_changed(next.speech_language);
+        }
+        #[cfg(target_os = "windows")]
+        if before.cpu_inference_accepted != next.cpu_inference_accepted {
+            log::info!("CPU 実行への同意: {}", next.cpu_inference_accepted);
+            let exec = self.gpu.exec();
+            self.gpu.set_accepted(next.cpu_inference_accepted);
+            self.after_gpu_change(exec);
         }
         if before.setup_completed != next.setup_completed
             || before.auto_check_updates != next.auto_check_updates
@@ -1679,7 +1901,13 @@ impl Drop for Flag<'_> {
     }
 }
 
-fn launch_spec(paths: &DataPaths, log_dir: &std::path::Path, model: &HfModel) -> LaunchSpec {
+#[cfg(not(target_os = "windows"))]
+fn launch_spec(
+    paths: &DataPaths,
+    log_dir: &std::path::Path,
+    model: &HfModel,
+    _gpu: &GpuManager,
+) -> LaunchSpec {
     LaunchSpec {
         python: paths.venv_python(),
         model_dir: model.snapshot_dir(&paths.models()),
@@ -1689,11 +1917,83 @@ fn launch_spec(paths: &DataPaths, log_dir: &std::path::Path, model: &HfModel) ->
     }
 }
 
-/// アンインストールの本体 (ブロッキング)。アプリ本体をゴミ箱に入れたかを返す。
+/// Windows: 選択中の GGUF と、GPU の判定で決まる llama-server・実行先 (llama.rs)
+#[cfg(target_os = "windows")]
+fn launch_spec(
+    paths: &DataPaths,
+    log_dir: &std::path::Path,
+    model: &HfModel,
+    gpu: &GpuManager,
+) -> LaunchSpec {
+    crate::llama::launch_spec(&paths.models(), model, gpu, log_dir.join("asr-server.log"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn new_gpu_manager(
+    _app: &AppHandle,
+    _paths: &DataPaths,
+    _resources: &Resources,
+    _cpu_accepted: bool,
+) -> GpuManager {
+    GpuManager
+}
+
+#[cfg(target_os = "windows")]
+fn new_gpu_manager(
+    app: &AppHandle,
+    paths: &DataPaths,
+    resources: &Resources,
+    cpu_accepted: bool,
+) -> GpuManager {
+    let app = app.clone();
+    GpuManager::new(
+        resources.llama_server.join(crate::llama::SERVER_EXE),
+        paths.llama_cpu().join(crate::llama::SERVER_EXE),
+        cpu_accepted,
+        move |s| {
+            let _ = app.emit(events::GPU_STATUS_CHANGED, s);
+        },
+    )
+}
+
+/// セットアップの runtime (Mac: uv で Python と依存を入れる)
+#[cfg(not(target_os = "windows"))]
+fn runtime_step(
+    paths: &DataPaths,
+    resources: &Resources,
+    log_dir: &std::path::Path,
+    _gpu: &Arc<GpuManager>,
+) -> Result<Arc<dyn RuntimeStep>> {
+    Ok(Arc::new(UvRuntime {
+        paths: paths.clone(),
+        resources: resources.clone(),
+        log_file: log_dir.join("provisioning.log"),
+    }))
+}
+
+/// セットアップの runtime (Windows: 同梱の llama-server を確かめ、CPU 実行に同意していれば CPU 版を取得する)
+#[cfg(target_os = "windows")]
+fn runtime_step(
+    paths: &DataPaths,
+    resources: &Resources,
+    _log_dir: &std::path::Path,
+    gpu: &Arc<GpuManager>,
+) -> Result<Arc<dyn RuntimeStep>> {
+    Ok(Arc::new(crate::provisioning::llama_runtime::LlamaRuntime {
+        paths: paths.clone(),
+        bundled_exe: resources.llama_server.join(crate::llama::SERVER_EXE),
+        gpu: gpu.clone(),
+        http: crate::provisioning::hf::http_client()?,
+    }))
+}
+
+/// アンインストールの本体 (ブロッキング。macOS)。アプリ本体をゴミ箱に入れたかを返す。
 /// 順序: ログイン項目の解除 → ファイル削除 → 設定 (defaults) → TCC (LaunchServices に登録された
 /// アプリが要るため本体より先) → 本体をゴミ箱へ。途中で失敗しても残りは続け、最後にまとめて報告する
+#[cfg(not(target_os = "windows"))]
 fn uninstall_blocking(ctx: &UninstallContext, dry_run: bool) -> Result<bool> {
     let plan = storage::uninstall_plan(ctx);
+    use crate::i18n::UninstallPart;
     let mut errors: Vec<UninstallPart> = Vec::new();
     if dry_run {
         log::info!("[dry-run] ログイン項目を解除");
@@ -1727,7 +2027,7 @@ fn uninstall_blocking(ctx: &UninstallContext, dry_run: bool) -> Result<bool> {
     let mut trashed = false;
     match &plan.app_bundle {
         Some(b) if dry_run => log::info!("[dry-run] ゴミ箱へ: {}", b.display()),
-        Some(b) => match macos::trash(b) {
+        Some(b) => match platform::trash(b) {
             Ok(()) => trashed = true,
             Err(e) => {
                 log::error!("{e:#}");
@@ -1743,6 +2043,7 @@ fn uninstall_blocking(ctx: &UninstallContext, dry_run: bool) -> Result<bool> {
 }
 
 /// 外部コマンドを実行し、成功したかを返す (出力はログへ)
+#[cfg(not(target_os = "windows"))]
 fn run_tool(program: &str, args: &[&str]) -> bool {
     match std::process::Command::new(program).args(args).output() {
         Ok(o) if o.status.success() => true,
@@ -1788,29 +2089,6 @@ pub fn common_prefix_chars(a: &str, b: &str) -> usize {
         .take_while(|(x, y)| x == y)
         .map(|(x, _)| x.len_utf16())
         .sum()
-}
-
-/// 現在のキーボード配列で ⌘V になる keycode。TIS はメインスレッド専用のため、
-/// メインスレッドで調べて入力キューのスレッドで待つ (メインスレッドは入力キューを待たないので詰まらない)。
-fn resolve_v_keycode(app: &AppHandle) -> u16 {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let sent = app.run_on_main_thread(move || {
-        let r = objc2::MainThreadMarker::new()
-            .ok_or_else(|| anyhow!("メインスレッドではありません"))
-            .and_then(macos::keyboard::command_v_keycode);
-        let _ = tx.send(r);
-    });
-    let result = match sent {
-        Ok(()) => rx
-            .recv_timeout(Duration::from_millis(500))
-            .map_err(|_| anyhow!("応答がありません"))
-            .and_then(|r| r),
-        Err(e) => Err(anyhow!("メインスレッドに送れません: {e}")),
-    };
-    result.unwrap_or_else(|e| {
-        log::warn!("⌘V のキーを解決できないため ANSI の V を使う: {e:#}");
-        macos::keyboard::ANSI_V_KEYCODE
-    })
 }
 
 /// 処理スレッドからの通知を Core に中継する。Core が破棄された後は何もしない。
@@ -1921,7 +2199,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use super::*;
 
-    /// 起動してすぐ落ちる ASR サーバー (python の代わりの sh スクリプト)
+    /// 起動してすぐ落ちる ASR サーバー (python の代わりの sh スクリプト。sh が要るため unix のみ)
+    #[cfg(unix)]
     fn crashing_spec(dir: &std::path::Path) -> LaunchSpec {
         use std::os::unix::fs::PermissionsExt;
         let py = dir.join("python");
@@ -1939,6 +2218,7 @@ mod tests {
     /// select_model の失敗: 新しいモデルの異常終了は停止エラーにせず (元のモデルの読み込み中に
     /// 遅れて停止エラーが出ないように)、切り替えを終えた後の異常終了は停止エラーにする
     #[test]
+    #[cfg(unix)]
     fn crash_while_trying_model_is_not_reported() {
         assert_eq!(crash_response(true, false), CrashResponse::Fail);
         assert_eq!(crash_response(false, false), CrashResponse::RuntimeMissing);

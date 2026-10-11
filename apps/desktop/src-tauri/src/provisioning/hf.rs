@@ -31,9 +31,57 @@ use crate::i18n::Msg;
 pub const HF_ENDPOINT: &str = "https://huggingface.co";
 // 取得するモデル (リポジトリと revision) は models.rs の CATALOG で固定する
 
-/// 取得するファイル。mlx-qwen3-asr (load_models._resolve_path) の snapshot_download の allow_patterns と同じ。
+/// 取得するファイル (MLX)。mlx-qwen3-asr (load_models._resolve_path) の snapshot_download の allow_patterns と同じ。
 /// fnmatch の `*` は `/` も含むため、末尾の一致で判定する
 const ALLOW_SUFFIXES: [&str; 4] = [".json", ".safetensors", ".txt", ".model"];
+/// 取得するファイル (GGUF)。LLM と音声エンコーダ (mmproj) の 2 ファイル (README・LICENSE は取らない)
+const GGUF_SUFFIX: &str = ".gguf";
+/// GGUF の音声エンコーダのファイル名の接頭辞 (llama.cpp の convert_hf_to_gguf.py --mmproj の出力名)
+const MMPROJ_PREFIX: &str = "mmproj";
+
+/// モデルの形式 (実行方式)。取得するファイルと、取得済みの判定が変わる
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelFormat {
+    /// Mac の MLX (safetensors + config.json)
+    #[default]
+    Mlx,
+    /// Windows の llama.cpp (LLM の GGUF + mmproj の GGUF)
+    Gguf,
+}
+
+impl ModelFormat {
+    fn allows(self, path: &str) -> bool {
+        match self {
+            Self::Mlx => ALLOW_SUFFIXES.iter().any(|s| path.ends_with(s)),
+            Self::Gguf => path.ends_with(GGUF_SUFFIX),
+        }
+    }
+
+    /// 一覧に必要なファイルが揃っているか (足りなければリポジトリの取り違え・壊れた revision)
+    fn has_required<'a>(self, mut paths: impl Iterator<Item = &'a str>) -> bool {
+        match self {
+            Self::Mlx => paths.any(|p| p == "config.json"),
+            Self::Gguf => gguf_pair(paths).is_some(),
+        }
+    }
+}
+
+/// GGUF の (LLM, mmproj) の組。ちょうど1つずつある時だけ返す (どちらを読むか曖昧にしない)
+pub fn gguf_pair<'a>(paths: impl Iterator<Item = &'a str>) -> Option<(&'a str, &'a str)> {
+    let (mut model, mut mmproj) = (Vec::new(), Vec::new());
+    for p in paths.filter(|p| p.ends_with(GGUF_SUFFIX)) {
+        let name = p.rsplit('/').next().unwrap_or(p);
+        if name.starts_with(MMPROJ_PREFIX) {
+            mmproj.push(p);
+        } else {
+            model.push(p);
+        }
+    }
+    match (model.as_slice(), mmproj.as_slice()) {
+        ([m], [p]) => Some((m, p)),
+        _ => None,
+    }
+}
 
 /// 通信の一時的な失敗 (切断・タイムアウト) で、同じファイルを続きから取り直す回数
 const RETRIES: u32 = 3;
@@ -49,15 +97,17 @@ pub struct HfModel {
     pub endpoint: String,
     pub repo: String,
     pub revision: String,
+    pub format: ModelFormat,
 }
 
 impl HfModel {
     /// Hugging Face 本体から取るモデル
-    pub fn hub(repo: &str, revision: &str) -> Self {
+    pub fn hub(repo: &str, revision: &str, format: ModelFormat) -> Self {
         Self {
             endpoint: HF_ENDPOINT.into(),
             repo: repo.into(),
             revision: revision.into(),
+            format,
         }
     }
 
@@ -78,6 +128,28 @@ impl HfModel {
         self.storage_dir(hf_home)
             .join("snapshots")
             .join(&self.revision)
+    }
+
+    /// 取得済みのスナップショットがあるか (MLX は config.json、GGUF は LLM と mmproj の組)
+    pub fn is_present(&self, hf_home: &Path) -> bool {
+        let snap = self.snapshot_dir(hf_home);
+        match self.format {
+            ModelFormat::Mlx => snap.join("config.json").is_file(),
+            ModelFormat::Gguf => self.gguf_files(hf_home).is_some(),
+        }
+    }
+
+    /// GGUF のスナップショットの (LLM, mmproj) のパス。揃っていなければ None
+    pub fn gguf_files(&self, hf_home: &Path) -> Option<(PathBuf, PathBuf)> {
+        let snap = self.snapshot_dir(hf_home);
+        let names: Vec<String> = std::fs::read_dir(&snap)
+            .ok()?
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        let (model, mmproj) = gguf_pair(names.iter().map(String::as_str))?;
+        Some((snap.join(model), snap.join(mmproj)))
     }
 
     fn api_tree_url(&self) -> anyhow::Result<reqwest::Url> {
@@ -185,21 +257,27 @@ pub async fn list_files(
         url = next_link(res.headers());
         let entries: Vec<TreeEntry> = res.json().await.map_err(network_error)?;
         for e in entries {
-            if let Some(f) = to_remote_file(e).map_err(|e| failed(MODEL_ERROR, e))? {
+            if let Some(f) = to_remote_file(e, model.format).map_err(|e| failed(MODEL_ERROR, e))? {
                 out.push(f);
             }
         }
     }
-    if !out.iter().any(|f| f.path == "config.json") {
-        return Err(failed(MODEL_ERROR, anyhow!("config.json がない")));
+    if !model
+        .format
+        .has_required(out.iter().map(|f| f.path.as_str()))
+    {
+        return Err(failed(
+            MODEL_ERROR,
+            anyhow!("必要なファイルがない ({:?})", model.format),
+        ));
     }
     Ok(out)
 }
 
 const MODEL_ERROR: Msg = Msg::ModelInfoInvalid;
 
-fn to_remote_file(e: TreeEntry) -> anyhow::Result<Option<RemoteFile>> {
-    if e.kind != "file" || !ALLOW_SUFFIXES.iter().any(|s| e.path.ends_with(s)) {
+fn to_remote_file(e: TreeEntry, format: ModelFormat) -> anyhow::Result<Option<RemoteFile>> {
+    if e.kind != "file" || !format.allows(&e.path) {
         return Ok(None);
     }
     // サーバーからのパス・名前をそのままファイルシステムに使うため検証する
@@ -300,6 +378,7 @@ impl<'a> Cache<'a> {
     }
 
     /// snapshots/<commit>/<path> -> ../../blobs/<etag> (huggingface_hub の _create_symlink と同じ相対リンク)
+    #[cfg(unix)]
     pub fn link(&self, f: &RemoteFile) -> anyhow::Result<()> {
         let link = self.snapshot_path(f);
         let parent = link.parent().context("スナップショットのパスが不正")?;
@@ -319,6 +398,30 @@ impl<'a> Cache<'a> {
         }
         std::os::unix::fs::symlink(&target, &link)
             .with_context(|| format!("リンクを作成できません: {}", link.display()))
+    }
+
+    /// snapshots/<commit>/<path> に blob のハードリンクを作る (作れなければコピー)。Windows のシンボリックリンクは
+    /// 権限 (管理者か開発者モード) が要るため使わない (docs/architecture.md「Windows 版」)。
+    /// ハードリンクは NTFS なら権限なしで作れ、数GBのモデルをディスクに二重に置かずに済む
+    /// (使用量は storage.rs が実体ごとに1回だけ数える)
+    #[cfg(windows)]
+    pub fn link(&self, f: &RemoteFile) -> anyhow::Result<()> {
+        let dest = self.snapshot_path(f);
+        let parent = dest.parent().context("スナップショットのパスが不正")?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("作成できません: {}", parent.display()))?;
+        if std::fs::symlink_metadata(&dest).is_ok() {
+            std::fs::remove_file(&dest)
+                .with_context(|| format!("削除できません: {}", dest.display()))?;
+        }
+        let blob = self.blob_path(f);
+        if let Err(e) = std::fs::hard_link(&blob, &dest) {
+            // FAT32・exFAT 等のハードリンクを作れないファイルシステム
+            log::warn!("ハードリンクを作れないためコピーする ({}): {e}", f.path);
+            std::fs::copy(&blob, &dest)
+                .with_context(|| format!("コピーできません: {}", dest.display()))?;
+        }
+        Ok(())
     }
 
     /// refs/main に commit を書く。revision を省略した (main の) 読み込みでも同じスナップショットを使えるように
@@ -651,6 +754,7 @@ mod tests {
             endpoint: "http://127.0.0.1:1".into(),
             repo: "org/name".into(),
             revision: "0123456789abcdef0123456789abcdef01234567".into(),
+            format: ModelFormat::Mlx,
         }
     }
 
@@ -679,20 +783,92 @@ mod tests {
                 size: 9,
             }),
         };
-        let f = to_remote_file(e("config.json", false)).unwrap().unwrap();
+        let f = to_remote_file(e("config.json", false), ModelFormat::Mlx)
+            .unwrap()
+            .unwrap();
         assert_eq!(f.blob, "a".repeat(40));
         assert_eq!(f.hash, BlobHash::GitSha1("a".repeat(40)));
-        let f = to_remote_file(e("model.safetensors", true))
+        let f = to_remote_file(e("model.safetensors", true), ModelFormat::Mlx)
             .unwrap()
             .unwrap();
         assert_eq!((f.blob.as_str(), f.size), ("b".repeat(64).as_str(), 9));
-        assert!(to_remote_file(e("README.md", false)).unwrap().is_none());
-        assert!(to_remote_file(e("../x.json", false)).is_err());
-        assert!(to_remote_file(e("/abs.json", false)).is_err());
-        assert!(to_remote_file(e("a/./b.json", false)).is_ok());
+        assert!(to_remote_file(e("README.md", false), ModelFormat::Mlx)
+            .unwrap()
+            .is_none());
+        assert!(to_remote_file(e("../x.json", false), ModelFormat::Mlx).is_err());
+        assert!(to_remote_file(e("/abs.json", false), ModelFormat::Mlx).is_err());
+        assert!(to_remote_file(e("a/./b.json", false), ModelFormat::Mlx).is_ok());
         let mut bad = e("c.json", false);
         bad.oid = "zz".into();
-        assert!(to_remote_file(bad).is_err());
+        assert!(to_remote_file(bad, ModelFormat::Mlx).is_err());
+    }
+
+    #[test]
+    fn gguf_takes_only_gguf_files() {
+        let e = |path: &str| TreeEntry {
+            kind: "file".into(),
+            oid: "a".repeat(40),
+            size: 3,
+            path: path.into(),
+            lfs: Some(TreeLfs {
+                oid: "b".repeat(64),
+                size: 9,
+            }),
+        };
+        let g = ModelFormat::Gguf;
+        assert!(to_remote_file(e("Qwen3-ASR-1.7B-JA-Q8_0.gguf"), g)
+            .unwrap()
+            .is_some());
+        for p in ["README.md", "LICENSE", ".gitattributes", "config.json"] {
+            assert!(to_remote_file(e(p), g).unwrap().is_none(), "{p}");
+        }
+        // MLX は .gguf を取らない (Mac の取得対象は変えない)
+        assert!(to_remote_file(e("a.gguf"), ModelFormat::Mlx)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn gguf_pair_requires_one_model_and_one_mmproj() {
+        fn pair<'a>(v: &[&'a str]) -> Option<(&'a str, &'a str)> {
+            gguf_pair(v.iter().copied())
+        }
+        assert_eq!(
+            pair(&["mmproj-x-Q8_0.gguf", "x-Q8_0.gguf", "README.md"]),
+            Some(("x-Q8_0.gguf", "mmproj-x-Q8_0.gguf"))
+        );
+        assert_eq!(pair(&["x.gguf"]), None);
+        assert_eq!(pair(&["mmproj-x.gguf"]), None);
+        assert_eq!(pair(&["a.gguf", "b.gguf", "mmproj-a.gguf"]), None);
+        assert_eq!(
+            pair(&["sub/mmproj-a.gguf", "sub/a.gguf"]),
+            Some(("sub/a.gguf", "sub/mmproj-a.gguf"))
+        );
+        assert!(ModelFormat::Gguf.has_required(["a.gguf", "mmproj-a.gguf"].into_iter()));
+        assert!(!ModelFormat::Gguf.has_required(["config.json"].into_iter()));
+        assert!(ModelFormat::Mlx.has_required(["config.json"].into_iter()));
+    }
+
+    #[test]
+    fn gguf_snapshot_is_present_with_both_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = HfModel {
+            format: ModelFormat::Gguf,
+            ..model()
+        };
+        assert!(!m.is_present(tmp.path()));
+        let snap = m.snapshot_dir(tmp.path());
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("m-Q8_0.gguf"), b"x").unwrap();
+        assert!(!m.is_present(tmp.path()));
+        std::fs::write(snap.join("mmproj-m-Q8_0.gguf"), b"x").unwrap();
+        assert!(m.is_present(tmp.path()));
+        assert_eq!(
+            m.gguf_files(tmp.path()),
+            Some((snap.join("m-Q8_0.gguf"), snap.join("mmproj-m-Q8_0.gguf")))
+        );
+        // MLX の判定は config.json
+        assert!(!model().is_present(tmp.path()));
     }
 
     #[test]
@@ -771,14 +947,17 @@ mod tests {
         );
 
         let snap = storage.join("snapshots").join(&m.revision);
-        assert_eq!(
-            std::fs::read_link(snap.join("config.json")).unwrap(),
-            PathBuf::from(format!("../../blobs/{}", "a".repeat(40)))
-        );
-        assert_eq!(
-            std::fs::read_link(snap.join("sub/w.safetensors")).unwrap(),
-            PathBuf::from(format!("../../../blobs/{}", "b".repeat(64)))
-        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::read_link(snap.join("config.json")).unwrap(),
+                PathBuf::from(format!("../../blobs/{}", "a".repeat(40)))
+            );
+            assert_eq!(
+                std::fs::read_link(snap.join("sub/w.safetensors")).unwrap(),
+                PathBuf::from(format!("../../../blobs/{}", "b".repeat(64)))
+            );
+        }
         assert_eq!(
             std::fs::read(snap.join("sub/w.safetensors")).unwrap(),
             b"abc"

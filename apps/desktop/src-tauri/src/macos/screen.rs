@@ -9,7 +9,7 @@ use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{kCGNullWindowID, CGWindowListCopyWindowInfo, CGWindowListOption};
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSPoint, NSRect, NSString};
 
-use crate::windows::geometry::Rect;
+use crate::windows::geometry::{Rect, ScreenInfo};
 
 pub fn to_rect(r: NSRect) -> Rect {
     Rect {
@@ -18,14 +18,6 @@ pub fn to_rect(r: NSRect) -> Rect {
         w: r.size.width,
         h: r.size.height,
     }
-}
-
-pub struct ScreenInfo {
-    /// CGDirectDisplayID (NSScreenNumber) の文字列。settings.panelPosition.displayId に使う
-    pub id: String,
-    pub frame: Rect,
-    /// メニューバーと Dock を除いた領域
-    pub visible: Rect,
 }
 
 fn info(s: &NSScreen) -> ScreenInfo {

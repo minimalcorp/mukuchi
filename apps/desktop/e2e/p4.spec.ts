@@ -266,7 +266,7 @@ test("settings: アンインストール中は取り消せず、終わるまで�
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText(m.settings.storage.uninstallTotal("3.7 GB"))).toBeVisible();
   await dialog.getByRole("button", { name: m.settings.storage.uninstallButton, exact: true }).click();
-  await expect(dialog.getByText(m.settings.storage.uninstallRunning)).toBeVisible();
+  await expect(dialog.getByText(m.settings.storage.uninstallRunning.macos)).toBeVisible();
   await expect(dialog.getByRole("button", { name: m.common.cancel })).toBeDisabled();
   await expect(dialog.getByRole("button", { name: m.settings.storage.uninstallButton, exact: true })).toBeDisabled();
   await page.keyboard.press("Escape");

@@ -137,43 +137,68 @@ fn register_error(s: &str) -> Msg {
     }
 }
 
-/// 文章中の表示 ("Alt+Space" → "⌥ Space")。フロントエンドの `formatShortcut`
-/// (apps/desktop/src/lib/shortcut.ts) と同じ表記にする (エラー文と画面の表示を揃えるため)
+/// 文章中の表示 (Mac "Alt+Space" → "⌥ Space"、Windows "Alt+Space" → "Alt+Space")。
+/// フロントエンドの `formatShortcut` (apps/desktop/src/lib/shortcut.ts) と同じ表記にする (エラー文と画面の表示を揃えるため)
 pub fn display(s: &str) -> String {
+    let windows = cfg!(target_os = "windows");
     let mut tokens: Vec<&str> = s.split('+').collect();
     let key = tokens.pop().unwrap_or_default();
     let mut parts: Vec<String> = tokens
         .iter()
         .map(|t| {
-            match *t {
-                "Ctrl" => "⌃",
-                "Alt" => "⌥",
-                "Shift" => "⇧",
-                "Cmd" => "⌘",
-                other => other,
+            match (*t, windows) {
+                ("Ctrl", false) => "⌃",
+                ("Alt", false) => "⌥",
+                ("Shift", false) => "⇧",
+                ("Cmd", false) => "⌘",
+                // Windows はキーの刻印の名前。Cmd は Win キー
+                ("Cmd", true) => "Win",
+                (other, _) => other,
             }
             .to_string()
         })
         .collect();
-    parts.push(key_label(key));
-    parts.join(" ")
+    parts.push(key_label(key, windows));
+    // Windows はキーの名前を + でつなぐ書き方 (Ctrl+Alt+Space) が一般的
+    parts.join(if windows { "+" } else { " " })
 }
 
-fn key_label(code: &str) -> String {
+fn key_label(code: &str, windows: bool) -> String {
+    let os_specific = if windows {
+        match code {
+            "Enter" => "Enter",
+            "Tab" => "Tab",
+            "Backspace" => "Backspace",
+            "Delete" => "Delete",
+            "Escape" => "Esc",
+            "Home" => "Home",
+            "End" => "End",
+            "PageUp" => "PgUp",
+            "PageDown" => "PgDn",
+            _ => "",
+        }
+    } else {
+        match code {
+            "Enter" => "↩",
+            "Tab" => "⇥",
+            "Backspace" => "⌫",
+            "Delete" => "⌦",
+            "Escape" => "⎋",
+            "Home" => "↖",
+            "End" => "↘",
+            "PageUp" => "⇞",
+            "PageDown" => "⇟",
+            _ => "",
+        }
+    };
+    if !os_specific.is_empty() {
+        return os_specific.to_string();
+    }
     let fixed = match code {
-        "Enter" => "↩",
-        "Tab" => "⇥",
-        "Backspace" => "⌫",
-        "Delete" => "⌦",
-        "Escape" => "⎋",
         "ArrowUp" => "↑",
         "ArrowDown" => "↓",
         "ArrowLeft" => "←",
         "ArrowRight" => "→",
-        "Home" => "↖",
-        "End" => "↘",
-        "PageUp" => "⇞",
-        "PageDown" => "⇟",
         "Minus" => "-",
         "Equal" => "=",
         "BracketLeft" => "[",
@@ -348,6 +373,9 @@ impl ShortcutManager {
         }
         let before = g.status();
         g.suspended = suspended;
+        // 記録中は登録を外すため、Windows では Alt+Space がウィンドウのシステムメニューを開いてしまう。その間だけ止める
+        #[cfg(target_os = "windows")]
+        crate::platform::sysmenu::set_recording(suspended);
         if suspended {
             if let Some(sc) = g.registered.take() {
                 if let Err(e) = self.registrar.unregister(sc) {
@@ -417,6 +445,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn display_matches_frontend_format() {
         assert_eq!(display("Alt+Space"), "⌥ Space");
         assert_eq!(display("Ctrl+Alt+Shift+Cmd+KeyM"), "⌃ ⌥ ⇧ ⌘ M");
@@ -427,6 +456,24 @@ mod tests {
         assert_eq!(
             register_error("Alt+Space").to_string(),
             "ショートカット「⌥ Space」を登録できませんでした。別のキーに変更してください"
+        );
+    }
+
+    /// Windows はキーの名前を + でつなぐ (フロントエンドの formatShortcut の windows と同じ)
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn display_matches_frontend_format_on_windows() {
+        assert_eq!(display("Alt+Space"), "Alt+Space");
+        assert_eq!(display("Ctrl+Alt+Space"), "Ctrl+Alt+Space");
+        assert_eq!(display("Ctrl+Alt+Shift+Cmd+KeyM"), "Ctrl+Alt+Shift+Win+M");
+        assert_eq!(display("Cmd+Digit1"), "Win+1");
+        assert_eq!(display("Shift+ArrowUp"), "Shift+↑");
+        assert_eq!(display("Alt+Escape"), "Alt+Esc");
+        assert_eq!(display("Ctrl+PageDown"), "Ctrl+PgDn");
+        assert_eq!(display("Alt+Backslash"), "Alt+\\");
+        assert_eq!(
+            register_error("Alt+Space").to_string(),
+            "ショートカット「Alt+Space」を登録できませんでした。別のキーに変更してください"
         );
     }
 
@@ -444,7 +491,7 @@ mod tests {
         let s = m.status();
         assert_eq!(s.shortcut.as_deref(), Some("Alt+Space"));
         assert!(!s.registered);
-        assert!(s.error.unwrap().to_string().contains("⌥ Space"));
+        assert!(s.error.unwrap().to_string().contains(&display("Alt+Space")));
     }
 
     /// 登録を記録し、指定のキーだけ失敗する

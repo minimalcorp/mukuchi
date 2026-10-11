@@ -1,17 +1,24 @@
 mod app_menu;
 mod asr;
+#[cfg(target_os = "windows")]
+mod asr_filters;
 mod asr_process;
 mod audio;
 mod autostart;
 mod commands;
 mod core;
+mod gpu;
 mod i18n;
 mod insert;
 mod launch;
+#[cfg(target_os = "windows")]
+mod llama;
+#[cfg(target_os = "macos")]
 mod macos;
 mod paths;
 mod permissions;
 mod pipeline;
+mod platform;
 mod provisioning;
 mod settings;
 mod shortcut;
@@ -26,6 +33,7 @@ mod windows;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(not(target_os = "windows"))]
 use tauri::path::BaseDirectory;
 use tauri::{Manager, RunEvent, WindowEvent};
 
@@ -37,6 +45,11 @@ const ARG_UNREGISTER_LOGIN_ITEM: &str = "--unregister-login-item";
 /// 検証用 (隠し): 同梱 uv の解決結果を表示して終了する (UI は起動しない)。
 /// リリースビルドは `MUKUCHI_DEV_*` を無視するため、ビルドした .app が Helpers/uv を指すかをこれで確かめる
 const ARG_PRINT_UV_PATH: &str = "--print-uv-path";
+/// 検証用 (隠し、Windows): 同梱物 (llama-server・verify.wav) とアンインストーラーの解決結果を表示して終了する
+/// (UI は起動しない。終了コード 0=同梱物が揃っている 1=欠けている)。リリースビルドは `MUKUCHI_DEV_*` を無視するため、
+/// NSIS の配置 (実行ファイルの隣に resources) で正しく解決できるかをこれで確かめる
+#[cfg(target_os = "windows")]
+const ARG_PRINT_RESOURCE_PATHS: &str = "--print-resource-paths";
 
 /// 同梱 uv を解決する。`resource` は Resource 相対パスの解決 (.app 外でのみ使う)
 fn resolve_uv(
@@ -87,7 +100,11 @@ pub fn run() {
         };
         std::process::exit(code);
     }
-    let app = tauri::Builder::default()
+    #[cfg(target_os = "windows")]
+    if std::env::args_os().any(|a| a == ARG_PRINT_RESOURCE_PATHS) {
+        std::process::exit(print_resource_paths(context.package_info()));
+    }
+    let builder = tauri::Builder::default()
         // アプリのメニューバーは表示言語で自分で組む (app_menu.rs)。既定のメニューは英語に固定のため使わない
         .enable_macos_default_menu(false)
         // 最初に登録する (プラグインの指定)。2つ目のプロセスは既存のプロセスに知らせて、ここで終了する。
@@ -117,8 +134,11 @@ pub fn run() {
                     }),
                 ])
                 .build(),
-        )
-        .plugin(tauri_nspanel::init())
+        );
+    // NSPanel (パネル) は macOS のみ。プラグインの登録順は変えない (single-instance・log の後、updater の前)
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+    let app = builder
         // Rust からのみ使う (update.rs)。JS 用の command は capabilities で許可していない
         .plugin(tauri_plugin_updater::Builder::new().build())
         // 登録は Core (shortcut.rs) が設定に従って行う。押した時だけ反応する (離した時は無視)
@@ -128,6 +148,9 @@ pub fn run() {
                     if event.state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
                         return;
                     }
+                    // Alt・Win の単独押下に見えてメニューモード・スタートメニューに入らないよう、離される前に挟む
+                    #[cfg(target_os = "windows")]
+                    crate::platform::sysmenu::on_hotkey_pressed();
                     // プラグインのロックを持ったメインスレッドから呼ばれるため、処理は別タスクで行う
                     if let Some(core) = app.try_state::<Arc<Core>>() {
                         let core = core.inner().clone();
@@ -137,13 +160,21 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            // 常駐アプリのため Dock に出さない (設定・セットアップ表示中のみ Regular にする)
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            if cfg!(debug_assertions) {
-                macos::activation::install_debug_observer();
+            // 常駐アプリのため Dock に出さない (設定・セットアップ表示中のみ Regular にする)。
+            // Windows はウィンドウを開けばタスクバーに出るため不要
+            #[cfg(target_os = "macos")]
+            {
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                if cfg!(debug_assertions) {
+                    macos::activation::install_debug_observer();
+                }
             }
 
-            // 同梱物。tauri dev では target/debug/ にコピーされたものを指す
+            // 同梱物。tauri dev では target/debug/ にコピーされたものを指す。
+            // Windows は uv (Python) を使わない (ASR は同梱の llama-server)
+            #[cfg(target_os = "windows")]
+            let uv = std::path::PathBuf::new();
+            #[cfg(not(target_os = "windows"))]
             let uv = resolve_uv(|rel| {
                 app.path()
                     .resolve(rel, BaseDirectory::Resource)
@@ -162,6 +193,8 @@ pub fn run() {
                 resources.asr_server.display(),
                 resources.verify_wav.display()
             );
+            #[cfg(target_os = "windows")]
+            log::info!("同梱物: llama-server={}", resources.llama_server.display());
             let data_dir = match paths::dev_path(paths::ENV_DEV_DATA_DIR) {
                 Some(d) => {
                     // 指定を誤っても、リポジトリ・ビルド成果物・ホーム等を削除対象にしない
@@ -170,6 +203,8 @@ pub fn run() {
                         resources.uv.clone(),
                         app.path().home_dir()?,
                     ];
+                    #[cfg(target_os = "windows")]
+                    protected.push(resources.llama_server.clone());
                     protected.extend(storage::build_target_dir());
                     let d = paths::validate_dev_data_dir(&d, &protected).map_err(|e| {
                         log::error!("{}: {e:#}", paths::ENV_DEV_DATA_DIR);
@@ -182,6 +217,10 @@ pub fn run() {
                     );
                     d
                 }
+                // Windows は %LOCALAPPDATA% (数GBのモデルを移動プロファイルに載せない。docs/architecture.md「識別子・パス (Windows)」)
+                #[cfg(target_os = "windows")]
+                None => app.path().app_local_data_dir()?,
+                #[cfg(not(target_os = "windows"))]
                 None => app.path().app_data_dir()?,
             };
             let data_paths = paths::DataPaths::new(data_dir);
@@ -265,6 +304,8 @@ pub fn run() {
             commands::get_panel_anchor,
             commands::show_panel,
             commands::show_panel_menu,
+            commands::get_gpu_status,
+            commands::probe_gpu,
         ])
         .build(context)
         .expect("error while building tauri application");
@@ -278,7 +319,9 @@ pub fn run() {
             }
         }
         // Dock に出ない常駐アプリのため、Finder・Spotlight・Launchpad から開き直した時に設定 (未完了ならセットアップ) を開く。
-        // パネルが常に見えているため has_visible_windows は判断に使わない
+        // パネルが常に見えているため has_visible_windows は判断に使わない。
+        // Windows に Reopen は無く、再度の起動は single-instance のコールバックだけで受ける
+        #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => {
             log::info!("Reopen: 画面を開く");
             windows::open_on_relaunch(app);
@@ -291,6 +334,45 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+/// `--print-resource-paths` の本体。App を作らずに Resource を解決する (PathResolver::resource_dir と同じ関数。
+/// Windows は実行ファイルのフォルダ)。出力は ASCII (GUI サブシステムの出力をコンソールの文字コードに左右させない)
+#[cfg(target_os = "windows")]
+fn print_resource_paths(package_info: &tauri::PackageInfo) -> i32 {
+    let dir = match tauri::utils::platform::resource_dir(package_info, &tauri::Env::default()) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("resource dir: {e}");
+            return 1;
+        }
+    };
+    let r = paths::Resources::resolve(Some(&dir), std::path::PathBuf::new());
+    let mut ok = true;
+    for (name, p) in [
+        ("llama-server", r.llama_server.join(llama::SERVER_EXE)),
+        ("verify.wav", r.verify_wav),
+    ] {
+        let found = p.is_file();
+        ok &= found;
+        println!(
+            "{name}\t{}\t{}",
+            if found { "ok" } else { "missing" },
+            p.display()
+        );
+    }
+    match storage::current_app_bundle() {
+        Some(d) => println!(
+            "uninstaller\tok\t{}",
+            d.join(storage::UNINSTALLER).display()
+        ),
+        None => println!("uninstaller\tnone\t(not installed by the NSIS installer)"),
+    }
+    if ok {
+        0
+    } else {
+        1
+    }
 }
 
 /// 起動時に、システム設定でのログイン項目の変更を設定に取り込む (本番ビルドのみ。autostart.rs)。
@@ -335,8 +417,9 @@ fn spawn_watcher(core: Arc<Core>) {
             }
             windows::refresh_panel_position(core.app());
             // 外観 (ライト/ダーク) で変わるのはエラー時の非テンプレート画像だけ
-            // (テンプレート画像はシステムが色を合わせる)。エラー中だけ見直す
-            if core.state.status().phase == state::Phase::Error {
+            // (テンプレート画像はシステムが色を合わせる)。エラー中だけ見直す。
+            // Windows はテンプレート画像が無く全状態の画像をタスクバーの明暗で塗るため、常に見直す
+            if cfg!(target_os = "windows") || core.state.status().phase == state::Phase::Error {
                 tray::refresh_appearance(core.app());
             }
         }

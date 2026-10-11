@@ -17,6 +17,9 @@ export const BLOCKERS = {
       file: "apps/desktop/src-tauri/src/provisioning/models.rs",
       // REVISION_PENDING ("TODO-i18n-pin-commit-after-hf-publish") など。接頭辞で見る (後で文言を変えても捕まえるため)
       marker: "TODO-i18n-pin-commit",
+      // このファイルに Mac (mlx) と Windows (gguf、cfg(windows) でなく同じ CATALOG) の両方の候補があること。
+      // 片方の定義が別のファイルへ移ったら、そちらが検査から漏れるため止める (BLOCKERS を直す)
+      mustContain: ['id: "ja-8bit"', 'id: "ja-gguf"', 'id: "base-gguf"'],
       reason:
         "HF に未公開のモデルの revision がプレースホルダのまま。このまま配布すると、そのモデルを使う利用者 " +
         "(話す言語 en の新規セットアップを含む) はモデルの取得が 404 で失敗しセットアップを完了できない。" +
@@ -30,12 +33,16 @@ export function findBlockers({ root, target }) {
   const rules = BLOCKERS[target];
   if (!rules) throw new Error(`target は ${Object.keys(BLOCKERS).join("|")} のいずれか: '${target}'`);
   const found = [];
-  for (const { file, marker, reason } of rules) {
+  for (const { file, marker, mustContain = [], reason } of rules) {
     let text;
     try {
       text = readFileSync(path.join(root, file), "utf8");
     } catch (e) {
       throw new Error(`${file} を読めない (${e.code ?? e.message})。移動したなら BLOCKERS を直す`);
+    }
+    const absent = mustContain.filter((m) => !text.includes(m));
+    if (absent.length > 0) {
+      throw new Error(`${file} に ${absent.join(", ")} が無い。定義を移したなら BLOCKERS を直す`);
     }
     text.split("\n").forEach((line, i) => {
       if (line.includes(marker)) found.push({ file, line: i + 1, text: line.trim(), reason });

@@ -6,7 +6,7 @@ import { IconButton } from "@/components/ui/icon-button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { formatKeyCombo, KEY_LABELS, MODIFIER_LABELS, MODIFIER_ORDER } from "@/lib/format";
+import { formatKeyCombo, KEY_LABELS, MODIFIER_ORDER, modifierLabels } from "@/lib/format";
 import type { KeyCombo, KeyName, Locale, VoiceCommand } from "@/lib/ipc";
 import { splitPhrases, validatePhrases } from "@/lib/voice-command";
 import { cn } from "@/lib/utils";
@@ -17,7 +17,7 @@ import { Card, FieldError, TitleWithSub, type SectionProps } from "./common";
 const GRID = "grid grid-cols-[1fr_130px_64px] gap-3";
 
 export function CommandsSection({ settings, update, errors }: SectionProps) {
-  const { t } = useI18n();
+  const { t, platform } = useI18n();
   const c = t.settings.commands;
   // 編集中のコマンド。id が空なら追加
   const [editing, setEditing] = useState<VoiceCommand | null>(null);
@@ -63,7 +63,7 @@ export function CommandsSection({ settings, update, errors }: SectionProps) {
               ))}
             </div>
             <span className="justify-self-start rounded-sm border border-line-strong px-2 py-0.5 font-mono text-xs">
-              {formatKeyCombo(cmd.key)}
+              {formatKeyCombo(cmd.key, platform)}
             </span>
             <div className="flex justify-end gap-0.5">
               <IconButton icon={Pencil} label={c.edit} size="sm" onClick={() => setEditing(cmd)} />
@@ -147,12 +147,12 @@ function CommandForm({
   onCancel: () => void;
   onSave: (c: VoiceCommand) => void;
 }) {
-  const { t } = useI18n();
+  const { t, platform } = useI18n();
   const c = t.settings.commands;
   const [phrases, setPhrases] = useState(command.phrases.join(c.phraseJoiner));
   const [key, setKey] = useState<KeyCombo>(command.key);
   const parsed = splitPhrases(phrases);
-  const error = validatePhrases(parsed, others, (x) => formatKeyCombo(x.key), c.validation);
+  const error = validatePhrases(parsed, others, (x) => formatKeyCombo(x.key, platform), c.validation);
   // 空欄は保存ボタンを無効にするだけで、エラーとしては出さない (開いた直後に赤字を出さない)
   const shownError = parsed.length === 0 ? null : error;
   const isNew = command.id === "";
@@ -217,7 +217,7 @@ function CommandForm({
                           : "border-line-strong bg-surface-card text-fg-body hover:bg-surface-hover",
                       )}
                     >
-                      {MODIFIER_LABELS[m]}
+                      {modifierLabels(platform)[m]}
                     </button>
                   );
                 })}
@@ -232,7 +232,7 @@ function CommandForm({
               />
             </div>
             <span className="text-xs text-fg-muted">
-              {c.keyPreview} <span className="font-mono">{formatKeyCombo(key)}</span>
+              {c.keyPreview} <span className="font-mono">{formatKeyCombo(key, platform)}</span>
             </span>
           </div>
         </div>

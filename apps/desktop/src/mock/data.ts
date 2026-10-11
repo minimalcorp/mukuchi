@@ -4,6 +4,7 @@ import type {
   Locale,
   AudioDevice,
   AudioLevel,
+  GpuStatus,
   ModelInfo,
   PanelAnchor,
   Permissions,
@@ -12,12 +13,19 @@ import type {
   ShortcutStatus,
   UpdateStatus,
 } from "@/lib/ipc";
+import type { PerOs, Platform } from "@/lib/platform";
 import type { MockApi } from "./index";
-import { MOCK_SPEECH_TEXTS, MOCK_UI_TEXTS } from "./texts";
+import { MOCK_SPEECH_TEXTS, MOCK_UI_TEXTS, MOCK_WINDOWS_TEXTS, mockVoiceCommands } from "./texts";
 
 export type MockDb = {
   /** OS の言語 (uiLanguage が system の時の表示言語)。?locale= で指定する */
   systemLocale: Locale;
+  /** OS (get_app_info の platform)。?platform= で指定する */
+  platform: Platform;
+  /** GPU の判定結果 (get_gpu_status。Windows のみ意味がある)。?gpu= で指定する */
+  gpu: GpuStatus;
+  /** probe_gpu (再検出) で見つかる判定結果。null なら今と同じ。?gpu-probe= で指定する */
+  gpuProbe: GpuStatus["kind"] | null;
   status: AppStatus;
   settings: Settings;
   permissions: Permissions;
@@ -49,20 +57,27 @@ export type MockDb = {
 };
 
 /** 新規の設定 (Rust の既定と同じ)。speechLanguage は解決した表示言語、既定の音声コマンドは話す言語のもの */
-function defaultSettings(locale: Locale): Settings {
+function defaultSettings(locale: Locale, platform: Platform): Settings {
   const sp = MOCK_SPEECH_TEXTS[locale];
+  const win = platform === "windows" ? MOCK_WINDOWS_TEXTS[locale] : null;
   return {
     launchAtLogin: true,
     inputDeviceId: null,
     vadSensitivity: 60,
     silenceMs: 1300,
     voiceCommandsEnabled: true,
-    voiceCommands: structuredClone(sp.voiceCommands),
+    voiceCommands: mockVoiceCommands(locale, platform),
     asrContext: sp.asrContext,
-    excludedApps: [
-      { bundleId: "com.1password.1password", name: "1Password" },
-      { bundleId: "com.apple.Terminal", name: sp.terminal },
-    ],
+    // Windows の識別子は実行ファイル名 (小文字)
+    excludedApps: win
+      ? [
+          { bundleId: "1password.exe", name: "1Password" },
+          { bundleId: "windowsterminal.exe", name: win.terminal },
+        ]
+      : [
+          { bundleId: "com.1password.1password", name: "1Password" },
+          { bundleId: "com.apple.Terminal", name: sp.terminal },
+        ],
     panelPosition: null,
     setupCompleted: true,
     panelStyle: "full",
@@ -70,9 +85,11 @@ function defaultSettings(locale: Locale): Settings {
     autoSubmit: false,
     autoSubmitKey: "enter",
     autoCheckUpdates: true,
+    // 既定は Mac・Windows とも Alt+Space (src-tauri/src/settings.rs の DEFAULT_SHORTCUT)
     shortcut: "Alt+Space",
     uiLanguage: "system",
     speechLanguage: locale,
+    cpuInferenceAccepted: false,
   };
 }
 
@@ -80,12 +97,17 @@ export const GB = 1_000_000_000;
 
 export const MODEL_TOTAL = 2.4 * GB;
 
-/** カタログ (Rust の provisioning/models.rs の CATALOG と同じ値)。名前・説明は表示言語ごと (texts.ts) */
+/**
+ * カタログ (Rust の provisioning/models.rs の CATALOG と同じ値)。名前・説明は表示言語ごと (texts.ts)。
+ * OS ごとの候補 (Mac = MLX、Windows = GGUF)。Windows の容量は HF 公開前の目安
+ */
 const CATALOG = [
   { id: "ja-8bit", sizeBytes: 2_185_804_096, tunedFor: "ja", legacy: false },
   { id: "base-1.7b-8bit", sizeBytes: 2_174_372_462, tunedFor: null, legacy: false },
   // 旧候補: 手元にある時だけ一覧に出る (docs/architecture.md「モデルの管理」の旧候補)
   { id: "ja-bf16", sizeBytes: 4_092_092_275, tunedFor: "ja", legacy: true },
+  { id: "ja-gguf", sizeBytes: 2_190_000_000, tunedFor: "ja", legacy: false },
+  { id: "base-gguf", sizeBytes: 2_520_000_000, tunedFor: null, legacy: false },
 ] as const satisfies readonly { id: string; sizeBytes: number; tunedFor: Locale | null; legacy: boolean }[];
 
 export type ModelId = (typeof CATALOG)[number]["id"];
@@ -95,6 +117,16 @@ export const MODEL_ORDER: Record<Locale, ModelId[]> = {
   ja: ["ja-8bit", "base-1.7b-8bit"],
   en: ["base-1.7b-8bit", "ja-8bit"],
 };
+
+/** OS ごとの並び (Windows は GGUF の候補。Mac は MODEL_ORDER) */
+const MODEL_ORDERS: PerOs<Record<Locale, ModelId[]>> = {
+  macos: MODEL_ORDER,
+  windows: { ja: ["ja-gguf", "base-gguf"], en: ["base-gguf", "ja-gguf"] },
+};
+
+export function modelOrder(platform: Platform, speech: Locale): ModelId[] {
+  return MODEL_ORDERS[platform][speech];
+}
 
 /** 解決した表示言語 (Rust の get_locale)。system は OS の言語 (モックでは ?locale=) */
 export function resolvedLocale(db: MockDb): Locale {
@@ -107,7 +139,7 @@ export function resolvedLocale(db: MockDb): Locale {
  * カタログにない id (テストで足した行) はそのまま出す
  */
 export function presentModels(db: MockDb, models: ModelInfo[] = db.models): ModelInfo[] {
-  const order = MODEL_ORDER[db.settings.speechLanguage] ?? MODEL_ORDER.ja;
+  const order = MODEL_ORDERS[db.platform][db.settings.speechLanguage] ?? MODEL_ORDERS[db.platform].ja;
   const texts = MOCK_UI_TEXTS[resolvedLocale(db)].models;
   const rank = (id: string) => {
     const i = order.indexOf(id as ModelId);
@@ -160,8 +192,12 @@ export function model(
 }
 
 /** 新規の導入の一覧: 話す言語の推奨を選択中 (state は引数)、他は未取得 */
-export function defaultModels(speech: Locale, selectedState: ModelInfo["state"] = "downloaded"): ModelInfo[] {
-  const order = MODEL_ORDER[speech];
+export function defaultModels(
+  speech: Locale,
+  selectedState: ModelInfo["state"] = "downloaded",
+  platform: Platform = "macos",
+): ModelInfo[] {
+  const order = modelOrder(platform, speech);
   return order.map((id, i) => (i === 0 ? model(id, selectedState, { selected: true }) : model(id, "not_downloaded")));
 }
 
@@ -236,17 +272,44 @@ export function updateStatus(state: UpdateStatus["state"], opts: Partial<UpdateS
   };
 }
 
-export function createDb(locale: Locale): MockDb {
-  const settings = defaultSettings(locale);
+/** GPU の判定結果 (Rust と同じ形)。accepted: CPU 実行に同意済み (GPU を使えない時は CPU で動かす) */
+export function gpuStatus(kind: GpuStatus["kind"], accepted = false): GpuStatus {
+  switch (kind) {
+    case "ok":
+      return {
+        kind,
+        devices: [{ name: "NVIDIA GeForce RTX 3080 Ti", vramMb: 12288, integrated: false }],
+        selected: "NVIDIA GeForce RTX 3080 Ti",
+        device: "gpu",
+      };
+    case "integrated":
+      return {
+        kind,
+        devices: [{ name: "Intel(R) UHD Graphics 770", vramMb: null, integrated: true }],
+        selected: "Intel(R) UHD Graphics 770",
+        device: "gpu",
+      };
+    default:
+      return { kind, devices: [], selected: null, device: accepted ? "cpu" : "gpu" };
+  }
+}
+
+export function createDb(locale: Locale, platform: Platform = "macos"): MockDb {
+  const settings = defaultSettings(locale, platform);
   const sp = MOCK_SPEECH_TEXTS[locale];
+  const win = platform === "windows" ? MOCK_WINDOWS_TEXTS[locale] : null;
   return {
     systemLocale: locale,
+    platform,
+    // Mac の get_gpu_status は常に ok (GPU の名前は返さない)
+    gpu: platform === "windows" ? gpuStatus("ok") : { kind: "ok", devices: [], selected: null, device: "gpu" },
+    gpuProbe: null,
     status: { phase: "off", loadingProgress: null, error: null, seq: 0 },
     settings,
     permissions: { microphone: "granted", accessibility: true },
     provisioning: provisioning("done", { locale }),
     // 新規の導入: 話す言語の推奨を取得済み・選択中。旧候補 (bf16) は出ない
-    models: defaultModels(locale),
+    models: defaultModels(locale, "downloaded", platform),
     shortcut: { shortcut: settings.shortcut, registered: true, error: null },
     shortcutSuspended: false,
     // エラー表示の確認用。実機で何が拒否されるかは OS 次第 (他アプリと同じキーでも登録は成功しうる)
@@ -254,7 +317,7 @@ export function createDb(locale: Locale): MockDb {
     modelSelectFail: null,
     level: { level: 0.18, threshold: 0.55, speech: false },
     devices: [
-      { id: "builtin", name: sp.builtInMic, isDefault: true },
+      { id: "builtin", name: win?.builtInMic ?? sp.builtInMic, isDefault: true },
       { id: "airpods", name: "AirPods Pro", isDefault: false },
       { id: "usb", name: sp.usbMic, isDefault: false },
     ],

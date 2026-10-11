@@ -57,20 +57,28 @@ impl KeyCombo {
             Modifier::Shift,
             Modifier::Cmd,
         ];
+        // Windows はキーの刻印の名前 (Ctrl+Alt+Shift+Win の順、Cmd は Win キー、Backspace)。
+        // フロントエンドの表記 (src/lib/shortcut.ts) と同じ
+        let windows = cfg!(target_os = "windows");
         let mut parts: Vec<&str> = order
             .iter()
             .filter(|m| mods.contains(m))
-            .map(|m| match m {
-                Modifier::Cmd => "⌘",
-                Modifier::Shift => "⇧",
-                Modifier::Option => "⌥",
-                Modifier::Ctrl => "⌃",
+            .map(|m| match (m, windows) {
+                (Modifier::Cmd, false) => "⌘",
+                (Modifier::Shift, false) => "⇧",
+                (Modifier::Option, false) => "⌥",
+                (Modifier::Ctrl, false) => "⌃",
+                (Modifier::Cmd, true) => "Win",
+                (Modifier::Shift, true) => "Shift",
+                (Modifier::Option, true) => "Alt",
+                (Modifier::Ctrl, true) => "Ctrl",
             })
             .collect();
         parts.push(match self.key {
             Key::Enter => "Enter",
             Key::Tab => "Tab",
             Key::Escape => "Esc",
+            Key::Backspace if windows => "Backspace",
             Key::Backspace => "Delete",
         });
         parts.join("+")
@@ -203,14 +211,14 @@ impl AutoSubmitKey {
     }
 }
 
-/// OS の主修飾キー (macOS は ⌘、それ以外は Ctrl)
+/// OS の主修飾キー (macOS は ⌘、それ以外は Ctrl)。送信 (自動送信の modEnter・音声コマンド「送信」の既定) に使う
 #[cfg(target_os = "macos")]
-fn primary_modifier() -> Modifier {
+pub fn primary_modifier() -> Modifier {
     Modifier::Cmd
 }
 
 #[cfg(not(target_os = "macos"))]
-fn primary_modifier() -> Modifier {
+pub fn primary_modifier() -> Modifier {
     Modifier::Ctrl
 }
 
@@ -222,7 +230,8 @@ impl<'de> Deserialize<'de> for AutoSubmitKey {
     }
 }
 
-/// ショートカットの既定 (⌥Space)
+/// ショートカットの既定 (Mac・Windows とも Alt+Space)。Windows の Alt+Space は登録している間はウィンドウメニューに
+/// 渡らない。PowerToys Run 等も既定で使うため、競合したら登録に失敗し設定で変えてもらう (docs/architecture.md「Windows 版」)
 pub const DEFAULT_SHORTCUT: &str = "Alt+Space";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -254,6 +263,9 @@ pub struct Settings {
     /// 既存の設定に無ければ ja (それまで日本語だけだったため)。新規は `Settings::new_install` で表示言語に合わせる
     #[serde(deserialize_with = "lenient_locale")]
     pub speech_language: Locale,
+    /// Windows のみ: GPU が使えない PC で CPU 実行に利用者が同意した (docs/architecture.md「Windows 版」)。
+    /// Mac では使わない。旧設定 (キーなし) は false
+    pub cpu_inference_accepted: bool,
 }
 
 /// 未知の値・文字列でない値 (null 等) は既定 (ja) として読む (設定全体を捨てない)。
@@ -285,6 +297,7 @@ impl Default for Settings {
             shortcut: Some(DEFAULT_SHORTCUT.to_string()),
             ui_language: UiLanguage::System,
             speech_language: Locale::default(),
+            cpu_inference_accepted: false,
         }
     }
 }
@@ -304,7 +317,8 @@ pub fn default_voice_commands(lang: Locale) -> Vec<VoiceCommand> {
     vec![
         cmd("enter", enter, Key::Enter, vec![]),
         cmd("newline", newline, Key::Enter, vec![Modifier::Shift]),
-        cmd("send", send, Key::Enter, vec![Modifier::Cmd]),
+        // 送信は OS の主修飾キー + Enter (Mac ⌘Enter、Windows Ctrl+Enter)
+        cmd("send", send, Key::Enter, vec![primary_modifier()]),
     ]
 }
 
@@ -557,7 +571,13 @@ mod tests {
         // JSON は camelCase
         assert_eq!(v["silenceMs"], 1300);
         assert_eq!(v["voiceCommands"][0]["key"]["key"], "enter");
-        assert_eq!(v["voiceCommands"][2]["key"]["modifiers"][0], "cmd");
+        // 送信は OS の主修飾キー (Mac ⌘、Windows Ctrl)
+        let send_mod = if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        };
+        assert_eq!(v["voiceCommands"][2]["key"]["modifiers"][0], send_mod);
     }
 
     #[test]
@@ -664,7 +684,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         assert_eq!(AutoSubmitKey::ModEnter.key_combo().display(), "⌘+Enter");
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(AutoSubmitKey::ModEnter.key_combo().display(), "⌃+Enter");
+        assert_eq!(AutoSubmitKey::ModEnter.key_combo().display(), "Ctrl+Enter");
     }
 
     #[test]
@@ -684,11 +704,15 @@ mod tests {
     #[test]
     fn shortcut_default_patch_and_null() {
         let s = Settings::default();
-        assert_eq!(s.shortcut.as_deref(), Some("Alt+Space"));
-        assert_eq!(serde_json::to_value(&s).unwrap()["shortcut"], "Alt+Space");
+        assert_eq!(s.shortcut.as_deref(), Some(DEFAULT_SHORTCUT));
+        assert_eq!(DEFAULT_SHORTCUT, "Alt+Space");
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["shortcut"],
+            DEFAULT_SHORTCUT
+        );
         // キーなしは既定、null は無効
         let old: Settings = serde_json::from_value(json!({})).unwrap();
-        assert_eq!(old.shortcut.as_deref(), Some("Alt+Space"));
+        assert_eq!(old.shortcut.as_deref(), Some(DEFAULT_SHORTCUT));
         let off: Settings = serde_json::from_value(json!({ "shortcut": null })).unwrap();
         assert_eq!(off.shortcut, None);
         let next = s
@@ -1037,7 +1061,7 @@ mod tests {
         );
         assert_eq!(
             match_command("Send!", &en).unwrap().modifiers,
-            vec![Modifier::Cmd]
+            vec![primary_modifier()]
         );
     }
 
@@ -1056,6 +1080,11 @@ mod tests {
             key: Key::Enter,
             modifiers: vec![Modifier::Cmd, Modifier::Shift],
         };
-        assert_eq!(k.display(), "⇧+⌘+Enter");
+        let want = if cfg!(target_os = "windows") {
+            "Shift+Win+Enter"
+        } else {
+            "⇧+⌘+Enter"
+        };
+        assert_eq!(k.display(), want);
     }
 }

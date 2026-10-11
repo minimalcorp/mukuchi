@@ -7,12 +7,14 @@ import { commands } from "@/lib/ipc";
 import { eventModifiers, modifierSymbols, recordKey, shortcutParts } from "@/lib/shortcut";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n/context";
+import { usePlatform } from "@/lib/platform";
 
-/** キーの表示 (⌥・Space 等を1つずつ囲む) */
+/** キーの表示 (⌥・Space 等を1つずつ囲む。Windows は Ctrl・Alt 等の名前) */
 export function ShortcutKeys({ shortcut, className }: { shortcut: string; className?: string }) {
+  const platform = usePlatform();
   return (
     <span className={cn("inline-flex items-center gap-1", className)}>
-      {shortcutParts(shortcut).map((p, i) => (
+      {shortcutParts(shortcut, platform).map((p, i) => (
         <Kbd key={i}>{p}</Kbd>
       ))}
     </span>
@@ -38,6 +40,7 @@ export function ShortcutRecorder({
   error,
   hint,
   disabled = false,
+  statusWarning = true,
 }: {
   shortcut: string | null | undefined;
   /** update_settings({ shortcut }) を呼ぶ。失敗は error で受け取る */
@@ -47,8 +50,10 @@ export function ShortcutRecorder({
   /** 記録中でない時に下に出す補足 */
   hint?: ReactNode;
   disabled?: boolean;
+  /** 登録できていない時の警告 (ShortcutStatus.error) を下に出す。呼び出し側で別に案内する時は false */
+  statusWarning?: boolean;
 }) {
-  const { t } = useI18n();
+  const { t, platform, os } = useI18n();
   const status = useShortcutStatus();
   const [recording, setRecording] = useState(false);
   // 記録中に押している修飾キー (「⌥ …」のように途中経過を見せる)
@@ -116,7 +121,7 @@ export function ShortcutRecorder({
     if (e.repeat) return;
     const r = recordKey(e.nativeEvent);
     if (r.kind === "modifier") {
-      setHeld(modifierSymbols(eventModifiers(e.nativeEvent)));
+      setHeld(modifierSymbols(eventModifiers(e.nativeEvent), platform));
       return;
     }
     if (r.kind === "no_modifier") {
@@ -135,10 +140,10 @@ export function ShortcutRecorder({
   const onKeyUp = (e: KeyboardEvent<HTMLDivElement>) => {
     if (!recording) return;
     e.preventDefault();
-    setHeld(modifierSymbols(eventModifiers(e.nativeEvent)));
+    setHeld(modifierSymbols(eventModifiers(e.nativeEvent), platform));
   };
 
-  const warning = !recording && !error ? status?.error : null;
+  const warning = statusWarning && !recording && !error ? status?.error : null;
 
   return (
     <div className="flex min-w-0 flex-col gap-1.5">
@@ -192,7 +197,7 @@ export function ShortcutRecorder({
       </div>
       {recording ? (
         <p className={cn("m-0 text-xs leading-[1.5]", rejected ? "text-fg-warning" : "text-fg-muted")}>
-          {rejected === "unsupported" ? t.shortcut.unsupportedGuide : t.shortcut.recordingGuide}
+          {rejected === "unsupported" ? t.shortcut.unsupportedGuide : os(t.shortcut.recordingGuide)}
         </p>
       ) : hint && !error && !warning ? (
         // エラー・警告の間は補足を出さない (セットアップの狭いウィンドウに収めるため。直すべきことを優先して見せる)

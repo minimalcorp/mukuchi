@@ -3,11 +3,15 @@
 // Node の標準ライブラリだけを使う (署名鍵を読む job で第三者のコード (tauri-cli・minisign) を動かさないため)。
 //
 //   TAURI_SIGNING_PRIVATE_KEY=<鍵ファイルの中身> TAURI_SIGNING_PRIVATE_KEY_PASSWORD=<パスワード> \
-//   node scripts/sign-updater.mjs --file <mukuchi_aarch64.app.tar.gz> --version <X.Y.Z> --url <配布 URL> \
-//     --pubkey-config <tauri.conf.json> --out <dir> [--pub-date <RFC3339>] [--timestamp <unix秒>]
+//   node scripts/sign-updater.mjs --version <X.Y.Z> --pubkey-config <tauri.conf.json> --out <dir> \
+//     --file darwin-aarch64=<mukuchi_aarch64.app.tar.gz> --url darwin-aarch64=<配布 URL> \
+//     --file windows-x86_64=<mukuchi_x64-setup.exe> --url windows-x86_64=<配布 URL> \
+//     [--pub-date <RFC3339>] [--timestamp <unix秒>]
 //
-// <dir>/<file名>.sig (tauri signer sign と同じ形) と <dir>/latest.json を書く。書く前に tauri.conf.json の
-// plugins.updater.pubkey で検証する (アプリに入っている公開鍵と違う鍵で署名した更新は誰にも入れられないため)。
+// プラットフォーム (latest.json の platforms のキー) ごとに --file と --url を 1 つずつ渡す (1 つ以上。PLATFORMS のみ)。
+// 各ファイルの <dir>/<file名>.sig (tauri signer sign と同じ形) と、全プラットフォームを載せた <dir>/latest.json を書く。
+// 書く前に tauri.conf.json の plugins.updater.pubkey で検証する (アプリに入っている公開鍵と違う鍵で署名した更新は
+// 誰にも入れられないため)。Mac と Windows は同じ鍵・同じ版で署名する (1 つの Release・1 つの latest.json のため)。
 //
 // 形式 (tauri-cli 2.12.0 が使う minisign crate 0.9.1 と同じ。根拠は docs/release.md の「アップデートの署名」):
 //   鍵ファイル: base64( "untrusted comment: ...\n" + base64(秘密鍵) + "\n" )
@@ -27,9 +31,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-// latest.json の platforms のキー。tauri-plugin-updater 2.13 は macOS で "darwin-aarch64-app" → "darwin-aarch64"
-// の順に探す (updater.rs の get_urls)。後者だけにすると、バンドルの種類の判定によらず見つかる
-export const PLATFORM = "darwin-aarch64";
+// latest.json の platforms のキー。tauri-plugin-updater 2.13 は "{os}-{arch}-{installer}" → "{os}-{arch}" の順に探す
+// (updater.rs の get_urls。macOS は darwin-aarch64-app、Windows の NSIS は windows-x86_64-nsis)。後者だけにすると、
+// バンドルの種類の判定によらず見つかる。Windows は NSIS のインストーラー (.exe) そのものが更新物
+// (updater.rs の extract_exe: PE なら NSIS として /UPDATE 付きで起動する)
+export const PLATFORMS = ["darwin-aarch64", "windows-x86_64"];
 const UNTRUSTED_COMMENT = "signature from tauri secret key";
 
 // ---- BLAKE2b (RFC 7693) --------------------------------------------------------------------------
@@ -243,15 +249,25 @@ export function verifySignature(sigB64, pubB64, prehash) {
 }
 
 // tauri-plugin-updater の静的な更新情報 (pub_date は RFC 3339。notes は無ければ書かない)
-export function latestJson({ version, url, signature, pubDate, notes }) {
+// platforms: { <PLATFORMS のキー>: { signature, url } } (1 つ以上。キーは PLATFORMS の順に並べる)
+export function latestJson({ version, platforms, pubDate, notes }) {
   if (!SEMVER.test(version)) throw new Error(`版が X.Y.Z の形でない: '${version}'`);
-  const u = new URL(url);
-  if (u.protocol !== "https:") throw new Error(`url が https でない: ${url}`);
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(pubDate)) throw new Error(`pub_date が不正: ${pubDate}`);
+  const keys = Object.keys(platforms ?? {});
+  if (keys.length === 0) throw new Error("platforms が空");
   const out = { version };
   if (notes) out.notes = notes;
   out.pub_date = pubDate;
-  out.platforms = { [PLATFORM]: { signature, url } };
+  out.platforms = {};
+  for (const k of keys) {
+    if (!PLATFORMS.includes(k)) throw new Error(`未知のプラットフォーム: ${k} (${PLATFORMS.join("|")})`);
+  }
+  for (const k of PLATFORMS.filter((p) => keys.includes(p))) {
+    const { signature, url } = platforms[k];
+    if (!signature) throw new Error(`${k} の signature が空`);
+    if (new URL(url).protocol !== "https:") throw new Error(`url が https でない: ${url}`);
+    out.platforms[k] = { signature, url };
+  }
   return `${JSON.stringify(out, null, 2)}\n`;
 }
 
@@ -261,16 +277,32 @@ export function rfc3339(date) {
 
 // ---- CLI ----------------------------------------------------------------------------------------
 
+// --file / --url は "<プラットフォーム>=<値>" で、プラットフォームごとに 1 つずつ
 function parseArgs(argv) {
-  const opts = {};
-  const names = ["file", "version", "url", "pubkey-config", "out", "pub-date", "timestamp"];
+  const opts = { file: {}, url: {} };
+  const names = ["file", "url", "version", "pubkey-config", "out", "pub-date", "timestamp"];
   for (let i = 0; i < argv.length; i += 2) {
     const k = argv[i]?.replace(/^--/, "");
-    if (!names.includes(k) || argv[i + 1] === undefined) throw new Error(`不明な引数: ${argv[i]}`);
-    opts[k] = argv[i + 1];
+    const v = argv[i + 1];
+    if (!names.includes(k) || v === undefined) throw new Error(`不明な引数: ${argv[i]}`);
+    if (k === "file" || k === "url") {
+      const eq = v.indexOf("=");
+      const p = eq > 0 ? v.slice(0, eq) : "";
+      if (!PLATFORMS.includes(p)) throw new Error(`--${k} は <${PLATFORMS.join("|")}>=<値> の形: ${v}`);
+      if (opts[k][p] !== undefined) throw new Error(`--${k} ${p} が 2 回ある`);
+      opts[k][p] = v.slice(eq + 1);
+    } else {
+      opts[k] = v;
+    }
   }
-  for (const k of ["file", "version", "url", "pubkey-config", "out"]) {
+  for (const k of ["version", "pubkey-config", "out"]) {
     if (!opts[k]) throw new Error(`--${k} が必要`);
+  }
+  const fp = Object.keys(opts.file);
+  if (fp.length === 0) throw new Error("--file が必要");
+  const up = Object.keys(opts.url);
+  for (const p of new Set([...fp, ...up])) {
+    if (!opts.file[p] || !opts.url[p]) throw new Error(`${p} の --file と --url は対で渡す`);
   }
   return opts;
 }
@@ -292,22 +324,34 @@ async function main(argv) {
     throw new Error(`秘密鍵が ${opts["pubkey-config"]} の公開鍵と対でない (鍵 ID ${keyId(key.keynum)} / ${keyId(pub.keynum)})`);
   }
 
-  const fileName = path.basename(opts.file);
-  if (path.basename(new URL(opts.url).pathname) !== fileName) {
-    throw new Error(`url のファイル名が ${fileName} でない: ${opts.url}`);
-  }
   const timestamp = opts.timestamp !== undefined ? Number(opts.timestamp) : Math.floor(Date.now() / 1000);
-  const comment = trustedComment({ timestamp, fileName, version: opts.version });
-  const prehash = await prehashFile(opts.file);
-  const signature = signPrehashed(prehash, key, comment);
-  // 書く前に、アプリに入っている公開鍵で検証し直す
-  if (verifySignature(signature, pubkey, prehash) !== comment) throw new Error("検証した trusted comment が違う");
+  const platforms = {};
+  const sigs = [];
+  const comments = {};
+  for (const p of PLATFORMS.filter((x) => opts.file[x])) {
+    const file = opts.file[p];
+    const url = opts.url[p];
+    const fileName = path.basename(file);
+    if (path.basename(new URL(url).pathname) !== fileName) {
+      throw new Error(`url のファイル名が ${fileName} でない: ${url}`);
+    }
+    const comment = trustedComment({ timestamp, fileName, version: opts.version });
+    const prehash = await prehashFile(file);
+    const signature = signPrehashed(prehash, key, comment);
+    // 書く前に、アプリに入っている公開鍵で検証し直す
+    if (verifySignature(signature, pubkey, prehash) !== comment) throw new Error("検証した trusted comment が違う");
+    platforms[p] = { signature, url };
+    sigs.push([path.join(opts.out, `${fileName}.sig`), signature]);
+    comments[p] = comment;
+  }
+  if (new Set(sigs.map(([f]) => f)).size !== sigs.length) throw new Error("ファイル名が重複している");
 
   const pubDate = opts["pub-date"] ?? rfc3339(new Date(timestamp * 1000));
-  const json = latestJson({ version: opts.version, url: opts.url, signature, pubDate });
-  writeFileSync(path.join(opts.out, `${fileName}.sig`), signature);
+  const json = latestJson({ version: opts.version, platforms, pubDate });
+  // すべて署名・検証できてから書く (途中で失敗したら何も書かない)
+  for (const [f, sig] of sigs) writeFileSync(f, sig);
   writeFileSync(path.join(opts.out, "latest.json"), json);
-  console.log(JSON.stringify({ keyId: keyId(key.keynum), trustedComment: comment, latest: path.join(opts.out, "latest.json") }));
+  console.log(JSON.stringify({ keyId: keyId(key.keynum), trustedComments: comments, latest: path.join(opts.out, "latest.json") }));
 }
 
 // minisign の鍵 ID の表示 (keynum を u64 LE として16桁の16進数)

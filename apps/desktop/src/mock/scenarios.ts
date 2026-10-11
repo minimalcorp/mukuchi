@@ -4,13 +4,14 @@
  * 発話・アプリ名は話す言語 (MOCK_SPEECH_TEXTS)、Rust の文言は表示言語 (MOCK_UI_TEXTS) で作る。
  */
 import type { AppError, AppErrorAction, AppErrorCode, AppStatus, Locale } from "@/lib/ipc";
+import { formatShortcut } from "@/lib/shortcut";
 import type { MockApi } from "./index";
 import {
   GB,
-  MODEL_ORDER,
   UPDATE_TOTAL,
   defaultModels,
   model,
+  modelOrder,
   provisioning,
   resolvedLocale,
   updateStatus,
@@ -54,6 +55,9 @@ const ERRORS: Record<string, { code: AppErrorCode; action: AppErrorAction }> = {
   mic: { code: "microphone_missing", action: "select_microphone" },
   "mic-denied": { code: "microphone_denied", action: "open_microphone" },
   runtime: { code: "runtime_missing", action: "start_setup" },
+  // Windows のみ: GPU を使えず CPU 実行にも同意していない (&platform=windows&gpu=none と併用する)
+  gpu: { code: "gpu_unavailable", action: "accept_cpu" },
+  "gpu-probe": { code: "gpu_unavailable", action: "probe_gpu" },
 };
 
 /** Rust と同じく message は表示言語 */
@@ -304,6 +308,8 @@ const PANEL: Scenario[] = [
   errorScenario("mic"),
   errorScenario("mic-denied"),
   errorScenario("runtime"),
+  errorScenario("gpu"),
+  errorScenario("gpu-probe"),
 ];
 
 /** 起動時にショートカットを登録できなかった (Rust は設定を残したまま登録状態に error を入れる) */
@@ -311,7 +317,7 @@ function shortcutConflict(db: MockDb) {
   db.shortcut = {
     shortcut: db.settings.shortcut,
     registered: false,
-    error: ui(db).shortcutConflict("⌥ Space"),
+    error: ui(db).shortcutConflict(formatShortcut(db.settings.shortcut ?? "Alt+Space", db.platform)),
   };
 }
 
@@ -319,7 +325,7 @@ function shortcutConflict(db: MockDb) {
 function freshSetup(db: MockDb) {
   db.provisioning = provisioning("idle");
   db.settings.setupCompleted = false;
-  db.models = defaultModels(db.settings.speechLanguage, "not_downloaded");
+  db.models = defaultModels(db.settings.speechLanguage, "not_downloaded", db.platform);
 }
 
 const SETUP: Scenario[] = [
@@ -488,6 +494,7 @@ const SETUP: Scenario[] = [
     },
   },
   { name: "done", step: 6, description: "完了" },
+  { name: "done-conflict", step: 6, description: "完了 (ショートカットを登録できなかった。Windows だけ案内する)", setup: shortcutConflict },
   {
     name: "done-oneshot",
     step: 6,
@@ -527,6 +534,13 @@ const SETTINGS: Scenario[] = [
     description: "文字起こしサーバー停止",
     setup: (db) => {
       setStatus(db, { phase: "error", loadingProgress: null, error: errorOf(db, "asr") });
+    },
+  },
+  {
+    name: "gpu-unavailable",
+    description: "GPU を使えず CPU 実行に未同意 (Windows のみ。&platform=windows&gpu=none と併用する)",
+    setup: (db) => {
+      setStatus(db, { phase: "error", loadingProgress: null, error: errorOf(db, "gpu") });
     },
   },
   {
@@ -580,7 +594,7 @@ const SETTINGS: Scenario[] = [
     description: "モデル: セットアップ未完了 (操作不可)",
     setup: (db) => {
       db.provisioning = provisioning("paused");
-      db.models = defaultModels(db.settings.speechLanguage, "paused");
+      db.models = defaultModels(db.settings.speechLanguage, "paused", db.platform);
     },
   },
   {
@@ -588,14 +602,14 @@ const SETTINGS: Scenario[] = [
     description: "モデル: 話す言語の推奨を使っていない (推奨は未取得。取得を案内する)",
     setup: (db) => {
       // もう一方の言語の推奨を使っている (話す言語を変えた後)
-      db.models = defaultModels(otherLocale(db.settings.speechLanguage));
+      db.models = defaultModels(otherLocale(db.settings.speechLanguage), "downloaded", db.platform);
     },
   },
   {
     name: "models-not-recommended-downloaded",
     description: "モデル: 話す言語の推奨を取得済みだが使っていない (切り替えを案内する)",
     setup: (db) => {
-      const [selected, rec] = MODEL_ORDER[otherLocale(db.settings.speechLanguage)];
+      const [selected, rec] = modelOrder(db.platform, otherLocale(db.settings.speechLanguage));
       db.models = [model(selected, "downloaded", { selected: true }), model(rec, "downloaded")];
     },
   },

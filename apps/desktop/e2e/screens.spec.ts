@@ -53,9 +53,9 @@ const cases: Case[] = [
   },
   { name: "setup-1-welcome-running", query: "window=setup&mock=welcome-running", texts: (m) => [m.setup.welcome.speechLanguageLockedRunning], viewport: SETUP },
   { name: "setup-1-welcome-locked", query: "window=setup&mock=welcome-locked", texts: (m) => [m.setup.welcome.speechLanguageLocked], viewport: SETUP },
-  { name: "setup-2-permissions", query: "window=setup&mock=permissions", texts: (m) => [m.setup.permissions.title, m.common.granted, m.common.notGranted, m.common.openSystemSettings], viewport: SETUP },
-  { name: "setup-2-permissions-mic-denied", query: "window=setup&mock=permissions-denied", texts: (m) => [m.setup.permissions.guideMicDenied], viewport: SETUP },
-  { name: "setup-2-permissions-mic-not-determined", query: "window=setup&mock=default&step=2", texts: (m) => [m.setup.permissions.guideMicNotDetermined, m.common.allow], viewport: SETUP },
+  { name: "setup-2-permissions", query: "window=setup&mock=permissions", texts: (m) => [m.setup.permissions.title, m.common.granted, m.common.notGranted, m.common.openSystemSettings.macos], viewport: SETUP },
+  { name: "setup-2-permissions-mic-denied", query: "window=setup&mock=permissions-denied", texts: (m) => [m.setup.permissions.guideMicDenied.macos], viewport: SETUP },
+  { name: "setup-2-permissions-mic-not-determined", query: "window=setup&mock=default&step=2", texts: (m) => [m.setup.permissions.guideMicNotDetermined.macos, m.common.allow], viewport: SETUP },
   { name: "setup-2-permissions-granted", query: "window=setup&mock=permissions-granted", texts: (m) => [m.setup.permissions.title], viewport: SETUP },
   {
     name: "setup-3-download",
@@ -63,7 +63,7 @@ const cases: Case[] = [
     texts: (m, _, __, recName) => [
       m.setup.download.titleRunning,
       `0.9 GB / 2.4 GB${m.common.separator}${m.format.etaMinutes(3)}`,
-      m.setup.download.runtime,
+      m.setup.download.runtime.macos,
       // 取得するモデルの名前 (Rust の ModelInfo.name)
       recName,
       "0.9 / 2.4 GB",
@@ -161,14 +161,14 @@ const cases: Case[] = [
     viewport: SETTINGS,
   },
   { name: "settings-recognition-stopped", query: "window=settings&mock=asr-stopped&category=recognition", texts: (m) => [m.settings.recognition.stopped, m.common.restart], viewport: SETTINGS },
-  { name: "settings-permissions", query: "window=settings&mock=perm-denied&category=permissions", texts: (m) => [m.settings.permissions.accessibility, m.common.notGranted, m.common.openSystemSettings], viewport: SETTINGS },
+  { name: "settings-permissions", query: "window=settings&mock=perm-denied&category=permissions", texts: (m) => [m.settings.permissions.accessibility, m.common.notGranted, m.common.openSystemSettings.macos], viewport: SETTINGS },
   { name: "settings-permissions-mic-not-determined", query: "window=settings&mock=mic-not-determined&category=permissions", texts: (m) => [m.settings.permissions.micNotDetermined], viewport: SETTINGS },
   { name: "settings-storage", query: "window=settings&mock=default&category=storage", texts: (m) => ["3.4 GB", m.settings.storage.used, m.settings.storage.models, "12 MB", m.settings.storage.uninstall], viewport: SETTINGS },
   { name: "settings-storage-runtime-missing", query: "window=settings&mock=runtime-missing&category=storage", texts: (m) => ["12 MB", m.settings.storage.runtimeMissing, m.common.openSetup], viewport: SETTINGS },
   {
     name: "settings-about",
     query: "window=settings&mock=default&category=about",
-    texts: (m) => ["mukuchi", m.settings.about.version("0.1.0", "42"), m.settings.about.upToDate, m.settings.about.check, m.settings.about.autoCheck, m.settings.about.license, m.settings.about.openInFinder],
+    texts: (m) => ["mukuchi", m.settings.about.version("0.1.0", "42"), m.settings.about.upToDate, m.settings.about.check, m.settings.about.autoCheck, m.settings.about.license, m.settings.about.showInFolder.macos],
     viewport: SETTINGS,
   },
   { name: "settings-about-update-unchecked", query: "window=settings&mock=update-unchecked&category=about", texts: (m) => [m.settings.about.notChecked, m.settings.about.current("v0.1.0")], viewport: SETTINGS },
@@ -273,7 +273,7 @@ test("settings: アンインストールの確認ダイアログに実パスを�
   await expect(dialog.getByText(m.settings.storage.uninstallTitle)).toBeVisible();
   await expect(dialog.getByText("/Users/you/Library/Application Support/com.minimalcorp.mukuchi")).toBeVisible();
   await expect(dialog.getByText("/Applications/mukuchi.app")).toBeVisible();
-  await expect(dialog.getByText(m.settings.storage.uninstallCount(6))).toBeVisible();
+  await expect(dialog.getByText(m.settings.storage.uninstallCount.macos(6))).toBeVisible();
   expect(await findOverflows(page)).toEqual([]);
   await snap("settings-uninstall-dialog");
   await dialog.getByRole("button", { name: m.common.cancel }).click();
@@ -286,7 +286,7 @@ test("setup: 権限が揃うまで次へは押せず、許可すると進める"
   await pauseClock(page);
   const nextButton = page.getByRole("button", { name: m.common.next });
   await expect(nextButton).toBeDisabled();
-  await page.getByRole("button", { name: m.common.openSystemSettings }).click();
+  await page.getByRole("button", { name: m.common.openSystemSettings.macos }).click();
   // モックは 1.5 秒後に許可済みになり、1 秒ごとの再取得で反映される
   // (入力レベルのタイマーで runFor は遅いため fastForward。どのタイマーも 1 回ずつ発火する)
   await page.clock.fastForward(1000);

@@ -9,10 +9,10 @@ const revealOnMount = (el: HTMLElement | null) => el?.scrollIntoView({ block: "n
 
 /**
  * 「ログイン時に起動」を切り替えられなかった時のエラー (Rust の表示用メッセージ) と、ログイン項目を開くボタン。
- * ON にしても承認待ち (システム設定 > 一般 > ログイン項目 でオフ) だと有効にならず、利用者が承認するしかないため。
+ * ON にしても承認待ち (システム設定 > 一般 > ログイン項目 でオフ。Windows は 設定 > アプリ > スタートアップ でオフ) だと有効にならず、利用者が承認するしかないため。
  */
 export function LaunchAtLoginError({ message, className }: { message: string | null | undefined; className?: string }) {
-  const { t } = useI18n();
+  const { t, os } = useI18n();
   if (!message) return null;
   return (
     // setup の完了画面では本文がスクロール領域の下端に収まらず、ボタンが見えないまま出ることがあるため、出た時に見える位置へ寄せる
@@ -22,7 +22,7 @@ export function LaunchAtLoginError({ message, className }: { message: string | n
         <span>{message}</span>
       </p>
       <Button size="sm" iconRight={ExternalLink} onClick={() => runCommand(commands.openSystemSettings("login_items"))}>
-        {t.common.openSystemSettings}
+        {os(t.common.openSystemSettings)}
       </Button>
     </div>
   );

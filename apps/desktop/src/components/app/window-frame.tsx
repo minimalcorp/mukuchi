@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { env } from "@/lib/env";
+import { useOsFeatures } from "@/lib/platform";
 
 /**
  * setup / settings のウィンドウの外枠。
@@ -25,9 +26,11 @@ export function WindowFrame({ width, height, children }: { width: number; height
 
 /**
  * 信号機ボタンの位置。実機は macOS が描くので同じ幅の余白だけ取る。
- * モック表示ではデザインと同じグレーの丸を描く。
+ * モック表示ではデザインと同じグレーの丸を描く。信号機ボタンのない OS (Windows) では何も置かない
  */
 export function TrafficLights() {
+  const { trafficLights } = useOsFeatures();
+  if (!trafficLights) return null;
   if (!env.browserFrame) return <span className="w-[52px] flex-none" aria-hidden />;
   return (
     <span className="flex flex-none items-center gap-2" aria-hidden>
@@ -36,4 +39,10 @@ export function TrafficLights() {
       <span className="size-3 rounded-full bg-gray-300" />
     </span>
   );
+}
+
+/** 中央に置く見出しの釣り合いを取るため、信号機ボタンの反対側に同じ幅の余白を取る (信号機ボタンのない OS では取らない) */
+export function TrafficLightsBalance() {
+  const { trafficLights } = useOsFeatures();
+  return trafficLights ? <span className="w-[52px]" /> : null;
 }

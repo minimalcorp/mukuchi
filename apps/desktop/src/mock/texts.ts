@@ -4,6 +4,7 @@
  * Playwright からも読むため、ここでは型以外を import しない
  */
 import type { AppErrorCode, Locale, VoiceCommand } from "@/lib/ipc";
+import type { Platform } from "@/lib/platform";
 
 type ModelText = { name: string; description: string };
 
@@ -12,7 +13,7 @@ export type MockUiTexts = {
   errors: Record<AppErrorCode, string>;
   /** 入力できなかった時 (utterance-result の failed) の理由 */
   insertFailedNoAccessibility: string;
-  models: Record<"ja-8bit" | "base-1.7b-8bit" | "ja-bf16", ModelText>;
+  models: Record<"ja-8bit" | "base-1.7b-8bit" | "ja-bf16" | "ja-gguf" | "base-gguf", ModelText>;
   modelDownloadFailed: string;
   runtimeFailed: string;
   verifyFailed: string;
@@ -69,11 +70,14 @@ export const MOCK_UI_TEXTS: Record<Locale, MockUiTexts> = {
       runtime_missing: "実行環境とモデルがありません",
       insert_failed: "入力できませんでした",
       vad_failed: "発話検出を開始できません",
+      gpu_unavailable: "GPU が見つからないため、文字起こしを開始できません",
     },
     insertFailedNoAccessibility: "アクセシビリティが未許可のため入力できません",
     models: {
       "ja-8bit": { name: "日本語 (8bit)", description: "日本語向けに追加学習したモデル。英語も認識できます" },
       "base-1.7b-8bit": { name: "標準 (8bit)", description: "追加学習していない元のモデル。日本語・英語を含む多くの言語を認識できます" },
+      "ja-gguf": { name: "日本語 (8bit)", description: "日本語向けに追加学習したモデル。英語も認識できます" },
+      "base-gguf": { name: "標準 (8bit)", description: "追加学習していない元のモデル。日本語・英語を含む多くの言語を認識できます" },
       "ja-bf16": { name: "日本語 (bf16)", description: "量子化していない元のモデル。容量とメモリの使用量 (約8.5GB) が大きい" },
     },
     modelDownloadFailed: "モデルのダウンロードに失敗しました。ネットワーク接続を確認してください。",
@@ -106,10 +110,16 @@ export const MOCK_UI_TEXTS: Record<Locale, MockUiTexts> = {
       runtime_missing: "The runtime and model aren’t installed",
       insert_failed: "Couldn’t type the text",
       vad_failed: "Couldn’t start speech detection",
+      gpu_unavailable: "Transcription can’t start because no usable GPU was found",
     },
     insertFailedNoAccessibility: "Can’t type because Accessibility access isn’t allowed",
     models: {
       "ja-8bit": { name: "Japanese (8-bit)", description: "Fine-tuned for Japanese. Also recognizes English" },
+      "ja-gguf": { name: "Japanese (8-bit)", description: "Fine-tuned for Japanese. Also recognizes English" },
+      "base-gguf": {
+        name: "Standard (8-bit)",
+        description: "The original model without extra training. Recognizes many languages, including English and Japanese",
+      },
       "base-1.7b-8bit": {
         name: "Standard (8-bit)",
         description: "The original model without extra training. Recognizes many languages, including English and Japanese",
@@ -185,3 +195,21 @@ export const MOCK_SPEECH_TEXTS: Record<Locale, MockSpeechTexts> = {
     ].join("\n"),
   },
 };
+
+/** Windows で OS の言語によって決まる名前 (アプリ・マイク) */
+export type MockWindowsTexts = { notepad: string; terminal: string; builtInMic: string };
+
+export const MOCK_WINDOWS_TEXTS: Record<Locale, MockWindowsTexts> = {
+  ja: { notepad: "メモ帳", terminal: "ターミナル", builtInMic: "マイク (Realtek(R) Audio)" },
+  en: { notepad: "Notepad", terminal: "Terminal", builtInMic: "Microphone (Realtek(R) Audio)" },
+};
+
+/** 既定の音声コマンド (話す言語ごと)。送信の主修飾キーは OS で変わる (Mac ⌘、Windows Ctrl。Rust の既定の組み立てと同じ) */
+export function mockVoiceCommands(locale: Locale, platform: Platform): VoiceCommand[] {
+  const commands = structuredClone(MOCK_SPEECH_TEXTS[locale].voiceCommands);
+  if (platform !== "windows") return commands;
+  return commands.map((c) => ({
+    ...c,
+    key: { ...c.key, modifiers: c.key.modifiers.map((m) => (m === "cmd" ? "ctrl" : m)) },
+  }));
+}

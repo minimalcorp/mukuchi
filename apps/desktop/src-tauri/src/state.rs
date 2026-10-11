@@ -13,6 +13,8 @@ use crate::i18n::Msg;
 
 /// 入力完了後に「完了」表示を保つ時間 (implementation-plan.md 2. 確定結果の表示)。
 pub const DONE_DISPLAY: Duration = Duration::from_secs(2);
+/// エラーをパネルに出しておく時間。フロントエンドの `ERROR_DISPLAY_MS` (usePanelModel.ts) と同じ値にする
+pub const ERROR_DISPLAY: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -37,6 +39,9 @@ pub enum ErrorCode {
     InsertFailed,
     /// 発話検出 (VAD) の初期化に失敗した。マイクの問題ではないため別のコードにする
     VadFailed,
+    /// Windows のみ: GPU が使えず CPU 実行への同意 (Settings.cpuInferenceAccepted) も無い
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    GpuUnavailable,
 }
 
 impl ErrorCode {
@@ -50,6 +55,7 @@ impl ErrorCode {
             Self::RuntimeMissing => Msg::ErrRuntimeMissing,
             Self::InsertFailed => Msg::ErrInsertFailed,
             Self::VadFailed => Msg::ErrVadFailed,
+            Self::GpuUnavailable => Msg::ErrGpuUnavailable,
         }
     }
 }
@@ -62,6 +68,12 @@ pub enum ErrorAction {
     SelectMicrophone,
     RestartAsr,
     StartSetup,
+    /// Windows のみ (gpu_unavailable): 設定 > 認識 を開いて CPU 実行への同意を求める
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    AcceptCpu,
+    /// Windows のみ (gpu_unavailable): GPU を判定し直す
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    ProbeGpu,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -106,6 +118,18 @@ impl AppError {
         log::warn!("文字起こしサーバーの停止: {detail}");
         Self::new(ErrorCode::AsrStopped, Some(ErrorAction::RestartAsr))
     }
+    /// GPU が使えない。ドライバーの問題 (GPU はあるのに Vulkan で使えない) なら再検出、無ければ CPU 実行への同意を促す
+    #[cfg(target_os = "windows")]
+    pub fn gpu_unavailable(driver_missing: bool) -> Self {
+        Self::new(
+            ErrorCode::GpuUnavailable,
+            Some(if driver_missing {
+                ErrorAction::ProbeGpu
+            } else {
+                ErrorAction::AcceptCpu
+            }),
+        )
+    }
     pub fn runtime_missing() -> Self {
         Self::new(ErrorCode::RuntimeMissing, Some(ErrorAction::StartSetup))
     }
@@ -116,6 +140,15 @@ impl AppError {
     pub fn insert_failed(detail: impl std::fmt::Display) -> Self {
         log::warn!("入力の失敗: {detail}");
         Self::new(ErrorCode::InsertFailed, None)
+    }
+    /// 前面のアプリが管理者として動いていて入力が届かない (Windows の UIPI)。code は insert_failed のまま、
+    /// 文言だけ原因を伝えるものにする (復旧の操作は無く、利用者がそのアプリを通常の権限で開き直す)。
+    /// 表示言語を変えると `relocalize` で insert_failed の通常の文言に戻る (発話ごとの結果で、残らないため)
+    pub fn insert_blocked_elevated() -> Self {
+        log::warn!("入力の失敗: 前面のアプリが管理者として動いている");
+        let mut e = Self::new(ErrorCode::InsertFailed, None);
+        e.message = Msg::ErrInsertElevated.to_string();
+        e
     }
 }
 
@@ -148,6 +181,8 @@ struct Facts {
     finalizing: usize,
     done_until: Option<Instant>,
     error: Option<AppError>,
+    /// error が付いた時刻 (表示中かの判定用。付いたままの再設定では更新しない)
+    error_since: Option<Instant>,
 }
 
 impl Facts {
@@ -281,6 +316,9 @@ impl StateManager {
     /// エラーを設定する。エラー時は音声入力を自動でOFFにする (呼び出し側で録音も止めること)。
     pub fn set_error(&self, error: AppError) {
         self.mutate(|f| {
+            if f.error.is_none() {
+                f.error_since = Some(Instant::now());
+            }
             f.error = Some(error);
             f.listening = false;
             f.speaking = false;
@@ -288,7 +326,17 @@ impl StateManager {
     }
 
     pub fn clear_error(&self) {
-        self.mutate(|f| f.error = None);
+        self.mutate(|f| {
+            f.error = None;
+            f.error_since = None;
+        });
+    }
+
+    /// エラーをパネルに表示している間か (付いてから `ERROR_DISPLAY` 以内)。
+    /// この間のショートカットは、やり直しではなく表示を消す操作 (OFF) として扱う (`Core::on_shortcut`)
+    pub fn error_displayed(&self) -> bool {
+        let f = &lock(&self.facts).0;
+        f.error.is_some() && f.error_since.is_some_and(|t| t.elapsed() < ERROR_DISPLAY)
     }
 
     /// 表示言語の変更時: エラーの文言を今の表示言語で作り直す (変われば status-changed が送られる)
@@ -384,6 +432,25 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_is_displayed_only_while_set_and_recent() {
+        let s = StateManager::new();
+        assert!(!s.error_displayed());
+        s.set_error(AppError::microphone_missing("x"));
+        assert!(s.error_displayed());
+        // 付いたままの再設定では表示の開始時刻を更新しない (出し直しで表示を延ばさない)
+        let since = lock(&s.facts).0.error_since;
+        s.set_error(AppError::microphone_missing("y"));
+        assert_eq!(lock(&s.facts).0.error_since, since);
+        s.clear_error();
+        assert!(!s.error_displayed());
+        // 表示の時間を過ぎたら表示中ではない
+        s.set_error(AppError::microphone_missing("z"));
+        lock(&s.facts).0.error_since =
+            Some(Instant::now() - ERROR_DISPLAY - Duration::from_millis(1));
+        assert!(!s.error_displayed());
+    }
 
     #[test]
     fn phase_transitions() {

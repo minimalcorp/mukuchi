@@ -11,6 +11,7 @@ import {
   CircleAlert,
   CircleCheck,
   CornerDownLeft,
+  Gpu,
   LoaderCircle,
   Mic,
   MicOff,
@@ -31,6 +32,7 @@ import {
   type PanelStyle,
 } from "@/lib/ipc";
 import { usePanelAnchor } from "@/lib/hooks";
+import { usePlatform } from "@/lib/platform";
 import { useAudioLevel } from "@/lib/audio-level";
 import { LevelMeter } from "@/components/app/level-meter";
 import { useLevelEnvelope } from "@/lib/level-envelope";
@@ -240,10 +242,12 @@ function useBodyMorph(kind: BodyKind | null) {
  */
 function PanelFrame({ children }: { children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
+  const platform = usePlatform();
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     let last = "";
+    let lastSize: Size | null = null;
     const send = () => {
       const rect = el.getBoundingClientRect();
       // 幅は偶数に切り上げる。Rust は中央のアンカーで floor(中心 - 幅/2) に置くため、奇数だと描画内容の中心が
@@ -253,17 +257,52 @@ function PanelFrame({ children }: { children: ReactNode }) {
       const key = `${width}x${height}`;
       if (key === last) return;
       last = key;
-      runCommand(commands.setPanelSize(width, height));
+      const shrinks =
+        lastSize !== null && (width < lastSize.width - SHRINK_MASK_MIN_PX || height < lastSize.height - SHRINK_MASK_MIN_PX);
+      lastSize = { width, height };
+      if (platform === "windows" && shrinks) {
+        maskWhileWindowShrinks(() => runCommand(commands.setPanelSize(width, height)));
+      } else {
+        runCommand(commands.setPanelSize(width, height));
+      }
     };
     const observer = new ResizeObserver(send);
     observer.observe(el);
     return () => observer.disconnect();
-  }, []);
+  }, [platform]);
   return (
     <div ref={ref} data-testid="panel-frame" className="pointer-events-none flex-none px-6 pt-4 pb-8">
       <div className="pointer-events-auto">{children}</div>
     </div>
   );
+}
+
+/** この大きさ (px) 以上縮む時だけ、ウィンドウを縮める間の描画を隠す (小さい縮みは古い描画のずれも小さい) */
+const SHRINK_MASK_MIN_PX = 6;
+/** 縮めた後の再描画を待つ上限。resize が届かなくても描画を戻す */
+const SHRINK_MASK_TIMEOUT_MS = 300;
+
+/**
+ * Windows: ウィンドウを縮めると、WebView2 の再描画が追いつくまでの 1〜数フレーム、縮める前の描画が新しい (小さい)
+ * ウィンドウの左上に合わせて切り取られて出る (ピルが端で切れる・ずれる。中央・下のアンカーでは縮める時に
+ * ウィンドウの左・上の端が動くため、再描画前の古い描画の位置が合わない)。
+ * 縮める間だけ描画を透明にし (隠れてから縮めるため 2 フレーム待つ)、再描画された (resize が届いて 2 フレーム後) ら戻す。
+ * 広げる時は描画の側が先に広がる (container の min-width) ため起きない
+ */
+function maskWhileWindowShrinks(apply: () => void) {
+  const root = document.documentElement;
+  root.style.opacity = "0";
+  let revealed = false;
+  const reveal = () => {
+    if (revealed) return;
+    revealed = true;
+    window.removeEventListener("resize", reveal);
+    clearTimeout(timeout);
+    requestAnimationFrame(() => requestAnimationFrame(() => (root.style.opacity = "")));
+  };
+  window.addEventListener("resize", reveal);
+  const timeout = setTimeout(reveal, SHRINK_MASK_TIMEOUT_MS);
+  requestAnimationFrame(() => requestAnimationFrame(apply));
 }
 
 /* ---------- OFF ---------- */
@@ -339,6 +378,7 @@ const ERROR_PILL: Record<AppError["code"], { icon: LucideIcon; iconClass: string
   runtime_missing: { icon: PackageX, iconClass: "text-amber-500" },
   insert_failed: { icon: CircleAlert, iconClass: "text-red-500" },
   vad_failed: { icon: CircleAlert, iconClass: "text-red-500" },
+  gpu_unavailable: { icon: Gpu, iconClass: "text-red-500" },
 };
 
 // Rust が新しいエラーコードを足した場合 (フロントが未対応) は Rust の表示用メッセージをそのまま出す
@@ -359,11 +399,11 @@ function ErrorPill({ error }: { error: AppError }) {
 }
 
 /**
- * 復旧操作 (メニューバーの復旧項目と同じ)。デザイン 06 のピルは文言のみだが、パネルからも直接復旧できるようにした。
+ * 復旧操作 (メニューバー・タスクトレイの復旧項目と同じ)。デザイン 06 のピルは文言のみだが、パネルからも直接復旧できるようにした。
  */
 function ErrorActionButton({ error }: { error: AppError }) {
-  const { t } = useI18n();
-  const action = errorActionView(error.action, t);
+  const { t, platform } = useI18n();
+  const action = errorActionView(error.action, t, platform);
   if (!action) return null;
   const Icon = action.icon;
   return (

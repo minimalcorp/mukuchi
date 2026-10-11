@@ -1,0 +1,76 @@
+# Windows の開発環境 (process-compose.yaml の Windows 版)。起動・停止は Makefile 経由 (make up / make down。Makefile.windows)。
+# Mac との違い:
+# - process-compose は Windows で UDS と detached (-D) を持たない (v1.122 の cmd/root.go)。API は TCP のループバック
+#   (127.0.0.1、ポートは Makefile.windows の MUKUCHI_PC_PORT) + トークン (--token-file) で、裏での起動は scripts/dev-windows.mjs が行う
+# - ASR は asr-server (Python・MLX) ではなく同梱の llama-server (Vulkan 版)。アプリは MUKUCHI_ASR_URL に接続する (Mac と同じ)
+# - コマンドは cmd /C で実行され、${VAR} の展開は YAML の解釈より前に行われる。パスの \ や空白で壊れないよう、
+#   パスはコマンドに書かず scripts/llama-dev-server.mjs が環境変数から組み立てる
+# namespace は Mac と同じ (desktop: asr・app、web: web)。working_dir はこのファイル (リポジトリ直下) からの相対パス
+version: "0.5"
+
+log_location: ./.process-compose/all.log
+log_configuration:
+  disable_json: true
+  fields_order: ["process", "message"]
+  flush_each_line: true
+  no_metadata: true
+
+processes:
+  asr:
+    namespace: desktop
+    working_dir: ./apps/desktop
+    # モデル (MUKUCHI_MODEL@MUKUCHI_MODEL_REVISION の GGUF 2 ファイル) は make setup で MUKUCHI_DEV_DATA に取得済みの前提。
+    # GPU (Vulkan) が無ければ CPU にせずエラーで止まる (MUKUCHI_DEV_LLAMA_DEVICE=none で CPU。scripts/llama-dev-server.mjs)
+    command: node scripts/llama-dev-server.mjs
+    readiness_probe:
+      http_get:
+        host: 127.0.0.1
+        port: 18765
+        path: /health
+        scheme: http
+      # llama-server は読み込み中 /health が 503。読み込みは数秒〜数十秒
+      initial_delay_seconds: 2
+      period_seconds: 2
+      timeout_seconds: 10
+      failure_threshold: 150
+    availability:
+      restart: on_failure
+      max_restarts: 3
+    # Windows の停止は taskkill /T /F (process-compose の stopper_windows.go)。signal は使われない
+    shutdown:
+      timeout_seconds: 10
+
+  app:
+    namespace: desktop
+    working_dir: ./apps/desktop
+    command: pnpm run tauri:dev:windows
+    environment:
+      # アプリは ASR サーバーを自分で起動せず、ここに接続する (docs/architecture.md)。この接続先にはキーを付けない
+      - "MUKUCHI_ASR_URL=http://127.0.0.1:18765"
+    # MUKUCHI_DEV_SHOW_SETUP 等は process-compose の環境をそのまま継承する (make up-fresh が up の時だけ渡す)
+    depends_on:
+      asr:
+        condition: process_healthy
+    shutdown:
+      timeout_seconds: 10
+
+  web:
+    namespace: web
+    working_dir: ./apps/web
+    # readiness probe・make ps と同じ 127.0.0.1 に固定する (process-compose.yaml と同じ)
+    command: pnpm run dev --host 127.0.0.1
+    readiness_probe:
+      http_get:
+        host: 127.0.0.1
+        port: 5174
+        path: /
+        scheme: http
+      initial_delay_seconds: 2
+      period_seconds: 2
+      timeout_seconds: 5
+      failure_threshold: 30
+    availability:
+      restart: on_failure
+      max_restarts: 3
+    shutdown:
+      timeout_seconds: 10

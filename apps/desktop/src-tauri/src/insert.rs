@@ -21,6 +21,13 @@ pub struct FrontApp {
     pub bundle_id: Option<String>,
 }
 
+/// 前面のアプリに入力が届かない (Windows: 管理者として動いているアプリ。UIPI で SendInput が捨てられる)。
+/// InsertBackend がこのエラーを返すと、原因を伝える文言の insert_failed にする
+#[derive(Debug, thiserror::Error)]
+#[error("前面のアプリが管理者として動いているため入力できません")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub struct BlockedByElevation;
+
 /// OSへの入力操作。macOS実装とテスト用のモックを差し替える。
 pub trait InsertBackend: Send + Sync {
     fn frontmost_app(&self) -> Option<FrontApp>;
@@ -248,10 +255,15 @@ pub fn handle_text(
     };
     outcome.unwrap_or_else(|e| {
         log::error!("発話 {id} の入力に失敗: {e:#}");
+        let error = if e.downcast_ref::<BlockedByElevation>().is_some() {
+            AppError::insert_blocked_elevated()
+        } else {
+            AppError::insert_failed(format!("{e:#}"))
+        };
         UtteranceResult::Failed {
             id,
             text: text.to_string(),
-            error: AppError::insert_failed(format!("{e:#}")),
+            error,
         }
     })
 }
@@ -575,5 +587,40 @@ mod tests {
         assert_eq!(v["submitted"], true);
         let v = serde_json::to_value(UtteranceResult::Discarded { id: 1 }).unwrap();
         assert_eq!(v, serde_json::json!({ "kind": "discarded", "id": 1 }));
+    }
+
+    /// 管理者として動くアプリ (Windows の UIPI) への入力は、原因を伝える文言の insert_failed になる
+    #[test]
+    fn blocked_by_elevation_has_its_own_message() {
+        struct Elevated;
+        impl InsertBackend for Elevated {
+            fn frontmost_app(&self) -> Option<FrontApp> {
+                Some(FrontApp {
+                    name: "Admin".into(),
+                    bundle_id: Some("admin.exe".into()),
+                })
+            }
+            fn is_trusted(&self) -> bool {
+                true
+            }
+            fn paste_text(&self, _text: &str) -> Result<()> {
+                Err(BlockedByElevation.into())
+            }
+            fn send_key(&self, _key: &KeyCombo) -> Result<()> {
+                Err(BlockedByElevation.into())
+            }
+        }
+        for text in ["こんにちは", "確定"] {
+            match handle_text(1, text, &Elevated, &cfg()) {
+                UtteranceResult::Failed { error, .. } => {
+                    assert_eq!(error.code, ErrorCode::InsertFailed);
+                    assert_eq!(
+                        error.message,
+                        crate::i18n::Msg::ErrInsertElevated.to_string()
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+        }
     }
 }

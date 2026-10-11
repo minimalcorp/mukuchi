@@ -9,6 +9,7 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::audio::{self, AudioDevice};
 use crate::core::Core;
+use crate::gpu::GpuStatus;
 use crate::i18n::{Locale, Msg};
 use crate::permissions::{self, Pane, Permissions};
 use crate::provisioning::models::ModelInfo;
@@ -122,7 +123,7 @@ pub struct RunningApp {
 
 #[tauri::command]
 pub fn list_running_apps() -> Vec<RunningApp> {
-    crate::macos::running_apps()
+    crate::platform::running_apps()
         .into_iter()
         .filter_map(|a| {
             Some(RunningApp {
@@ -134,9 +135,12 @@ pub fn list_running_apps() -> Vec<RunningApp> {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppInfo {
     version: String,
     build: String,
+    /// ビルドした OS ("macos" | "windows")。フロントエンドが OS ごとの文言・キー表記を選ぶ
+    platform: &'static str,
 }
 
 #[tauri::command]
@@ -144,6 +148,7 @@ pub fn get_app_info(app: tauri::AppHandle) -> AppInfo {
     AppInfo {
         version: app.package_info().version.to_string(),
         build: env!("MUKUCHI_BUILD").to_string(),
+        platform: crate::platform::NAME,
     }
 }
 
@@ -255,7 +260,7 @@ pub fn open_logs_folder(app: tauri::AppHandle) -> CmdResult<()> {
     let open = || -> anyhow::Result<()> {
         let dir = app.path().app_log_dir()?;
         std::fs::create_dir_all(&dir)?;
-        crate::macos::open_path(&dir)
+        crate::platform::open_path(&dir)
     };
     open().map_err(internal(Msg::OpenLogsFailed))
 }
@@ -301,6 +306,18 @@ pub fn show_panel_menu(app: AppHandle, x: f64, y: f64) -> CmdResult<()> {
 #[tauri::command]
 pub fn get_panel_anchor(app: AppHandle) -> windows::geometry::PanelAnchor {
     windows::panel_anchor(&app)
+}
+
+/// ASR を動かす GPU の判定結果 (Windows。まだなら判定する。Mac は常に ok)
+#[tauri::command]
+pub async fn get_gpu_status(core: State<'_, Arc<Core>>) -> CmdResult<GpuStatus> {
+    Ok(core.gpu.status().await)
+}
+
+/// GPU の再検出 (gpu_unavailable の復旧・設定の「再検出」)
+#[tauri::command]
+pub async fn probe_gpu(core: State<'_, Arc<Core>>) -> CmdResult<GpuStatus> {
+    Ok(core.inner().probe_gpu().await)
 }
 
 #[tauri::command]

@@ -11,7 +11,9 @@
 use std::sync::atomic::AtomicU64;
 
 use super::*;
+#[cfg(not(target_os = "windows"))]
 use crate::asr_process::AsrProcess;
+#[cfg(not(target_os = "windows"))]
 use crate::paths::Resources;
 use hf::{Cache, Downloader};
 
@@ -24,7 +26,8 @@ fn env_path(name: &str) -> PathBuf {
 fn real_hf_range_resume() {
     tauri::async_runtime::block_on(async {
         let hf_home = env_path("MUKUCHI_IT_HF_HOME");
-        let model = models::Catalog::distributed()
+        // MLX のリポジトリの小さいファイル (config.json・tokenizer.json) を使う (どちらの OS でも確かめられる)
+        let model = models::Catalog::for_platform(models::Platform::MacosAarch64)
             .recommended(crate::i18n::Locale::Ja)
             .hf
             .clone();
@@ -102,8 +105,10 @@ fn real_hf_range_resume() {
     });
 }
 
+/// Mac の実行環境 (uv・Python・MLX) を使う。Windows の通しの確認は llama_runtime.rs
 #[test]
 #[ignore]
+#[cfg(not(target_os = "windows"))]
 fn real_provision_and_serve() {
     tauri::async_runtime::block_on(async {
         let paths = DataPaths::new(env_path("MUKUCHI_IT_DATA_DIR"));
@@ -191,7 +196,7 @@ fn real_provision_and_serve() {
         let (_tx, rx) = Cancel::pair();
         let url = asr.wait_ready(rx.receiver()).await.unwrap();
         println!("server: {url}");
-        let client = HttpAsrClient::new(url.clone()).unwrap();
+        let client = crate::asr::connect(url.clone()).unwrap();
         println!("health: {}", client.health().await.unwrap());
         let wav = std::fs::read(env_path("MUKUCHI_IT_WAV")).unwrap();
         let tr = client
@@ -215,11 +220,18 @@ fn real_catalog_sizes() {
     tauri::async_runtime::block_on(async {
         let http = hf::http_client().unwrap();
         let (_tx, never) = Cancel::pair();
-        for m in models::Catalog::distributed().iter() {
-            let files = hf::list_files(&http, &m.hf, &never).await.unwrap();
-            let total: u64 = files.iter().map(|f| f.size).sum();
-            println!("{}: {} files, {total} bytes", m.id, files.len());
-            assert_eq!(total, m.size_bytes, "{}", m.id);
+        // 両 OS のカタログ (どちらの OS でも確かめられる)
+        for platform in models::Platform::ALL {
+            for m in models::Catalog::for_platform(platform).iter() {
+                let files = hf::list_files(&http, &m.hf, &never).await.unwrap();
+                let total: u64 = files.iter().map(|f| f.size).sum();
+                println!(
+                    "{platform:?} {}: {} files, {total} bytes",
+                    m.id,
+                    files.len()
+                );
+                assert_eq!(total, m.size_bytes, "{}", m.id);
+            }
         }
     });
 }

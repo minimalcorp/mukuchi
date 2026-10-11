@@ -3,9 +3,13 @@
  * 数値・サイズ・時刻は Intl で整形した文字列を受け取る (ここに単位や桁区切りを直書きしない)。
  * 文中に要素を差し込む文言は rich() で組み立てる (語順は言語ごとに違うため)。
  * Rust から届く文言 (AppError.message・各 error・reject の文言・モデルの名前と説明) はここに置かない (Rust が表示言語で作る)
+ *
+ * OS で変わる文言・キー表記だけを { macos, windows } (PerOs) にし、使う側は useI18n() の os() で取る (例 os(t.common.openSystemSettings))。
+ * OS で変わらない文言は 1 つのまま書く。Windows でしか出ない文言 (gpu) も 1 つのまま書く
  */
 import type { ReactNode } from "react";
 import type { Locale } from "@/lib/ipc";
+import type { PerOs } from "@/lib/platform";
 import { rich } from "./rich";
 
 export const ja = {
@@ -13,7 +17,7 @@ export const ja = {
   languageName: { ja: "日本語", en: "英語" } satisfies Record<Locale, string>,
 
   common: {
-    openSystemSettings: "システム設定を開く",
+    openSystemSettings: { macos: "システム設定を開く", windows: "Windows の設定を開く" } satisfies PerOs<string>,
     cancel: "キャンセル",
     close: "閉じる",
     delete: "削除",
@@ -44,12 +48,15 @@ export const ja = {
     seconds: (value: string) => `${value} 秒`,
   },
 
+  /** 復旧操作のボタン (AppError.action)。OS で変わるものだけ PerOs */
   errorActions: {
     open_accessibility: "システム設定を開く",
-    open_microphone: "システム設定を開く",
+    open_microphone: { macos: "システム設定を開く", windows: "Windows の設定を開く" } satisfies PerOs<string>,
     select_microphone: "マイクを選択",
     restart_asr: "再起動",
     start_setup: "セットアップを開く",
+    accept_cpu: "CPU で続ける",
+    probe_gpu: "再検出",
   },
 
   inputMode: {
@@ -73,7 +80,10 @@ export const ja = {
   shortcut: {
     label: "ショートカット",
     help: "どのアプリを使っていても押せます。他のアプリと同じキーだと動かないことがあります",
-    recordingGuide: "⌃ ⌥ ⇧ ⌘ のいずれかと一緒に押してください。esc で取り消し、⌫ でなしにします",
+    recordingGuide: {
+      macos: "⌃ ⌥ ⇧ ⌘ のいずれかと一緒に押してください。esc で取り消し、⌫ でなしにします",
+      windows: "Ctrl・Alt・Shift・Win のいずれかと一緒に押してください。Esc で取り消し、Backspace でなしにします",
+    } satisfies PerOs<string>,
     unsupportedGuide: "このキーはショートカットに使えません。別のキーを押してください。esc で取り消します",
     pressKeys: "キーを押してください",
     none: "なし",
@@ -94,6 +104,7 @@ export const ja = {
       runtime_missing: "モデルがありません",
       insert_failed: "入力できませんでした",
       vad_failed: "発話検出を開始できません",
+      gpu_unavailable: "GPU を使えません",
     },
     idle: "待機中",
     speaking: "認識中",
@@ -104,13 +115,45 @@ export const ja = {
     commandSent: (key: ReactNode): ReactNode => rich(key, " を送信しました"),
   },
 
+  /**
+   * GPU の判定と CPU 実行の同意 (Windows のみ。docs/architecture.md「GPU の判定と CPU 実行の同意」)。
+   * セットアップの差し込み画面・設定の「認識」・gpu_unavailable の復旧で共通
+   */
+  gpu: {
+    heading: "文字起こしに使うデバイス",
+    help: "文字起こしは GPU で行います。GPU を使えない PC では、同意すると CPU で動かせます（認識に時間がかかります）",
+    detect: "再検出",
+    checking: "GPU を確認しています…",
+    continueCpu: "CPU で続ける",
+    continueCpuEllipsis: "CPU で続ける…",
+    noneTitle: "GPU が見つかりません",
+    driverTitle: "GPU を使えません",
+    noneLead: "この PC に、文字起こしに使える GPU が見つかりません。",
+    driverLead: "GPU は見つかりましたが、文字起こしに使えません。GPU のドライバーが古いか、正しく入っていない可能性があります。",
+    cpuWarning:
+      "CPU でも動きますが、認識に 1〜3 秒以上かかり、使い心地が大きく下がります。GPU のある PC での利用をおすすめします。",
+    driverHint: "GPU のメーカー（NVIDIA・AMD・Intel）のサイトから最新のドライバーを入れて、再検出してください。",
+    noneHint: "GPU があるのに見つからない場合は、GPU のドライバーを更新してから再検出してください。",
+    consentTitle: "CPU で続けますか？",
+    cancel: "やめる",
+    gpu: "GPU",
+    integrated: "内蔵 GPU",
+    cpu: "CPU",
+    okSub: "GPU で文字起こしします",
+    integratedSub: "内蔵 GPU で文字起こしします。認識に時間がかかることがあります",
+    cpuSub: "GPU を使えないため、CPU で文字起こしします。認識に時間がかかります",
+  },
+
   setup: {
     windowTitle: "mukuchi セットアップ",
     progress: (step: number, total: number) => `${step} / ${total}`,
     welcome: {
       title: "mukuchi へようこそ",
       lead: "話すだけで文字を入力できる音声入力アプリです。いくつかの準備を済ませると使えるようになります。",
-      privacy: "文字起こしはこの Mac の中で行い、音声は外部に送信しません",
+      privacy: {
+        macos: "文字起こしはこの Mac の中で行い、音声は外部に送信しません",
+        windows: "文字起こしはこの PC の中で行い、音声は外部に送信しません",
+      } satisfies PerOs<string>,
       download: "実行環境とモデルをダウンロードします",
       downloadWithSize: (size: string) => `実行環境とモデル（約 ${size}）をダウンロードします`,
       duration: "所要時間の目安は 5〜10 分です",
@@ -123,14 +166,22 @@ export const ja = {
     },
     permissions: {
       title: "権限を許可してください",
-      lead: "2 つとも許可すると次に進めます。",
+      // Windows はマイクのみ (アクセシビリティの権限がない)
+      lead: { macos: "2 つとも許可すると次に進めます。", windows: "マイクを許可すると次に進めます。" } satisfies PerOs<string>,
       microphone: "マイク",
       microphoneSub: "発話を聞き取るために使います",
       accessibility: "アクセシビリティ",
       accessibilityHelp: "他のアプリのカーソル位置に文字とキー操作を送るために必要です",
       accessibilitySub: "文字の入力に使います",
-      guideMicNotDetermined: "マイクの使用を許可してください。確認のダイアログが表示されます。",
-      guideMicDenied: "システム設定のマイクで mukuchi をオンにしてください。許可するとここに自動で反映されます。",
+      guideMicNotDetermined: {
+        macos: "マイクの使用を許可してください。確認のダイアログが表示されます。",
+        windows: "マイクの使用を許可してください。",
+      } satisfies PerOs<string>,
+      guideMicDenied: {
+        macos: "システム設定のマイクで mukuchi をオンにしてください。許可するとここに自動で反映されます。",
+        windows:
+          "Windows の設定のマイクで「マイクへのアクセス」と「デスクトップ アプリがマイクにアクセスできるようにする」をオンにしてください。許可するとここに自動で反映されます。",
+      } satisfies PerOs<string>,
       guideAccessibility: "システム設定で mukuchi をオンにしてください。許可するとここに自動で反映されます。",
     },
     download: {
@@ -142,7 +193,8 @@ export const ja = {
       titleRunning: "実行環境とモデルをダウンロードしています",
       overall: "全体",
       overallProgress: "全体の進捗",
-      runtime: "Python 実行環境",
+      // Windows は同梱の llama.cpp (llama-server) を配置する
+      runtime: { macos: "Python 実行環境", windows: "実行環境 (llama.cpp)" } satisfies PerOs<string>,
       /** モデルの一覧を取得する前の名前 (取得後は ModelInfo.name) */
       modelFallback: "音声認識モデル",
       verify: "動作確認",
@@ -182,12 +234,28 @@ export const ja = {
     },
     done: {
       title: "準備ができました",
-      lead: "mukuchi はメニューバーに常駐します。設定はメニューバーのアイコンから開けます。",
-      hintOneShot: (keys: ReactNode): ReactNode =>
-        rich(keys, " を押すと1回聞き取ります。パネルやメニューバーのアイコンからも始められます"),
-      hintWithKeys: (keys: ReactNode): ReactNode => rich("オン／オフはパネル・メニューバーのアイコン・", keys, "で切り替えます"),
-      hintNoKeys: "オン／オフはパネルか、メニューバーのアイコンから切り替えます",
+      lead: {
+        macos: "mukuchi はメニューバーに常駐します。設定はメニューバーのアイコンから開けます。",
+        windows: "mukuchi はタスクトレイに常駐します。設定はタスクトレイのアイコンから開けます。",
+      } satisfies PerOs<string>,
+      hintOneShot: {
+        macos: (keys: ReactNode): ReactNode =>
+          rich(keys, " を押すと1回聞き取ります。パネルやメニューバーのアイコンからも始められます"),
+        windows: (keys: ReactNode): ReactNode =>
+          rich(keys, " を押すと1回聞き取ります。パネルやタスクトレイのアイコンからも始められます"),
+      },
+      hintWithKeys: {
+        macos: (keys: ReactNode): ReactNode => rich("オン／オフはパネル・メニューバーのアイコン・", keys, "で切り替えます"),
+        windows: (keys: ReactNode): ReactNode => rich("オン／オフはパネル・タスクトレイのアイコン・", keys, "で切り替えます"),
+      },
+      hintNoKeys: {
+        macos: "オン／オフはパネルか、メニューバーのアイコンから切り替えます",
+        windows: "オン／オフはパネルか、タスクトレイのアイコンから切り替えます",
+      } satisfies PerOs<string>,
       launchAtLogin: "ログイン時に起動",
+      // Windows のみ (OsFeatures.shortcutConflictNotice)。Mac は他アプリとの衝突を検出できないため出さない
+      shortcutConflict: (keys: ReactNode): ReactNode =>
+        rich("ショートカット ", keys, " は他のアプリが使っているため登録できません。別のキーを選んでください"),
     },
   },
 
@@ -279,7 +347,13 @@ export const ja = {
       missing: "未導入",
       missingSub: "実行環境とモデルがありません",
       loaded: "読み込み済み",
-      loadedSub: "Apple Silicon GPU で実行中",
+      // Windows は GPU の判定結果 (runningOn・runningOnCpu) が届くまでの表示
+      loadedSub: { macos: "Apple Silicon GPU で実行中", windows: "GPU で実行中" } satisfies PerOs<string>,
+      /** device は GPU の名前 (GpuStatus.selected) */
+      runningOn: (device: string) => `${device} で実行中`,
+      runningOnCpu: "CPU で実行中",
+      gpuUnavailable: "GPU を使えません",
+      gpuUnavailableSub: "GPU が見つからないため、文字起こしを開始していません",
       speechLanguage: "話す言語",
       speechLanguageHelp:
         "文字起こしする言語です。おすすめのモデルと、音声コマンドの既定の言い方 (変更していない場合) もこの言語に合わせます",
@@ -324,14 +398,18 @@ export const ja = {
       accessibility: "アクセシビリティ",
       accessibilitySub: "文字とキー操作の入力に使います",
       micNotDetermined: "マイクの使用がまだ許可されていません。許可すると音声入力を使えます。",
-      micDenied:
-        "許可されていないため、音声を聞き取れません。システム設定 > プライバシーとセキュリティ > マイク で mukuchi をオンにしてください。",
+      micDenied: {
+        macos:
+          "許可されていないため、音声を聞き取れません。システム設定 > プライバシーとセキュリティ > マイク で mukuchi をオンにしてください。",
+        windows:
+          "許可されていないため、音声を聞き取れません。Windows の設定 > プライバシーとセキュリティ > マイク で「マイクへのアクセス」と「デスクトップ アプリがマイクにアクセスできるようにする」をオンにしてください。",
+      } satisfies PerOs<string>,
       accessibilityDenied:
         "許可されていないため、文字起こしはできますが入力できません。システム設定 > プライバシーとセキュリティ > アクセシビリティ で mukuchi をオンにしてください。",
     },
 
     storage: {
-      runtime: "Python 実行環境",
+      runtime: { macos: "Python 実行環境", windows: "実行環境 (llama.cpp)" } satisfies PerOs<string>,
       models: "モデル",
       other: "設定とログ",
       used: "使用中",
@@ -339,16 +417,26 @@ export const ja = {
       deleteRuntime: "実行環境とモデルのみ削除",
       deleteRuntimeSub: "設定は残ります。再び使うにはセットアップが必要です。",
       uninstall: "完全にアンインストール",
-      uninstallSub: "すべてのデータとアプリ本体を削除します。",
+      // Windows はアンインストーラーを起動してアプリを終了する (docs/architecture.md「同梱物・配布 (Windows)」)
+      uninstallSub: {
+        macos: "すべてのデータとアプリ本体を削除します。",
+        windows: "アンインストーラーを起動して、すべてのデータとアプリ本体を削除します。",
+      } satisfies PerOs<string>,
       uninstallEllipsis: "アンインストール…",
       deleteRuntimeTitle: "実行環境とモデルを削除しますか？",
       deleteRuntimeDescription: "音声入力は使えなくなります。設定とログは残ります。再び使うときはセットアップからダウンロードし直します。",
       uninstallTitle: "mukuchi を完全にアンインストールしますか？",
       uninstallDone: "アンインストールしました。アプリを終了します。",
-      uninstallRunning: "アンインストールしています… 完了するとアプリが終了します。",
+      uninstallRunning: {
+        macos: "アンインストールしています… 完了するとアプリが終了します。",
+        windows: "アンインストーラーを起動しています… アプリは終了します。",
+      } satisfies PerOs<string>,
       uninstallConfirm: "以下を削除します。この操作は取り消せません。",
       uninstallButton: "アンインストール",
-      uninstallCount: (count: number) => `${count} 項目（ログイン項目と権限の許可も解除します）`,
+      uninstallCount: {
+        macos: (count: number) => `${count} 項目（ログイン項目と権限の許可も解除します）`,
+        windows: (count: number) => `${count} 項目（ログイン時の起動の登録も解除します）`,
+      },
       uninstallTotal: (size: string) => `合計 ${size}`,
     },
 
@@ -357,7 +445,7 @@ export const ja = {
       license: "ライセンス",
       show: "表示",
       logs: "ログ",
-      openInFinder: "Finder で開く",
+      showInFolder: { macos: "Finder で開く", windows: "エクスプローラーで開く" } satisfies PerOs<string>,
       updates: "アップデート",
       install: "再起動してアップデート",
       check: "アップデートを確認",

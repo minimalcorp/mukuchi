@@ -1,7 +1,7 @@
 [package]
 name = "mukuchi"
 version = "0.4.2"
-description = "macOS voice input app"
+description = "Voice input app"
 authors = ["minimalcorp"]
 edition = "2021"
 
@@ -62,6 +62,20 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 objc2-application-services = { version = "0.3", default-features = false, features = ["std", "HIServices", "AXUIElement"] }
 # ログイン時に起動 (SMAppService, macOS 13+)。tauri-plugin-autostart は LaunchAgent/AppleScript 方式のみのため使わない
 objc2-service-management = { version = "0.3", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
+
+[target.'cfg(windows)'.dependencies]
+# OS 依存部 (src/platform/windows/)。版は tauri (tao・wry) と同じ 0.62 にそろえる (二重にビルドしない)
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_JobObjects", "Win32_Graphics_Dxgi", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D12"] }
+# ログイン時に起動 (HKCU の Run)・マイクの許可の状態の読み取り。tauri と同じ版
+windows-registry = "0.6"
+# llama-server への音声 (WAV) の送信 (input_audio は base64)。tauri と同じ版
+base64 = "0.22"
+# llama-server の API キー (起動ごとに作る乱数)。tauri と同じ版
+getrandom = "0.3"
+
+[target.'cfg(windows)'.dev-dependencies]
+# examples/win_spike.rs (実機の検証) だけが使う: 前面の変化の監視・クリップボードの履歴の確認 (WinRT は STA)
+windows = { version = "0.62", features = ["Win32_UI_Accessibility", "Win32_System_Com", "ApplicationModel_DataTransfer", "Foundation", "Foundation_Collections"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "macros"] }

@@ -1,5 +1,6 @@
 import type { Messages } from "@/i18n/context";
-import type { KeyCombo, Locale, Modifier } from "./ipc";
+import type { AutoSubmitKey, KeyCombo, Locale, Modifier } from "./ipc";
+import type { PerOs, Platform } from "./platform";
 
 /** 小数の桁を固定して表示言語の書式で出す (桁区切り・小数点の記号は Intl に任せる) */
 function formatNumber(value: number, digits: number, locale: Locale): string {
@@ -50,7 +51,11 @@ export function formatCheckedAt(unixSeconds: number, locale: Locale, t: Messages
   return t.format.dateTime(date, time);
 }
 
-const MOD_LABEL: Record<Modifier, string> = { cmd: "⌘", shift: "Shift", option: "Option", ctrl: "Control" };
+/** 修飾キーの表記。Windows は cmd が Win キー、option が Alt */
+const MOD_LABEL: PerOs<Record<Modifier, string>> = {
+  macos: { cmd: "⌘", shift: "Shift", option: "Option", ctrl: "Control" },
+  windows: { cmd: "Win", shift: "Shift", option: "Alt", ctrl: "Ctrl" },
+};
 const MOD_ORDER: Modifier[] = ["ctrl", "option", "shift", "cmd"];
 const KEY_LABEL: Record<KeyCombo["key"], string> = {
   enter: "Enter",
@@ -59,12 +64,27 @@ const KEY_LABEL: Record<KeyCombo["key"], string> = {
   backspace: "Backspace",
 };
 
-/** 「⌘ + Enter」「Shift + Enter」の形 (デザインの表記) */
-export function formatKeyCombo(combo: KeyCombo): string {
-  const mods = MOD_ORDER.filter((m) => combo.modifiers.includes(m)).map((m) => MOD_LABEL[m]);
+/** 「⌘ + Enter」「Shift + Enter」の形 (デザインの表記。Windows は「Ctrl + Enter」) */
+export function formatKeyCombo(combo: KeyCombo, platform: Platform): string {
+  const labels = MOD_LABEL[platform];
+  const mods = MOD_ORDER.filter((m) => combo.modifiers.includes(m)).map((m) => labels[m]);
   return [...mods, KEY_LABEL[combo.key]].join(" + ");
 }
 
-export const MODIFIER_LABELS = MOD_LABEL;
+/** 修飾キーの表記 (OS ごと) */
+export function modifierLabels(platform: Platform): Record<Modifier, string> {
+  return MOD_LABEL[platform];
+}
+
+/** 自動送信の送信キー (Settings.autoSubmitKey) の表示用。modEnter は主修飾キー + Enter (Mac は ⌘、Windows は Ctrl)。実際に送るキーは Rust が OS ごとに決める */
+const AUTO_SUBMIT_KEYS: PerOs<Record<AutoSubmitKey, KeyCombo>> = {
+  macos: { enter: { key: "enter", modifiers: [] }, modEnter: { key: "enter", modifiers: ["cmd"] } },
+  windows: { enter: { key: "enter", modifiers: [] }, modEnter: { key: "enter", modifiers: ["ctrl"] } },
+};
+
+export function autoSubmitKeyCombo(key: AutoSubmitKey, platform: Platform): KeyCombo {
+  return AUTO_SUBMIT_KEYS[platform][key];
+}
+
 export const MODIFIER_ORDER = MOD_ORDER;
 export const KEY_LABELS = KEY_LABEL;

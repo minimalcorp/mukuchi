@@ -1473,14 +1473,22 @@ mod tests {
         assert!(b.disk_bytes > 0);
         assert!(!b.selected, "取得しても選択は変えない");
         assert!(fx.rec().has_model(&fx.def("b").hf.version()));
-        // 状態の変化を送っている
-        let states: Vec<ModelState> = fx
-            .events
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|l| l[1].state)
-            .collect();
+        // 状態の変化を送っている。完了の通知 (finished) は最後の送信より先に立つので、送信が済むまで待つ
+        let states = || -> Vec<ModelState> {
+            fx.events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|l| l[1].state)
+                .collect()
+        };
+        for _ in 0..1000 {
+            if states().last() == Some(&ModelState::Downloaded) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let states = states();
         assert!(states.contains(&ModelState::Downloading), "{states:?}");
         assert_eq!(states.last(), Some(&ModelState::Downloaded));
         // 取得済みなら何もしない

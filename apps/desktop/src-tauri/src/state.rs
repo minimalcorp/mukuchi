@@ -447,7 +447,8 @@ mod tests {
         assert!(!s.error_displayed());
         // 表示の時間を過ぎたら表示中ではない
         s.set_error(AppError::microphone_missing("z"));
-        lock(&s.facts).0.error_since = Some(Instant::now() - ERROR_DISPLAY - Duration::from_millis(1));
+        lock(&s.facts).0.error_since =
+            Some(Instant::now() - ERROR_DISPLAY - Duration::from_millis(1));
         assert!(!s.error_displayed());
     }
 

@@ -1,13 +1,16 @@
 import {
+  CtaExtras,
   CtaNote,
   DownloadButton,
+  DownloadMeta,
+  OsDownloadLink,
   PlatformList,
   ShareButtons,
-  usePlatform,
   useShareActions,
   type ShareActions,
 } from "@/components/cta";
 import { Demo } from "@/components/demo";
+import { PageEnvProvider, useAvail, usePageEnv } from "@/components/env";
 import { track, type CtaLocation } from "@/lib/analytics";
 import { Badge, ButtonLink, Icon, Keycap } from "@/components/ui";
 import {
@@ -22,12 +25,12 @@ import {
 import { useI18n } from "@/i18n/context";
 import { LOCALES, LOCALE_NAMES, LOCALE_PATHS, type Locale } from "@/i18n/locales";
 import { rememberLocaleChoice } from "@/i18n/redirect";
-import type { Platform } from "@/lib/platform";
 import {
   COMPANY_URL,
   COPYRIGHT_PREFIX,
   GITHUB_URL,
-  SHORTCUT_KEYS,
+  KEYS,
+  OSES,
   SITE_NAME,
   VERSION,
   googlePartnerSitesUrl,
@@ -46,23 +49,29 @@ const trackGithub = (location: CtaLocation) => () =>
 
 /** LP の本体。言語ごとのルート (routes/home.tsx・routes/home.en.tsx) が辞書を渡して描く */
 export function HomePage() {
-  const platform = usePlatform();
+  return (
+    <PageEnvProvider>
+      <Page />
+    </PageEnvProvider>
+  );
+}
+
+function Page() {
+  const { platform } = usePageEnv();
   const share = useShareActions();
-  // 未判定の間は PC 版の配置では「判定不可の Mac」として出す (デザインの初期値と同じ)
-  const pcPlatform: Platform = platform ?? "mac-unknown";
   // スマホ版の配置で URL のコピー・共有を出すのは、スマホと判定した時と未判定の間
   const spShare = platform === null || platform === "mobile";
 
   return (
     <>
-      <Header platform={pcPlatform} />
+      <Header />
       <main>
-        <Hero platform={platform} pcPlatform={pcPlatform} spShare={spShare} share={share} />
+        <Hero spShare={spShare} share={share} />
         <Modes />
         <Features />
         <Privacy />
         <SetupAndRequirements />
-        <FinalCta pcPlatform={pcPlatform} spShare={spShare} share={share} />
+        <FinalCta spShare={spShare} share={share} />
       </main>
       <Footer />
     </>
@@ -109,7 +118,7 @@ function LanguageSwitch({
   );
 }
 
-function Header({ platform }: { platform: Platform }) {
+function Header() {
   const { locale, m } = useI18n();
   return (
     <header className="border-b border-line-subtle">
@@ -150,25 +159,17 @@ function Header({ platform }: { platform: Platform }) {
         </nav>
         <LanguageSwitch className="text-[13px] lg:text-[14px]" iconClassName="max-[389px]:hidden" />
         <div className="hidden lg:block">
-          <DownloadButton platform={platform} location="header" size="sm" short />
+          <DownloadButton location="header" size="sm" short />
         </div>
       </div>
     </header>
   );
 }
 
-function Hero({
-  platform,
-  pcPlatform,
-  spShare,
-  share,
-}: {
-  platform: Platform | null;
-  pcPlatform: Platform;
-  spShare: boolean;
-  share: ShareActions;
-}) {
+function Hero({ spShare, share }: { spShare: boolean; share: ShareActions }) {
   const { m } = useI18n();
+  const { os } = usePageEnv();
+  const avail = useAvail();
   return (
     <section aria-labelledby="hero-title">
       <div
@@ -199,7 +200,7 @@ function Hero({
             <p className="m-0 text-[14px] leading-[1.7] text-body">
               {m.hero.once.before}
               <span className="mx-1.5 lg:mx-2">
-                <Keycap keys={SHORTCUT_KEYS} />
+                <Keycap keys={KEYS[os].shortcutKeys} />
               </span>
               {m.hero.once.after}
             </p>
@@ -211,21 +212,17 @@ function Hero({
               <div className="flex flex-col gap-2.5 rounded-lg border border-line bg-gray-50 p-4">
                 <div className="flex items-start gap-2 text-[13px] leading-[1.6] text-body">
                   <Icon name="laptop" size={16} className="mt-0.5 text-muted" />
-                  <span>{m.hero.macOnly}</span>
+                  <span>{avail(m.hero.desktopOnly)}</span>
                 </div>
                 <ShareButtons actions={share} />
-                <div className="text-xs text-muted">{m.downloadMetaShort}</div>
+                <div className="text-xs text-muted">{avail(m.downloadMetaShort)}</div>
               </div>
             ) : (
               <div className="flex flex-col gap-2.5">
-                <DownloadButton
-                  platform={pcPlatform}
-                  location="hero"
-                  size="lg"
-                  className="w-full"
-                />
-                <div className="text-[13px] text-muted">{m.downloadMeta}</div>
-                <CtaNote platform={pcPlatform} />
+                <DownloadButton location="hero" size="lg" className="w-full" />
+                <DownloadMeta className="text-[13px] text-muted" />
+                <CtaNote />
+                <CtaExtras share={share} location="hero" />
               </div>
             )}
           </div>
@@ -233,7 +230,7 @@ function Hero({
           {/* PC 版の配置 */}
           <div className="hidden flex-col gap-2.5 lg:flex" data-testid="hero-cta-pc">
             <div className="flex gap-2">
-              <DownloadButton platform={pcPlatform} location="hero" size="lg" />
+              <DownloadButton location="hero" size="lg" />
               <ButtonLink
                 variant="ghost"
                 iconRight="external-link"
@@ -245,11 +242,12 @@ function Hero({
                 {m.hero.github}
               </ButtonLink>
             </div>
-            <div className="text-[13px] text-muted">{m.downloadMeta}</div>
-            <CtaNote platform={pcPlatform} />
+            <DownloadMeta className="text-[13px] text-muted" />
+            <CtaNote />
+            <CtaExtras share={share} location="hero" />
           </div>
 
-          <PlatformList platform={platform} />
+          <PlatformList />
         </div>
         <div className="px-4 pb-10 lg:p-0">
           <Demo />
@@ -290,7 +288,8 @@ function Modes() {
 
 function ModeCardView({ mode }: { mode: InputMode }) {
   const { m } = useI18n();
-  const card = m.modes.cards[mode];
+  const { os } = usePageEnv();
+  const card = m.modes.cards[os][mode];
   return (
     <article
       data-testid={`mode-${mode}`}
@@ -360,7 +359,7 @@ function ModeCardView({ mode }: { mode: InputMode }) {
             className="flex flex-col gap-0.5 text-[13px] lg:grid lg:grid-cols-[200px_minmax(0,1fr)] lg:items-center lg:gap-3"
           >
             <dt className="flex items-center gap-1.5 text-muted">
-              <Keycap keys={SHORTCUT_KEYS} size="sm" />
+              <Keycap keys={KEYS[os].shortcutKeys} size="sm" />
               {k.when}
             </dt>
             <dd className="m-0 leading-[1.6] text-strong">{k.does}</dd>
@@ -371,25 +370,29 @@ function ModeCardView({ mode }: { mode: InputMode }) {
   );
 }
 
-/** ⌥Space の説明。キーキャップは大きく 1 キーずつ描く (修飾キーは正方形、Space は横長) */
+/** ショートカット (⌥Space / Alt+Space) の説明。キーキャップは大きく 1 キーずつ描く (修飾キーは正方形、Space は横長) */
 function ShortcutCallout() {
   const { m } = useI18n();
-  const [mod, key] = SHORTCUT_KEYS;
+  const { os } = usePageEnv();
+  const [mod, key] = KEYS[os].shortcutKeys;
+  const shortcut = m.modes.shortcut[os];
   const cap =
     "flex h-10 items-center justify-center rounded-md border border-b-[3px] border-line-strong bg-white font-mono font-medium text-strong lg:h-11";
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-line bg-gray-50 px-4 py-5 lg:grid lg:grid-cols-[auto_minmax(0,1fr)] lg:items-center lg:gap-7 lg:px-7 lg:py-6">
       <div className="flex gap-1.5" aria-hidden="true">
-        <span className={`${cap} w-11 text-[18px] lg:w-12 lg:text-[20px]`}>{mod}</span>
+        <span
+          className={`${cap} w-11 lg:w-12 ${mod.length > 1 ? "text-[15px] lg:text-[16px]" : "text-[18px] lg:text-[20px]"}`}
+        >
+          {mod}
+        </span>
         <span className={`${cap} w-[120px] text-[15px] lg:w-[132px] lg:text-[16px]`}>{key}</span>
       </div>
       <div className="flex flex-col gap-3 lg:gap-1">
         <h3 className="m-0 text-[15px] leading-[1.5] font-semibold text-strong lg:text-[16px]">
-          {m.modes.shortcut.title}
+          {shortcut.title}
         </h3>
-        <p className="m-0 text-[13px] leading-[1.7] text-body lg:text-[14px]">
-          {m.modes.shortcut.body}
-        </p>
+        <p className="m-0 text-[13px] leading-[1.7] text-body lg:text-[14px]">{shortcut.body}</p>
       </div>
     </div>
   );
@@ -455,6 +458,7 @@ function Features() {
 
 function FeatureVisual({ visual }: { visual: Feature["visual"] }) {
   const { m } = useI18n();
+  const { os } = usePageEnv();
   if (visual === "always") {
     return m.features.alwaysRows.map((r) => (
       <div key={r.k} className="flex items-center gap-2.5 text-[13px]">
@@ -494,7 +498,7 @@ function FeatureVisual({ visual }: { visual: Feature["visual"] }) {
       className="m-0 flex list-none flex-col gap-2.5 p-0 lg:grid lg:grid-cols-2 lg:gap-x-4 lg:gap-y-2.5"
       data-testid="voice-commands"
     >
-      {m.features.commands.map((c) => (
+      {m.features.commands[os].map((c) => (
         <li key={c.word} className="flex items-center gap-2 text-[13px]">
           <span className="w-24 font-medium text-strong lg:w-[84px]">
             {m.features.quote(c.word)}
@@ -552,10 +556,14 @@ function Privacy() {
 
 function SetupAndRequirements() {
   const { m } = useI18n();
+  const { os } = usePageEnv();
+  const avail = useAvail();
   return (
     <section id="setup" aria-labelledby="setup-title" className="border-t border-line-subtle">
+      {/* PC 版は左にセットアップとよくある質問、右に両 OS の動作要件 (2 行にまたがる) を置く。
+          スマホ版は DOM の順 (セットアップ → 動作要件 → よくある質問) に並ぶ */}
       <div
-        className={`${INNER} flex flex-col gap-12 px-5 py-12 lg:grid lg:grid-cols-2 lg:px-12 lg:py-[72px]`}
+        className={`${INNER} flex flex-col gap-12 px-5 py-12 lg:grid lg:grid-cols-2 lg:grid-rows-[auto_1fr] lg:items-start lg:px-12 lg:py-[72px]`}
       >
         <div className="flex flex-col gap-4 lg:gap-6">
           <div className="flex flex-col gap-1.5 lg:gap-2">
@@ -567,61 +575,134 @@ function SetupAndRequirements() {
             </h2>
             <span className="text-[13px] text-muted lg:text-[14px]">{m.setup.lead}</span>
           </div>
-          <ol className="m-0 flex list-none flex-col p-0">
-            {m.setup.steps.map((s) => (
-              <li
-                key={s.no}
-                className="grid grid-cols-[28px_minmax(0,1fr)] gap-3.5 border-t border-line-subtle py-3.5 lg:gap-4 lg:py-4"
-              >
-                <span className="flex size-7 items-center justify-center rounded-full bg-gray-900 font-mono text-[13px] font-semibold text-white">
-                  {s.no}
-                </span>
-                <div className="flex flex-col gap-1">
-                  <span className="text-[15px] font-semibold text-strong">{s.title}</span>
-                  <span className="text-[13px] leading-[1.7] text-body lg:text-[14px]">
-                    {s.body}
+          <OsTabs />
+          {/* 両 OS の手順を HTML に入れ (JS なし・クローラー向け)、選んでいない方は hidden にする */}
+          {OSES.map((o) => (
+            <ol
+              key={o}
+              hidden={o !== os}
+              data-testid={`setup-steps-${o}`}
+              className="m-0 flex list-none flex-col p-0"
+            >
+              {m.setup.steps[o].map((s) => (
+                <li
+                  key={s.no}
+                  className="grid grid-cols-[28px_minmax(0,1fr)] gap-3.5 border-t border-line-subtle py-3.5 lg:gap-4 lg:py-4"
+                >
+                  <span className="flex size-7 items-center justify-center rounded-full bg-gray-900 font-mono text-[13px] font-semibold text-white">
+                    {s.no}
                   </span>
-                </div>
-              </li>
-            ))}
-          </ol>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-[15px] font-semibold text-strong">{s.title}</span>
+                    <span className="text-[13px] leading-[1.7] text-body lg:text-[14px]">
+                      {s.body}
+                    </span>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          ))}
         </div>
-        <div id="requirements" className="flex flex-col gap-4 lg:gap-6">
+        <div id="requirements" className="flex flex-col gap-4 lg:row-span-2 lg:gap-6">
           <div className="flex flex-col gap-1.5 lg:gap-2">
             <h2 className="m-0 text-[22px] leading-[1.35] font-semibold text-strong lg:text-[24px] lg:leading-[1.3]">
               {m.requirements.title}
             </h2>
             <span className="text-[13px] leading-[1.6] text-muted lg:text-[14px]">
-              {m.requirements.lead}
+              {avail(m.requirements.lead)}
             </span>
           </div>
-          <dl className="m-0 overflow-hidden rounded-lg border border-line">
-            {m.requirements.rows.map((r) => (
-              <div
-                key={r.k}
-                className="grid grid-cols-[96px_minmax(0,1fr)] border-b border-line-subtle px-3.5 py-2.5 text-[13px] last:border-b-0 lg:grid-cols-[140px_minmax(0,1fr)] lg:px-4"
-              >
-                <dt className="text-muted">{r.k}</dt>
-                <dd className="m-0 text-strong">{r.v}</dd>
+          {/* 両 OS の表を並べる (タブにしない。比べて読めるように) */}
+          {OSES.map((o) => (
+            <div key={o} className="flex flex-col gap-2.5" data-testid={`requirements-${o}`}>
+              <div className="flex min-h-6 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                <h3 className="m-0 text-[16px] font-semibold text-strong">
+                  {m.requirements.osNames[o]}
+                </h3>
+                <OsDownloadLink os={o} />
               </div>
-            ))}
-          </dl>
+              <dl className="m-0 overflow-hidden rounded-lg border border-line">
+                {m.requirements.rows[o].map((r) => (
+                  <div
+                    key={r.k}
+                    className="grid grid-cols-[96px_minmax(0,1fr)] gap-x-2 border-b border-line-subtle px-3.5 py-2.5 text-[13px] leading-[1.6] last:border-b-0 lg:grid-cols-[140px_minmax(0,1fr)] lg:px-4"
+                  >
+                    <dt className="text-muted">{r.k}</dt>
+                    <dd className="m-0 text-strong">{r.v}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          ))}
         </div>
+        <FaqList />
       </div>
     </section>
   );
 }
 
-function FinalCta({
-  pcPlatform,
-  spShare,
-  share,
-}: {
-  pcPlatform: Platform;
-  spShare: boolean;
-  share: ShareActions;
-}) {
+/** セットアップの手順の OS の切り替え。初期値は判定した OS。選ぶとキー表記・デモも同じ OS になる */
+function OsTabs() {
   const { m } = useI18n();
+  const { os, setOs } = usePageEnv();
+  return (
+    <div
+      role="group"
+      aria-label={m.setup.osTabsLabel}
+      data-testid="os-tabs"
+      className="grid w-full grid-cols-2 gap-0.5 self-start rounded-md border border-line-subtle bg-gray-100 p-0.5 lg:flex lg:w-auto"
+    >
+      {OSES.map((o) => (
+        <button
+          key={o}
+          type="button"
+          aria-pressed={o === os}
+          onClick={() => setOs(o)}
+          className={`h-8 cursor-pointer rounded-sm border-0 text-[13px] font-medium lg:h-7 lg:px-4 ${o === os ? "bg-white text-strong shadow-xs" : "bg-transparent text-muted"}`}
+        >
+          {m.requirements.osNames[o]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** よくある質問 (Windows の警告・GPU)。開閉は details で、JS なしでも読める */
+function FaqList() {
+  const { m } = useI18n();
+  return (
+    <div id="faq" className="flex flex-col gap-4 lg:gap-6" data-testid="faq">
+      <h2 className="m-0 text-[22px] leading-[1.35] font-semibold text-strong lg:text-[24px] lg:leading-[1.3]">
+        {m.faq.title}
+      </h2>
+      <div className="flex flex-col rounded-lg border border-line">
+        {m.faq.items.map((f) => (
+          <details key={f.q} className="group border-b border-line-subtle last:border-b-0">
+            <summary className="flex cursor-pointer list-none items-start gap-2 px-3.5 py-3 text-[14px] leading-[1.6] font-medium text-strong lg:px-4 [&::-webkit-details-marker]:hidden">
+              <Icon
+                name="chevron-right"
+                size={16}
+                className="mt-[3px] text-muted transition-transform duration-[120ms] group-open:rotate-90"
+              />
+              {f.q}
+            </summary>
+            <div className="flex flex-col gap-2 pr-3.5 pb-3.5 pl-[38px] text-[13px] leading-[1.7] text-body lg:pr-4 lg:pl-[42px]">
+              {f.a.map((p) => (
+                <p key={p} className="m-0">
+                  {p}
+                </p>
+              ))}
+            </div>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FinalCta({ spShare, share }: { spShare: boolean; share: ShareActions }) {
+  const { m } = useI18n();
+  const avail = useAvail();
   return (
     <section aria-labelledby="final-cta-title">
       <div className={`${INNER} px-4 pb-12 lg:px-12 lg:pb-[72px]`}>
@@ -644,13 +725,13 @@ function FinalCta({
               {m.finalCta.title.rest}
             </h2>
             <span className="text-[13px] leading-[1.6] text-body lg:hidden">
-              {spShare ? m.finalCta.leadMobile : m.finalCta.lead}
+              {spShare ? avail(m.finalCta.leadMobile) : m.finalCta.lead}
             </span>
             <span className="hidden text-[14px] leading-[1.6] text-body lg:inline">
               {m.finalCta.lead}
             </span>
             <div className="hidden lg:block">
-              <CtaNote platform={pcPlatform} />
+              <CtaNote />
             </div>
           </div>
           <div className="contents lg:flex lg:flex-col lg:items-end lg:gap-2">
@@ -658,21 +739,18 @@ function FinalCta({
               {spShare ? (
                 <ShareButtons actions={share} />
               ) : (
-                <DownloadButton
-                  platform={pcPlatform}
-                  location="final"
-                  size="lg"
-                  className="w-full"
-                />
+                <DownloadButton location="final" size="lg" className="w-full" />
               )}
             </div>
             <div className="hidden lg:block" data-testid="final-cta-pc">
-              <DownloadButton platform={pcPlatform} location="final" size="lg" />
+              <DownloadButton location="final" size="lg" />
             </div>
-            <span className="text-xs text-muted lg:hidden">
-              {spShare ? m.downloadMetaShort : m.downloadMeta}
-            </span>
-            <span className="hidden text-xs text-muted lg:inline">{m.downloadMeta}</span>
+            {spShare ? (
+              <span className="text-xs text-muted lg:hidden">{avail(m.downloadMetaShort)}</span>
+            ) : (
+              <DownloadMeta className="text-xs text-muted lg:hidden" />
+            )}
+            <DownloadMeta className="hidden text-xs text-muted lg:block" />
           </div>
         </div>
       </div>
@@ -682,6 +760,7 @@ function FinalCta({
 
 function Footer() {
   const { locale, m } = useI18n();
+  const avail = useAvail();
   return (
     <footer className="border-t border-line-subtle">
       <div
@@ -709,6 +788,7 @@ function Footer() {
             GitHub
           </a>
         </div>
+        <span data-testid="supported-os">{avail(m.footer.supportedOs)}</span>
         <span>
           {COPYRIGHT_PREFIX}{" "}
           <a href={COMPANY_URL} className="text-muted hover:underline">

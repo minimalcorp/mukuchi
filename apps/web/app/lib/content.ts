@@ -1,4 +1,5 @@
 import type { IconName } from "../components/ui";
+import { KEYS, type Os, type OsKeys } from "./site";
 
 // LP の言語によらない構造 (図の形・モード・デモの型)。文言は app/i18n/{ja,en}.ts
 
@@ -118,9 +119,47 @@ export const list = <T>(items: T[]): T[] => items;
 /** 型を付けた対応表を作る (list と同じ理由。キーごとの型に分かれず、値の型がそろう) */
 export const record = <K extends string, V>(r: Record<K, V>): Record<K, V> => r;
 
-/** ダウンロードボタンの文言 (判定結果ごと)。label・short はダウンロードできない時だけ (できる時は共通の文言) */
+// ---- OS・Windows 版の公開状況で変わる文言 ----
+
+/** OS ごとに変わる文言 (desktop の PerOs と同じ形)。OS で変わらない文言は 1 つのまま持つ */
+export type PerOs<T> = Record<Os, T>;
+
+/** OS ごとの文言を、その OS のキー表記から組み立てる */
+export const byOs = <T>(f: (keys: OsKeys, os: Os) => T): PerOs<T> => ({
+  macos: f(KEYS.macos, "macos"),
+  windows: f(KEYS.windows, "windows"),
+});
+
+/**
+ * Windows 版の公開 (site.ts の WINDOWS_AVAILABLE) で変わる文言。公開前に「Windows でも使える」と読める文を
+ * 出さないため、両方を持って表示する時に選ぶ
+ */
+export interface Avail<T> {
+  available: T;
+  soon: T;
+}
+
+export const pickAvail = <T>(v: T | Avail<T>, available: boolean): T =>
+  typeof v === "object" && v !== null && "available" in v && "soon" in v
+    ? available
+      ? v.available
+      : v.soon
+    : (v as T);
+
+/** ダウンロードボタンの文言 (判定結果ごと)。label・short はダウンロードできない時だけ (できる時は OS ごとの共通の文言) */
 export interface CtaText {
-  label?: string;
-  short?: string;
-  note: string;
+  label?: string | Avail<string>;
+  short?: string | Avail<string>;
+  note: string | Avail<string>;
+}
+
+/** 動作要件の表の行 */
+export interface Row {
+  k: string;
+  v: string;
+}
+
+export interface Faq {
+  q: string;
+  a: string[];
 }

@@ -22,4 +22,4 @@ export function track(name: string, params: Record<string, string>) {
   window.gtag?.("event", name, params);
 }
 
-export type CtaLocation = "header" | "hero" | "final" | "footer";
+export type CtaLocation = "header" | "hero" | "final" | "footer" | "requirements";

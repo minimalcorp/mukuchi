@@ -7,9 +7,22 @@ export const SITE_URL = "https://mukuchi.minimalcorp.com";
 
 export const SITE_NAME = "mukuchi";
 
-/** GitHub Releases の最新版を指す固定 URL (release.yml が版番号なしの dmg も添付する) */
-export const DOWNLOAD_URL =
+/** 対応する OS。OS ごとに変わる値 (ダウンロード・キー表記・モデルの容量) はこの型で引く */
+export type Os = "macos" | "windows";
+export const OSES: readonly Os[] = ["macos", "windows"];
+
+/**
+ * Windows 版を公開しているか。Windows の Release が公開されて mukuchi_x64-setup.exe が実在してから true にして
+ * LP を deploy する (リンク切れのボタンを出さない。docs/plans/windows-plan.md §10.1)。
+ * false の間は Windows の主ボタンを「準備中」にする。OS 中立の文言はこの値に関係なく出す
+ */
+export const WINDOWS_AVAILABLE = false;
+
+/** GitHub Releases の最新版を指す固定 URL (release.yml が版番号なしの成果物も添付する) */
+export const DMG_URL =
   "https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg";
+export const NSIS_URL =
+  "https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_x64-setup.exe";
 export const GITHUB_URL = "https://github.com/minimalcorp/mukuchi";
 
 /** GA4 の測定 ID (公開される値)。送信は本番ビルドかつ SITE_URL のホストで開いた時だけ (app/lib/analytics.ts) */
@@ -26,31 +39,75 @@ export const googlePartnerSitesUrl = (locale: string) =>
 export const VERSION = `v${tauriConf.version}`;
 /** 署名・公証済み dmg の実測 (v0.1.0: 35.95 MB、v0.1.3: 36.21 MB) の MB。版と違い自動では変わらない。大きく変わったら直す */
 export const DMG_SIZE_MB = 36;
+/** Windows のインストーラー (NSIS、署名なし) の実測 (28,864,743 B) の MB。同梱の llama-server の分だけ dmg と違う */
+export const NSIS_SIZE_MB = 29;
+
+/** OS ごとのダウンロード (ボタン・GA の file_download・動作要件の表のリンク) */
+export const DOWNLOADS: Record<Os, { url: string; fileName: string; ext: string; sizeMb: number }> =
+  {
+    macos: { url: DMG_URL, fileName: "mukuchi_aarch64.dmg", ext: "dmg", sizeMb: DMG_SIZE_MB },
+    windows: {
+      url: NSIS_URL,
+      fileName: "mukuchi_x64-setup.exe",
+      ext: "exe",
+      sizeMb: NSIS_SIZE_MB,
+    },
+  };
 
 /**
- * ページの言語 (= その言語を話す人) に勧めるモデル。初回セットアップは話す言語の推奨モデルだけを取得する
- * (docs/architecture.md「モデルの管理」の MODEL_ORDER の先頭)。容量は固定した revision の tree API の値
+ * ページの言語 (= その言語を話す人) に勧めるモデルを OS ごとに持つ。初回セットアップは話す言語の推奨モデルだけを取得する
+ * (docs/architecture.md「モデルの管理」の MODEL_ORDER の先頭)。名前は両 OS で同じ
  */
 export const MODELS = {
-  /** ja-8bit: minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit (2,185,804,096 B)。日本語向けに追加学習したもの */
-  ja: { name: "Qwen3-ASR 1.7B", bytes: 2_185_804_096 },
-  /**
-   * base-1.7b-8bit: minimalcorp/Qwen3-ASR-1.7B-MLX-8bit (2,174,372,462 B)。Qwen/Qwen3-ASR-1.7B を全層 8bit に
-   * 変換したもの。追加学習なしの元のモデル
-   */
-  en: { name: "Qwen3-ASR 1.7B", bytes: 2_174_372_462 },
-} as const;
+  macos: {
+    /** ja-8bit: minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit (2,185,804,096 B、tree API)。日本語向けに追加学習したもの */
+    ja: { name: "Qwen3-ASR 1.7B", bytes: 2_185_804_096 },
+    /**
+     * base-1.7b-8bit: minimalcorp/Qwen3-ASR-1.7B-MLX-8bit (2,174,372,462 B、tree API)。Qwen/Qwen3-ASR-1.7B を
+     * 全層 8bit に変換したもの。追加学習なしの元のモデル
+     */
+    en: { name: "Qwen3-ASR 1.7B", bytes: 2_174_372_462 },
+  },
+  // Windows は GGUF (LLM Q8_0 + mmproj Q8_0 の 2 ファイル)。暫定値: 変換したローカルのファイルの合計
+  // (spikes/asr-bench/WINDOWS_DECISION.md)。HF の公開後に固定した revision の tree API の値で確定する
+  windows: {
+    /** ja-gguf: minimalcorp/Qwen3-ASR-1.7B-JA-GGUF (暫定 2,190,132,448 B) */
+    ja: { name: "Qwen3-ASR 1.7B", bytes: 2_190_132_448 },
+    /** base-gguf: minimalcorp/Qwen3-ASR-1.7B-GGUF (暫定 2,520,744,352 B)。元のモデル */
+    en: { name: "Qwen3-ASR 1.7B", bytes: 2_520_744_352 },
+  },
+} as const satisfies Record<Os, Record<"ja" | "en", { name: string; bytes: number }>>;
 
 /** セットアップの所要時間 (分)。モデルのダウンロードを含む */
 export const SETUP_MINUTES = 5;
 
-/**
- * 音声入力のオン・オフのショートカットの既定 (desktop の Settings.shortcut の既定 "Alt+Space")。
- * キーキャップは 1 キーずつ描くので配列で持つ
- */
-export const SHORTCUT_KEYS = ["⌥", "Space"] as const;
-/** 文中に書く時の表記 (例: 「⌥Space で 1 回分を入力」) */
-export const SHORTCUT = SHORTCUT_KEYS.join("");
+/** OS ごとのキー表記 (desktop の表示に合わせる。Mac は記号、Windows は Ctrl / Alt / Shift / Win) */
+export interface OsKeys {
+  /** 音声入力のオン・オフのショートカットの既定 (desktop の Settings.shortcut の既定 "Alt+Space"、両 OS 共通)。
+   * キーキャップは 1 キーずつ描くので配列で持つ */
+  shortcutKeys: readonly [string, string];
+  /** 文中に書く時の表記 (例: 「⌥Space で 1 回分を入力」) */
+  shortcut: string;
+  /** 音声コマンド「改行」のキー */
+  newline: string;
+  /** 音声コマンド「送信」のキー (既定の送信キーは Mac ⌘+Enter、Windows Ctrl+Enter) */
+  send: string;
+}
+
+export const KEYS: Record<Os, OsKeys> = {
+  macos: {
+    shortcutKeys: ["⌥", "Space"],
+    shortcut: "⌥Space",
+    newline: "⇧ + Enter",
+    send: "⌘ + Enter",
+  },
+  windows: {
+    shortcutKeys: ["Alt", "Space"],
+    shortcut: "Alt+Space",
+    newline: "Shift + Enter",
+    send: "Ctrl + Enter",
+  },
+};
 
 /** フッターの著作権表示。会社名 (辞書) は COMPANY_URL へのリンクにする */
 export const COPYRIGHT_PREFIX = "© 2026";

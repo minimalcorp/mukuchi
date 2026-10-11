@@ -2,7 +2,7 @@
 // 使い方 (apps/web で): node scripts/og-image.mjs en
 //   → public/og-image-en.jpg と assets/brand/web/og-image-en.jpg に書き出す
 // 構成は日本語版 (public/og-image.jpg) と同じ: 左にロゴのキャラクター、右に名前・説明・特長 3 行。
-// 日本語版はこのスクリプトより前に作ったもの。ja を指定すると同じ構成で作り直せるが、既存の画像と画素単位では一致しない
+// 2 OS (Mac / Windows) 対応で、ja・en ともこのスクリプトで作り直した (説明から「Mac」を外した)
 import { copyFileSync, readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -18,13 +18,13 @@ const ROOT = resolve(WEB, "../..");
 const TEXT = {
   ja: {
     lang: "ja",
-    tagline: "Mac に常駐する音声入力アプリ",
+    tagline: "常駐する音声入力アプリ",
     features: ["端末内で文字起こし", "話した部分だけを自動で入力", "キー操作も声で"],
     out: "og-image.jpg",
   },
   en: {
     lang: "en",
-    tagline: "Voice input that stays running on your Mac",
+    tagline: "Voice input that runs in the background",
     features: ["On-device transcription", "Types only what you say", "Key presses by voice"],
     out: "og-image-en.jpg",
   },

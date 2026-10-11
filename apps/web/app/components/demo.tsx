@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { useI18n } from "@/i18n/context";
 import { DEMO_STILL_STEP, INPUT_MODES, type InputMode } from "@/lib/content";
+import { usePageEnv } from "./env";
 import { Icon } from "./ui";
 
 const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
@@ -54,11 +55,13 @@ interface Playback {
  * ヒーローのデモ。モードごとの流れ (常に聞き取る: 発話→入力→音声コマンド / 1回ずつ聞き取る: オフ→ショートカット→
  * 1 回分の入力→自動でオフ) を、最後まで進むたびに交互に再生する。
  * 利用者が動きを減らす設定にしている時は、入力まで済んだ場面で止める (タブでモードは替えられる)。
- * 場面やモードが切り替わってもページが上下に揺れないよう、各部の高さはどの場面の中身も収まる値に固定する
+ * 場面やモードが切り替わってもページが上下に揺れないよう、各部の高さはどの場面の中身も収まる値に固定する。
+ * キー表記と入力先のウィンドウの見た目は、ページで選んでいる OS (判定した OS、またはセットアップのタブ) に合わせる
  */
 export function Demo() {
   const { m } = useI18n();
-  const scripts = m.demo.scripts;
+  const { os } = usePageEnv();
+  const scripts = m.demo.scripts[os];
   const reduced = usePrefersReducedMotion();
   const forced = useDevHeroMode();
   const [play, setPlay] = useState<Playback>({ mode: "always", step: 0, locked: false });
@@ -68,7 +71,7 @@ export function Demo() {
   const script = scripts[mode];
   const stepIndex = reduced ? DEMO_STILL_STEP[mode] : Math.min(play.step, script.length - 1);
   const s = script[stepIndex];
-  const meta = m.demo.modeMeta[mode];
+  const meta = m.demo.modeMeta[os][mode];
   const speaking = !!s.speak;
   const meterKind = speaking ? "speak" : s.noise ? "noise" : "idle";
   const micOn = !!s.on || speaking;
@@ -149,16 +152,39 @@ export function Demo() {
       >
         {/* 入力先のアプリ */}
         <div className="w-full overflow-hidden rounded-lg border border-line bg-white shadow-md lg:rounded-[10px]">
-          <div className="flex h-7 items-center gap-[5px] border-b border-line-subtle px-2.5 lg:h-8 lg:gap-1.5 lg:px-3">
-            <span className="size-2 rounded-full bg-gray-200 lg:size-2.5" />
-            <span className="size-2 rounded-full bg-gray-200 lg:size-2.5" />
-            <span className="size-2 rounded-full bg-gray-200 lg:size-2.5" />
-            <span
-              data-testid="demo-app-name"
-              className="mr-[34px] flex-1 text-center text-[11px] text-muted lg:mr-[42px] lg:text-xs"
-            >
-              {meta.appName}
-            </span>
+          {/* タイトルバー。Mac は左に 3 つの丸と中央の名前、Windows は左の名前と右の最小化・最大化・閉じる */}
+          <div
+            data-testid="demo-titlebar"
+            data-os={os}
+            className="flex h-7 items-center gap-[5px] border-b border-line-subtle px-2.5 lg:h-8 lg:gap-1.5 lg:px-3"
+          >
+            {os === "macos" ? (
+              <>
+                <span className="size-2 rounded-full bg-gray-200 lg:size-2.5" />
+                <span className="size-2 rounded-full bg-gray-200 lg:size-2.5" />
+                <span className="size-2 rounded-full bg-gray-200 lg:size-2.5" />
+                <span
+                  data-testid="demo-app-name"
+                  className="mr-[34px] flex-1 text-center text-[11px] text-muted lg:mr-[42px] lg:text-xs"
+                >
+                  {meta.appName}
+                </span>
+              </>
+            ) : (
+              <>
+                <span
+                  data-testid="demo-app-name"
+                  className="flex-1 pl-0.5 text-[11px] text-muted lg:text-xs"
+                >
+                  {meta.appName}
+                </span>
+                <span className="flex items-center gap-3 text-gray-400 lg:gap-3.5">
+                  <Icon name="minus" size={12} />
+                  <Icon name="square" size={10} />
+                  <Icon name="x" size={12} />
+                </span>
+              </>
+            )}
           </div>
           <div
             data-testid="demo-sent"

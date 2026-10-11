@@ -1,7 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import { en } from "../app/i18n/en";
 import { ja, type Messages } from "../app/i18n/ja";
-import { COMPANY_URL, DOWNLOAD_URL, SITE_URL, googlePartnerSitesUrl } from "../app/lib/site";
+import { pickAvail, type Avail } from "../app/lib/content";
+import type { CtaTextKey } from "../app/lib/platform";
+import { COMPANY_URL, DMG_URL, NSIS_URL, SITE_URL, googlePartnerSitesUrl } from "../app/lib/site";
 
 // 日本語のページの確認はブラウザの言語を日本語にする (日本語以外だと `/` は `/en/` へ移る)
 test.use({ locale: "ja-JP" });
@@ -20,6 +22,9 @@ interface FakeNavigator {
 const MAC_CHROME_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
+const WIN_CHROME_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+
 const ENVS = {
   macArm: {
     userAgent: MAC_CHROME_UA,
@@ -37,11 +42,20 @@ const ENVS = {
     platform: "MacIntel",
     maxTouchPoints: 0,
   },
-  windows: {
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+  windowsX64: {
+    userAgent: WIN_CHROME_UA,
     platform: "Win32",
     uaData: { platform: "Windows", mobile: false, architecture: "x86" },
+  },
+  windowsArm: {
+    userAgent: WIN_CHROME_UA,
+    platform: "Win32",
+    uaData: { platform: "Windows", mobile: false, architecture: "arm" },
+  },
+  // Firefox は UA-CH がなく、x64 と ARM を区別できない (x64 とみなす)
+  windowsFirefox: {
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0",
+    platform: "Win32",
   },
   linux: {
     userAgent:
@@ -80,8 +94,8 @@ async function fakeNavigator(page: Page, env: FakeNavigator) {
 
 const heroPc = (page: Page) => page.getByTestId("hero-cta-pc");
 
-const scriptMs = (m: Messages, mode: keyof Messages["demo"]["scripts"]) =>
-  m.demo.scripts[mode].reduce((sum, st) => sum + st.ms, 0);
+const scriptMs = (m: Messages, mode: "always" | "once") =>
+  m.demo.scripts.macos[mode].reduce((sum, st) => sum + st.ms, 0);
 /** 常に聞き取る → 1回ずつ聞き取る の 1 巡 (最後まで進むと交互に替わる) */
 const demoCycleMs = (m: Messages) => scriptMs(m, "always") + scriptMs(m, "once");
 const DEMO_CYCLE_MS = demoCycleMs(ja);
@@ -154,8 +168,8 @@ async function expectStableDemo(page: Page, path = "/", m: Messages = ja) {
     status.key,
     status.recognizing,
     status.listening,
-    modeMeta.always.appName,
-    modeMeta.once.appName,
+    modeMeta.macos.always.appName,
+    modeMeta.macos.once.appName,
   ]) {
     expect(samples.some((x) => x.status.includes(word))).toBe(true);
   }
@@ -204,12 +218,16 @@ test.describe("PC", () => {
     // アプリが未対応の音声コマンド「取り消し」を載せない (入力モードの「聞き取りを取り消します」は別の話なので特長の中だけを見る)
     await expect(page.locator("#features").getByText("取り消し")).toHaveCount(0);
 
-    const reqs = page.locator("#requirements dl");
+    const reqs = page.getByTestId("requirements-macos");
     await expect(reqs).toContainText("macOS 13 Ventura 以降");
     await expect(reqs).toContainText("空き容量 6 GB 以上");
     await expect(reqs).toContainText("動作確認M1 Max・M3 Pro");
     await expect(reqs).toContainText("Qwen3-ASR 1.7B（日本語・約 2.2 GB）");
-    await expect(page.getByText("Qwen3-ASR 1.7B（約 2.2 GB）をダウンロードします。")).toBeVisible();
+    await expect(
+      page
+        .getByTestId("setup-steps-macos")
+        .getByText("Qwen3-ASR 1.7B（約 2.2 GB）をダウンロードします。"),
+    ).toBeVisible();
     await expect(
       page.getByText(
         "音声認識モデルのダウンロードと、アップデートの確認・ダウンロード以外に通信しません。アップデートの自動確認は設定で止められます。",
@@ -224,6 +242,8 @@ test.describe("PC", () => {
   test("入力モードの節に 2 つのモードを並べ、ヘッダーから移動できる", async ({ page }) => {
     await fakeNavigator(page, ENVS.macArm);
     await page.goto("/");
+    // テストを並列に増やしたことで、ハイドレーション・critical CSS の外れより先にクリックして空振りすることがあった
+    await settleBeforeClick(page);
     await page.locator('header nav a[href="#modes"]').click();
     await expect(page).toHaveURL(/#modes$/);
     const modes = page.locator("#modes");
@@ -248,9 +268,10 @@ test.describe("PC", () => {
   test("セットアップは 5 ステップ", async ({ page }) => {
     await fakeNavigator(page, ENVS.macArm);
     await page.goto("/");
-    const steps = page.locator("#setup ol > li");
+    const steps = page.getByTestId("setup-steps-macos").locator("li");
     await expect(steps).toHaveCount(5);
-    expect(ja.setup.steps).toHaveLength(5);
+    expect(ja.setup.steps.macos).toHaveLength(5);
+    expect(ja.setup.steps.windows).toHaveLength(5);
     await expect(steps.nth(0)).toContainText("dmg（約 36 MB）");
     await expect(steps.nth(3)).toContainText("入力モードとショートカットを選ぶ");
     await expect(steps.nth(3)).toContainText("既定は ⌥Space");
@@ -313,7 +334,7 @@ test.describe("PC", () => {
       "Apple Silicon 搭載の Mac を検出しました",
     );
     const link = heroPc(page).getByRole("link", { name: "Mac 版をダウンロード" });
-    await expect(link).toHaveAttribute("href", DOWNLOAD_URL);
+    await expect(link).toHaveAttribute("href", DMG_URL);
     await expect(page.locator("header").getByRole("link", { name: "ダウンロード" })).toBeVisible();
   });
 
@@ -330,16 +351,21 @@ test.describe("PC", () => {
 
   const unavailable = [
     { name: "Intel Mac", env: ENVS.macIntel, label: "Apple Silicon 専用です", short: "非対応" },
-    { name: "Windows", env: ENVS.windows, label: "Windows 版は準備中", short: "準備中" },
-    { name: "Linux", env: ENVS.linux, label: "Linux 版は準備中", short: "準備中" },
+    {
+      name: "Windows (公開前)",
+      env: ENVS.windowsX64,
+      label: "Windows 版は準備中",
+      short: "準備中",
+    },
+    { name: "Linux (公開前)", env: ENVS.linux, label: "Mac 版のみ", short: "Mac 版のみ" },
   ];
   for (const u of unavailable) {
     test(`${u.name} はダウンロードボタンを無効にする`, async ({ page }) => {
       await fakeNavigator(page, u.env);
-      await page.goto("/");
+      await page.goto("/?windowsAvailable=0");
       await expect(heroPc(page).getByRole("button", { name: u.label })).toBeDisabled();
       await expect(page.locator("header").getByRole("button", { name: u.short })).toBeDisabled();
-      await expect(page.locator(`a[href="${DOWNLOAD_URL}"]`)).toHaveCount(0);
+      await expect(page.locator('[data-cta="download"]')).toHaveCount(0);
     });
   }
 
@@ -396,7 +422,9 @@ test.describe("SP", () => {
     await page.goto("/");
     const cta = page.getByTestId("hero-cta-sp");
     await expect(cta.getByRole("button", { name: "共有" })).toBeVisible();
-    await expect(page.locator(`a[href="${DOWNLOAD_URL}"]`)).toHaveCount(0);
+    await expect(page.locator('[data-cta="download"]')).toHaveCount(0);
+    // ハイドレーション前に押すと何も起きない (コピーは JS の操作)
+    await settleBeforeClick(page);
     await cta.getByRole("button", { name: "URL をコピー" }).click();
     await expect(cta.getByRole("button", { name: "コピーしました" })).toBeVisible();
     expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(
@@ -509,14 +537,14 @@ test.describe("言語 PC", () => {
       "“line break”⇧ + Enter",
       "“send”⌘ + Enter",
     ]);
-    const reqs = page.locator("#requirements dl");
+    const reqs = page.getByTestId("requirements-macos");
     await expect(reqs).toContainText("macOS 13 Ventura or later");
     await expect(reqs).toContainText("Speech modelQwen3-ASR 1.7B (about 2.2 GB)");
     await expect(reqs).toContainText("English and Japanese");
-    await expect(page.locator("#setup ol > li")).toHaveCount(5);
+    await expect(page.getByTestId("setup-steps-macos").locator("li")).toHaveCount(5);
     await expect(heroPc(page).getByRole("link", { name: "Download for Mac" })).toHaveAttribute(
       "href",
-      DOWNLOAD_URL,
+      DMG_URL,
     );
     await expect(heroPc(page)).toContainText("36 MB");
     await expect(page.getByTestId("cta-note").first()).toHaveText(
@@ -713,4 +741,426 @@ test.describe("言語 SP", () => {
     await page.evaluate(() => document.fonts.ready);
     await page.screenshot({ path: "e2e/screenshots/sp-390-en.png", fullPage: true });
   });
+});
+
+// ---- Mac / Windows の 2 OS (docs/plans/windows-plan.md §10.3) ----
+
+const LOCALE_PAGES = [
+  { name: "ja", path: "/", m: ja },
+  { name: "en", path: "/en/", m: en },
+] as const;
+
+/** 辞書の文言を Windows 版の公開状況で選ぶ */
+const pick = (v: string | Avail<string> | undefined, available: boolean) =>
+  pickAvail(v ?? "", available);
+
+/** 開発時の上書きで公開状況を固定して開く (既定値 WINDOWS_AVAILABLE に依存しない) */
+const withAvail = (path: string, available: boolean) =>
+  `${path}?windowsAvailable=${available ? 1 : 0}`;
+
+interface CtaCase {
+  name: string;
+  env: FakeNavigator;
+  available: boolean;
+  /** 主ボタンの文言のキー。download は成果物の OS */
+  text: CtaTextKey;
+  download?: "macos" | "windows";
+  /** ボタンの下のほかの OS 版へのリンク */
+  alt: string[];
+  share?: boolean;
+}
+
+const CTA_CASES: CtaCase[] = [
+  {
+    name: "mac-arm",
+    env: ENVS.macArm,
+    available: false,
+    text: "mac-arm",
+    download: "macos",
+    alt: [],
+  },
+  {
+    name: "mac-arm",
+    env: ENVS.macArm,
+    available: true,
+    text: "mac-arm",
+    download: "macos",
+    alt: [NSIS_URL],
+  },
+  {
+    name: "mac (Safari)",
+    env: ENVS.macSafari,
+    available: true,
+    text: "mac-unknown",
+    download: "macos",
+    alt: [NSIS_URL],
+  },
+  {
+    name: "windows-x64",
+    env: ENVS.windowsX64,
+    available: false,
+    text: "windows-soon",
+    alt: [DMG_URL],
+  },
+  {
+    name: "windows-x64",
+    env: ENVS.windowsX64,
+    available: true,
+    text: "windows-x64",
+    download: "windows",
+    alt: [DMG_URL],
+  },
+  {
+    name: "windows (Firefox)",
+    env: ENVS.windowsFirefox,
+    available: true,
+    text: "windows-x64",
+    download: "windows",
+    alt: [DMG_URL],
+  },
+  {
+    name: "windows-arm",
+    env: ENVS.windowsArm,
+    available: false,
+    text: "windows-soon",
+    alt: [DMG_URL],
+  },
+  {
+    name: "windows-arm",
+    env: ENVS.windowsArm,
+    available: true,
+    text: "windows-arm",
+    alt: [DMG_URL],
+  },
+  { name: "linux", env: ENVS.linux, available: false, text: "linux", alt: [DMG_URL], share: true },
+  {
+    name: "linux",
+    env: ENVS.linux,
+    available: true,
+    text: "linux",
+    alt: [DMG_URL, NSIS_URL],
+    share: true,
+  },
+];
+
+test.describe("OS ごとの主ボタン PC", () => {
+  test.use({ viewport: PC });
+
+  for (const { name: lang, path, m } of LOCALE_PAGES) {
+    for (const c of CTA_CASES) {
+      const avail = c.available ? "公開後" : "公開前";
+      test(`${lang} ${c.name} (Windows ${avail})`, async ({ page }) => {
+        await fakeNavigator(page, c.env);
+        await page.goto(withAvail(path, c.available));
+        const hero = heroPc(page);
+        const state = m.cta.states[c.text];
+        await expect(hero.getByTestId("cta-note")).toHaveText(pick(state.note, c.available));
+        if (c.download) {
+          const label = state.label ?? m.cta.download[c.download].label;
+          const link = hero.locator('[data-cta="download"]');
+          await expect(link).toHaveText(pick(label, c.available));
+          await expect(link).toHaveAttribute("href", c.download === "macos" ? DMG_URL : NSIS_URL);
+          await expect(hero.getByTestId("download-meta")).toHaveText(m.downloadMeta[c.download]);
+        } else {
+          await expect(hero.locator('[data-cta="download"]')).toHaveCount(0);
+          await expect(
+            hero.getByRole("button", { name: pick(state.label, c.available) }),
+          ).toBeDisabled();
+        }
+        const alt = hero.getByTestId("cta-alt").locator("a");
+        if (c.alt.length === 0) {
+          await expect(hero.getByTestId("cta-alt")).toHaveCount(0);
+        } else {
+          await expect(alt).toHaveCount(c.alt.length);
+          for (const [i, href] of c.alt.entries()) {
+            await expect(alt.nth(i)).toHaveAttribute("href", href);
+          }
+        }
+        await expect(hero.getByRole("button", { name: m.cta.copyUrl })).toHaveCount(
+          c.share ? 1 : 0,
+        );
+        // 公開前は Windows のインストーラーへのリンクをどこにも出さない
+        if (!c.available) await expect(page.locator(`a[href="${NSIS_URL}"]`)).toHaveCount(0);
+      });
+    }
+  }
+
+  test("判定前 (事前生成の HTML) は OS 中立のボタンで、動作要件へ移る", async ({ page }) => {
+    // 判定を終わらせないよう、UA-CH の応答を返さない
+    await page.addInitScript(() => {
+      Object.defineProperty(Navigator.prototype, "userAgentData", {
+        get: () => ({
+          platform: "Windows",
+          mobile: false,
+          getHighEntropyValues: () => new Promise(() => {}),
+        }),
+        configurable: true,
+      });
+    });
+    await page.goto(withAvail("/", true));
+    const button = heroPc(page).locator('[data-cta="pending"]');
+    await expect(button).toHaveText(ja.cta.states.pending.label as string);
+    await expect(button).toHaveAttribute("href", "#requirements");
+    await expect(heroPc(page).getByTestId("cta-note")).toHaveText(
+      pick(ja.cta.states.pending.note, true),
+    );
+    await expect(heroPc(page).getByTestId("download-meta")).toHaveText(
+      pick(ja.downloadMeta.any, true),
+    );
+  });
+
+  test("ダウンロードの計測は拡張子と閲覧中の環境を送る", async ({ page }) => {
+    await page.addInitScript(() => {
+      const w = window as unknown as { events: unknown[]; gtag: (...a: unknown[]) => void };
+      w.events = [];
+      w.gtag = (...a) => w.events.push(a);
+    });
+    // GitHub へは移らない (計測の onClick は動かしたまま、リンクの既定の動作だけ止める)
+    await page.addInitScript(() => {
+      document.addEventListener(
+        "click",
+        (e) => {
+          if ((e.target as Element).closest('a[href^="https://github.com/"]')) e.preventDefault();
+        },
+        true,
+      );
+    });
+    await fakeNavigator(page, ENVS.windowsX64);
+    await page.goto(withAvail("/", true));
+    await settleBeforeClick(page);
+    await heroPc(page).locator('[data-cta="download"]').click();
+    await heroPc(page).getByTestId("cta-alt").locator("a").click();
+    const events = await page.evaluate(() => (window as unknown as { events: unknown[] }).events);
+    expect(events).toEqual([
+      [
+        "event",
+        "file_download",
+        {
+          file_name: "mukuchi_x64-setup.exe",
+          file_extension: "exe",
+          link_url: NSIS_URL,
+          cta_location: "hero",
+          platform: "windows-x64",
+        },
+      ],
+      [
+        "event",
+        "file_download",
+        {
+          file_name: "mukuchi_aarch64.dmg",
+          file_extension: "dmg",
+          link_url: DMG_URL,
+          cta_location: "hero",
+          platform: "windows-x64",
+        },
+      ],
+    ]);
+  });
+
+  test("提供状況は公開状況で Windows のバッジを変える", async ({ page }) => {
+    await fakeNavigator(page, ENVS.macArm);
+    await page.goto(withAvail("/", false));
+    const list = page.getByTestId("platform-list");
+    await expect(list.locator("li").nth(1)).toHaveText(
+      `${ja.cta.platforms.windows}${ja.cta.platforms.comingSoon}`,
+    );
+    await page.goto(withAvail("/", true));
+    await expect(list.locator("li").nth(1)).toHaveText(
+      `${ja.cta.platforms.windows}${ja.cta.platforms.available}`,
+    );
+    // 動作要件の表のダウンロード (公開前の Windows は「準備中」)
+    await expect(
+      page.getByTestId("requirements-windows").getByTestId("requirements-download"),
+    ).toHaveAttribute("href", NSIS_URL);
+    await expect(
+      page.getByTestId("requirements-macos").getByTestId("requirements-download"),
+    ).toHaveAttribute("href", DMG_URL);
+  });
+});
+
+test.describe("OS のタブ", () => {
+  test.use({ viewport: PC });
+
+  for (const { name: lang, path, m } of LOCALE_PAGES) {
+    test(`${lang} Mac は macOS を選び、Windows に切り替えられる`, async ({ page }) => {
+      await fakeNavigator(page, ENVS.macArm);
+      await page.goto(path);
+      await settleBeforeClick(page);
+      const tabs = page.getByTestId("os-tabs");
+      await expect(tabs.getByRole("button", { name: "macOS" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      await expect(page.getByTestId("setup-steps-macos")).toBeVisible();
+      await expect(page.getByTestId("setup-steps-windows")).toBeHidden();
+      await expect(page.locator("#modes")).toContainText(m.modes.shortcut.macos.title);
+      await expect(page.getByTestId("voice-commands")).toContainText("⌘ + Enter");
+      await expect(page.getByTestId("demo-titlebar")).toHaveAttribute("data-os", "macos");
+
+      await tabs.getByRole("button", { name: "Windows" }).click();
+      await expect(tabs.getByRole("button", { name: "Windows" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      await expect(page.getByTestId("setup-steps-windows")).toBeVisible();
+      await expect(page.getByTestId("setup-steps-macos")).toBeHidden();
+      await expect(page.getByTestId("setup-steps-windows").locator("li")).toHaveText(
+        m.setup.steps.windows.map((s) => `${s.no}${s.title}${s.body}`),
+      );
+      // キー表記・常駐場所・デモも同じ OS になる
+      await expect(page.locator("#modes")).toContainText(m.modes.shortcut.windows.title);
+      await expect(page.locator("#modes")).toContainText(m.modes.shortcut.windows.body);
+      await expect(page.getByTestId("voice-commands")).toContainText("Ctrl + Enter");
+      await expect(page.getByTestId("demo-titlebar")).toHaveAttribute("data-os", "windows");
+      // 主ボタンは閲覧中の環境のまま
+      await expect(heroPc(page).locator('[data-cta="download"]')).toHaveAttribute("href", DMG_URL);
+    });
+
+    test(`${lang} Windows は Windows を選び、macOS に切り替えられる`, async ({ page }) => {
+      await fakeNavigator(page, ENVS.windowsX64);
+      await page.goto(path);
+      await settleBeforeClick(page);
+      const tabs = page.getByTestId("os-tabs");
+      await expect(tabs.getByRole("button", { name: "Windows" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
+      await expect(page.getByTestId("setup-steps-windows")).toBeVisible();
+      await expect(page.locator("#hero-title + div")).toContainText("Alt Space");
+      await tabs.getByRole("button", { name: "macOS" }).click();
+      await expect(page.getByTestId("setup-steps-macos")).toBeVisible();
+      await expect(page.getByTestId("voice-commands")).toContainText("⌘ + Enter");
+    });
+  }
+
+  test("Linux・判定できない環境は macOS を選ぶ", async ({ page }) => {
+    await fakeNavigator(page, ENVS.linux);
+    await page.goto("/");
+    await expect(
+      page.getByTestId("os-tabs").getByRole("button", { name: "macOS" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+});
+
+test.describe("事前生成の HTML", () => {
+  // 両 OS の内容が入り (JS なし・クローラー向け)、Mac だけを前提にした文言が残らない
+  const MAC_ONLY = {
+    ja: [
+      "Mac に常駐",
+      "Mac 用の音声入力",
+      "Mac 用のアプリ",
+      "Mac の外に",
+      "Mac 上で処理",
+      "Mac 版をダウンロード",
+    ],
+    en: [
+      "stays running on your Mac",
+      "voice input app for Mac",
+      "a Mac app",
+      "never leaves your Mac",
+      "runs on your Mac",
+      "Download for Mac",
+    ],
+  };
+
+  for (const { name: lang, path, m } of LOCALE_PAGES) {
+    test(`${lang} は両 OS の動作要件と手順を含み、Mac だけの文言を含まない`, async ({
+      browser,
+    }) => {
+      // JS なしで開き、ハイドレーション前の HTML (事前生成と同じ出力) をそのまま読む
+      const context = await browser.newContext({ javaScriptEnabled: false });
+      const page = await context.newPage();
+      await page.goto(path);
+      const text = (await page.locator("body").textContent()) ?? "";
+      const html = await page.content();
+      for (const os of ["macos", "windows"] as const) {
+        for (const r of m.requirements.rows[os]) expect(text).toContain(r.v);
+        for (const s of m.setup.steps[os]) expect(text).toContain(s.body);
+      }
+      for (const f of m.faq.items) expect(text).toContain(f.q);
+      for (const phrase of MAC_ONLY[lang]) {
+        expect(text).not.toContain(phrase);
+        expect(html).not.toContain(phrase);
+      }
+      // 判定前のボタンは OS 中立
+      await expect(page.locator('[data-cta="pending"]')).toHaveCount(3);
+      await expect(page.locator('[data-cta="download"]')).toHaveCount(0);
+      await context.close();
+    });
+  }
+
+  test("meta (hreflang・canonical) は OS で変わらない", async ({ page }) => {
+    await fakeNavigator(page, ENVS.windowsX64);
+    await page.goto(withAvail("/", true));
+    await expectLocaleMeta(page, "ja");
+    await fakeNavigator(page, ENVS.windowsArm);
+    await page.goto(withAvail("/en/", true));
+    await expectLocaleMeta(page, "en");
+  });
+});
+
+test.describe("OS ごとの表示 SP", () => {
+  test.use({ viewport: SP });
+
+  for (const { name: lang, path, m } of LOCALE_PAGES) {
+    for (const available of [false, true]) {
+      test(`${lang} スマホは Windows の公開状況に合わせて案内する (${available ? "公開後" : "公開前"})`, async ({
+        page,
+      }) => {
+        await fakeNavigator(page, ENVS.iphone);
+        await page.goto(withAvail(path, available));
+        const cta = page.getByTestId("hero-cta-sp");
+        await expect(cta).toContainText(pick(m.hero.desktopOnly, available));
+        await expect(cta).toContainText(pick(m.downloadMetaShort, available));
+        await expect(page.getByTestId("supported-os")).toHaveText(
+          pick(m.footer.supportedOs, available),
+        );
+      });
+    }
+
+    test(`${lang} 幅の狭い Windows のウィンドウではダウンロードボタンを出す`, async ({ page }) => {
+      await fakeNavigator(page, ENVS.windowsX64);
+      await page.goto(withAvail(path, true));
+      await expect(
+        page.getByTestId("hero-cta-sp").getByRole("link", { name: m.cta.download.windows.label }),
+      ).toHaveAttribute("href", NSIS_URL);
+    });
+  }
+});
+
+test.describe("スクリーンショット Windows", () => {
+  // 英語は文字列が長いので、Windows の表示 (注記・動作要件の表・FAQ) の崩れを目で確かめる
+  for (const { name: lang, path } of LOCALE_PAGES) {
+    for (const vp of [PC, SP]) {
+      test(`${lang} ${vp.width}px`, async ({ page }) => {
+        await page.setViewportSize(vp);
+        await page.emulateMedia({ reducedMotion: "reduce" });
+        await fakeNavigator(page, ENVS.windowsX64);
+        await page.goto(withAvail(path, true));
+        await expect(page.getByTestId("demo-titlebar")).toHaveAttribute("data-os", "windows");
+        for (const d of await page.locator("#faq details").all()) {
+          await d.evaluate((el) => el.setAttribute("open", ""));
+        }
+        await page.evaluate(() => document.fonts.ready);
+        // 横にはみ出さない
+        expect(
+          await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+        ).toBe(true);
+        await page.screenshot({
+          path: `e2e/screenshots/windows-${vp.width}-${lang}.png`,
+          fullPage: true,
+        });
+        // 全体だと縮小されて読めないので、注記・表の多い部分は要素ごとにも撮る
+        const parts = {
+          hero: page.locator('section[aria-labelledby="hero-title"]'),
+          setup: page.locator("#setup"),
+          final: page.locator('section[aria-labelledby="final-cta-title"]'),
+          footer: page.locator("footer"),
+        };
+        for (const [part, loc] of Object.entries(parts)) {
+          await loc.screenshot({ path: `e2e/screenshots/windows-${vp.width}-${lang}-${part}.png` });
+        }
+      });
+    }
+  }
 });

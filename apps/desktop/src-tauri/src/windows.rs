@@ -1117,7 +1117,22 @@ pub use panel_win::{
 // ---- settings / setup -------------------------------------------------------
 
 /// 設定ウィンドウを開く。開いていれば前面に出し、カテゴリを切り替える。
+#[cfg(not(target_os = "windows"))]
 pub fn open_settings(app: &AppHandle, category: Option<SettingsCategory>) -> Result<()> {
+    open_settings_now(app, category)
+}
+
+/// Windows: メインスレッドからウィンドウを作ると、作ったウィンドウが表示されないまま画面全体 (パネル・メニュー) が
+/// 反応しなくなる (メニュー・sync なコマンドはメインスレッドで動く)。専用のスレッドで作る (`on_worker`)。
+/// 失敗はログに出す (呼び出し元へは返らない)
+#[cfg(target_os = "windows")]
+pub fn open_settings(app: &AppHandle, category: Option<SettingsCategory>) -> Result<()> {
+    on_worker(app, "設定を開けません", move |app| {
+        open_settings_now(app, category)
+    })
+}
+
+fn open_settings_now(app: &AppHandle, category: Option<SettingsCategory>) -> Result<()> {
     if let Some(w) = app.get_webview_window(SETTINGS) {
         show_regular(app, &w)?;
         if let Some(category) = category {
@@ -1147,11 +1162,22 @@ pub fn open_settings(app: &AppHandle, category: Option<SettingsCategory>) -> Res
         .build()
         .context("設定ウィンドウを作成できません")?;
     #[cfg(target_os = "windows")]
-    guard_system_menu(&w);
+    guard_system_menu(app, &w);
     show_regular(app, &w)
 }
 
+#[cfg(not(target_os = "windows"))]
 pub fn open_setup(app: &AppHandle) -> Result<()> {
+    open_setup_now(app)
+}
+
+/// Windows: `open_settings` と同じ理由で専用のスレッドで作る
+#[cfg(target_os = "windows")]
+pub fn open_setup(app: &AppHandle) -> Result<()> {
+    on_worker(app, "セットアップを開けません", open_setup_now)
+}
+
+fn open_setup_now(app: &AppHandle) -> Result<()> {
     if let Some(w) = app.get_webview_window(SETUP) {
         return show_regular(app, &w);
     }
@@ -1171,24 +1197,51 @@ pub fn open_setup(app: &AppHandle) -> Result<()> {
         .build()
         .context("セットアップウィンドウを作成できません")?;
     #[cfg(target_os = "windows")]
-    guard_system_menu(&w);
+    guard_system_menu(app, &w);
     show_regular(app, &w)
+}
+
+/// 別スレッドで `f` を実行する。失敗は `what` を付けてログに出す
+#[cfg(target_os = "windows")]
+fn on_worker(
+    app: &AppHandle,
+    what: &'static str,
+    f: impl FnOnce(&AppHandle) -> Result<()> + Send + 'static,
+) -> Result<()> {
+    let app = app.clone();
+    std::thread::Builder::new()
+        .name("open-window".into())
+        .spawn(move || {
+            if let Err(e) = f(&app) {
+                log::error!("{what}: {e:#}");
+            }
+        })
+        .map(|_| ())
+        .context("スレッドを作れません")
 }
 
 /// ショートカットの記録中に Alt+Space でシステムメニューが開かないようにする (platform::sysmenu)。
 /// 失敗しても画面は使えるため、ログだけ残す
 #[cfg(target_os = "windows")]
-fn guard_system_menu(w: &tauri::WebviewWindow) {
-    match w.hwnd() {
-        Ok(hwnd) => {
-            if let Err(e) = crate::platform::sysmenu::guard_window(hwnd) {
-                log::warn!(
-                    "ウィンドウ ({}) のメニューの抑止を設定できません: {e:#}",
-                    w.label()
-                );
-            }
+fn guard_system_menu(app: &AppHandle, w: &tauri::WebviewWindow) {
+    let label = w.label().to_string();
+    let hwnd = match w.hwnd() {
+        Ok(hwnd) => hwnd.0 as isize,
+        Err(e) => {
+            log::warn!("ウィンドウ ({label}) のハンドルを取れません: {e}");
+            return;
         }
-        Err(e) => log::warn!("ウィンドウ ({}) のハンドルを取れません: {e}", w.label()),
+    };
+    // サブクラス化はウィンドウを作ったスレッドでしかできない。ウィンドウは専用のスレッドで作るため (`on_worker`)、
+    // ウィンドウのスレッド (メインスレッド) へ送る
+    let sent = app.run_on_main_thread(move || {
+        let hwnd = ::windows::Win32::Foundation::HWND(hwnd as _);
+        if let Err(e) = crate::platform::sysmenu::guard_window(hwnd) {
+            log::warn!("ウィンドウ ({label}) のメニューの抑止を設定できません: {e:#}");
+        }
+    });
+    if let Err(e) = sent {
+        log::warn!("メニューの抑止を設定できません: {e}");
     }
 }
 

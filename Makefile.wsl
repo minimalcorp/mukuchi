@@ -1,0 +1,14 @@
+# WSL (Linux) から Windows ネイティブへ make を中継する。コマンド名と意味は Windows (Makefile.windows) と同じで、
+# 実行は apps/desktop/scripts/wsl-make.sh が Windows 側の clone へ同期して powershell.exe で行う。
+# WSL に nix は要らない (flake は aarch64-darwin 専用)。WSL_DISTRO_NAME がある時だけ Makefile から読む。
+# Windows 側の場所は MUKUCHI_WIN_DIR (既定 C:\mukuchi-dev\mukuchi)。
+SHELL := /bin/bash
+.DEFAULT_GOAL := help
+
+# 複数ゴール指定時も中継は 1 回だけ。PROVISION=1 のようなコマンドラインの変数もそのまま渡す
+_GOALS := $(or $(MAKECMDGOALS),help)
+.PHONY: $(_GOALS)
+$(firstword $(_GOALS)):
+	@apps/desktop/scripts/wsl-make.sh $(_GOALS) $(foreach v,$(MAKEOVERRIDES),'$(v)')
+$(wordlist 2,$(words $(_GOALS)),$(_GOALS)):
+	@:

@@ -140,17 +140,31 @@ export function usePanelModel() {
     const timerSet = timers.current;
     // 表示時間の経過で消す。描画タイミングの調整ではなく、表示期間そのものの仕様
     const later = (ms: number, action: Action) => {
-      if (devOverrides.holdResults) return;
+      if (devOverrides.holdResults) return null;
       const t = setTimeout(() => {
         timerSet.delete(t);
         dispatch(action);
       }, ms);
       timerSet.add(t);
+      return t;
     };
     let lastPhase: AppStatus["phase"] | null = null;
+    // エラー表示を消す時刻の予約。エラーが消えた (OFF 操作・やり直し) ら取り消す。残すと、続けて出た次のエラーを
+    // 前の予約が早く消してしまう
+    let errorTimer: ReturnType<typeof setTimeout> | null = null;
+    const cancelErrorTimer = () => {
+      if (errorTimer === null) return;
+      clearTimeout(errorTimer);
+      timerSet.delete(errorTimer);
+      errorTimer = null;
+    };
     const onStatus = latestStatusOnly((status: AppStatus) => {
       dispatch({ type: "status", status });
-      if (status.phase === "error" && lastPhase !== "error") later(ERROR_DISPLAY_MS, { type: "hideError" });
+      if (status.phase !== "error") cancelErrorTimer();
+      if (status.phase === "error" && lastPhase !== "error") {
+        cancelErrorTimer();
+        errorTimer = later(ERROR_DISPLAY_MS, { type: "hideError" });
+      }
       if (status.phase === "off" || status.phase === "loading" || status.phase === "error") resetAudioLevel();
       lastPhase = status.phase;
     });

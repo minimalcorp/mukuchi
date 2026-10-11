@@ -1373,6 +1373,26 @@ impl Core {
     /// 「OFF なので ON」と扱われて無視される。押下は順に処理され、2回目は ON になった後の OFF になる
     pub async fn on_shortcut(self: &Arc<Self>) {
         let _guard = self.toggle_lock.lock().await;
+        // エラーを表示している間の押下は「OFF にする操作」: やり直さずに表示を消す。
+        // 録音を開始できないエラー (マイクが無い等) は押すたびに開始を試みて同じエラーを出し直すため、
+        // 利用者は表示を消せず (消えるのを待つしかなく)、出し直しで表示の時間も延びていた
+        // (ASR の停止・実行環境の欠落・GPU は状態そのものを表すため対象外。消すと別の表示 (読み込み中等) になる)
+        if !self.state.is_listening()
+            && self.state.error_displayed()
+            && self.state.error().is_some_and(|e| {
+                matches!(
+                    e.code,
+                    ErrorCode::MicrophoneMissing
+                        | ErrorCode::MicrophoneDenied
+                        | ErrorCode::AccessibilityDenied
+                        | ErrorCode::VadFailed
+                )
+            })
+        {
+            log::info!("ショートカット: エラー表示を消す");
+            self.state.clear_error();
+            return;
+        }
         let result = if !self.state.is_listening() {
             log::info!("ショートカット: ON");
             self.set_listening_locked(true).await

@@ -4,6 +4,9 @@
 # コマンド名と意味は同じで、中身だけが OS で変わる。以下の else から endif までが Mac の記述
 ifeq ($(OS),Windows_NT)
 include Makefile.windows
+else ifneq ($(WSL_DISTRO_NAME),)
+# WSL は Windows ネイティブへ中継する (nix は使わない)。以降の else から endif までが Mac の記述
+include Makefile.wsl
 else
 SHELL := /bin/bash
 .DEFAULT_GOAL := help

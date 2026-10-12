@@ -16,7 +16,7 @@ export const OSES: readonly Os[] = ["macos", "windows"];
  * LP を deploy する (リンク切れのボタンを出さない。docs/plans/windows-plan.md §10.1)。
  * false の間は Windows の主ボタンを「準備中」にする。OS 中立の文言はこの値に関係なく出す
  */
-export const WINDOWS_AVAILABLE = false;
+export const WINDOWS_AVAILABLE = true;
 
 /** GitHub Releases の最新版を指す固定 URL (release.yml が版番号なしの成果物も添付する) */
 export const DMG_URL =
@@ -68,13 +68,12 @@ export const MODELS = {
      */
     en: { name: "Qwen3-ASR 1.7B", bytes: 2_174_372_462 },
   },
-  // Windows は GGUF (LLM Q8_0 + mmproj Q8_0 の 2 ファイル)。暫定値: 変換したローカルのファイルの合計
-  // (spikes/asr-bench/WINDOWS_DECISION.md)。HF の公開後に固定した revision の tree API の値で確定する
+  // Windows は GGUF (LLM Q8_0 + mmproj Q8_0 の 2 ファイル)。容量は desktop の CATALOG (provisioning/models.rs) の値
   windows: {
-    /** ja-gguf: minimalcorp/Qwen3-ASR-1.7B-JA-GGUF (暫定 2,190,132,448 B) */
+    /** ja-gguf: minimalcorp/Qwen3-ASR-1.7B-JA-GGUF (2,190,132,448 B) */
     ja: { name: "Qwen3-ASR 1.7B", bytes: 2_190_132_448 },
-    /** base-gguf: minimalcorp/Qwen3-ASR-1.7B-GGUF (暫定 2,520,744,352 B)。元のモデル */
-    en: { name: "Qwen3-ASR 1.7B", bytes: 2_520_744_352 },
+    /** base-gguf: minimalcorp/Qwen3-ASR-1.7B-GGUF (2,520,744,384 B)。元のモデル */
+    en: { name: "Qwen3-ASR 1.7B", bytes: 2_520_744_384 },
   },
 } as const satisfies Record<Os, Record<"ja" | "en", { name: string; bytes: number }>>;
 

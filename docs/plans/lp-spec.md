@@ -8,7 +8,7 @@
   - Mac: `https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_aarch64.dmg`
   - Windows: `https://github.com/minimalcorp/mukuchi/releases/latest/download/mukuchi_x64-setup.exe` (署名なし。docs/release.md の「Windows」)
   - リリース用ワークフローは版番号なしの成果物 (と `.sha256`) を添付する
-- Windows 版の公開: `site.ts` の `WINDOWS_AVAILABLE` (既定 false)。Windows の Release が公開されて exe が実在してから true にして deploy する (リンク切れのボタンを出さない)。false の間は Windows の主ボタンを「準備中」にし、Windows のインストーラーへのリンクをどこにも出さない。OS 中立の文言はこの値に関係なく出す
+- Windows 版の公開: `site.ts` の `WINDOWS_AVAILABLE` (v0.5.0 の Windows の Release 公開後に true)。Windows の Release が公開されて exe が実在してから true にして deploy する (リンク切れのボタンを出さない)。false の間は Windows の主ボタンを「準備中」にし、Windows のインストーラーへのリンクをどこにも出さない。OS 中立の文言はこの値に関係なく出す
 - GitHub: `https://github.com/minimalcorp/mukuchi`
 
 ## 数値・文言 (実装と実測を正とする)
@@ -39,7 +39,7 @@
 ## 言語 (2026-10-06)
 
 - `/` = 日本語、`/en/` = 英語 (両方を事前生成)。方針は [i18n-plan.md](i18n-plan.md) の「web (LP)」。文言は `apps/web/app/i18n/{ja,en}.ts` (ja が型の正)、数値・版・URL は `site.ts`
-- モデルの名前・容量はページの言語を話す人の推奨モデルを OS × 言語で持つ (`site.ts` の `MODELS`): Mac ja = `ja-8bit` (2,185,804,096 B → 約 2.2 GB)、Mac en = `base-1.7b-8bit` (2,174,372,462 B → about 2.2 GB)、Windows ja = `ja-gguf` (暫定 2,190,132,448 B → 約 2.2 GB)、Windows en = `base-gguf` (暫定 2,520,744,352 B → about 2.5 GB)。Windows の値は変換したローカルのファイルの合計で、HF 公開後に tree API の値で確定する。英語のページは、話す言語 (英語・日本語) を設定で選べることを動作要件とセットアップの手順に書く
+- モデルの名前・容量はページの言語を話す人の推奨モデルを OS × 言語で持つ (`site.ts` の `MODELS`): Mac ja = `ja-8bit` (2,185,804,096 B → 約 2.2 GB)、Mac en = `base-1.7b-8bit` (2,174,372,462 B → about 2.2 GB)、Windows ja = `ja-gguf` (2,190,132,448 B → 約 2.2 GB)、Windows en = `base-gguf` (2,520,744,384 B → about 2.5 GB)。Windows の値は desktop の CATALOG (`provisioning/models.rs`) と同じ。英語のページは、話す言語 (英語・日本語) を設定で選べることを動作要件とセットアップの手順に書く
 - 会社名: ja「株式会社 Minimal」、en「Minimal, K.K.」
 - OG 画像 `public/og-image.jpg`・`public/og-image-en.jpg` は `apps/web/scripts/og-image.mjs ja|en` で作る (2 OS 対応で説明から「Mac」を外して作り直した。Chromium が要るので WSL では Windows 側で実行した)
 

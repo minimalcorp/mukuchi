@@ -200,6 +200,28 @@ const PANEL: Scenario[] = [
       setStatus(db, { phase: "loading", loadingProgress: null, error: null });
     },
   },
+  {
+    name: "starting",
+    // 準備中も Rust の入力レベルが届きうる。メーターが反応しないことを見るため、しきい値を超える値にする
+    description: "オン・準備中 (マイクが音を拾い始める前。&style=compact でコンパクト表示)",
+    setup: (db) => {
+      listening(db, 0.72);
+      db.status.phase = "starting";
+    },
+  },
+  {
+    name: "starting-speaking",
+    description: "準備中に話し始めた (Rust は準備完了まで starting を出す。プレビューは出し、文言は準備中のまま)",
+    setup: (db) => {
+      listening(db, 0.72);
+      db.status.phase = "starting";
+    },
+    script: (api) => {
+      api.started(1);
+      const t = sp(api.db);
+      api.partial({ id: 1, text: t.partial, stableLength: Math.max(0, t.partial.length - 5) });
+    },
+  },
   { name: "idle", description: "オン・待機中 (しきい値未満)", setup: (db) => listening(db) },
   {
     name: "speaking",

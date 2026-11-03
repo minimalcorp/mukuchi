@@ -24,7 +24,7 @@ pub struct Segmenter {
     speaking: bool,
     /// 発話中の音声 (pre-pad を含む)
     audio: Vec<f32>,
-    /// `audio` のうち pre-pad 部分のフレーム数
+    /// `audio` のうち pre-pad 部分 (遡った語頭と、補った無音を含む) のフレーム数
     pad_frames: usize,
     /// 発話開始からのフレーム数
     speech_frames: usize,
@@ -85,8 +85,13 @@ impl Segmenter {
                 while first > 0 && self.pre[first - 1].1 >= p.negative_threshold {
                     first -= 1;
                 }
+                // 遡りの前に pre-pad 分の音声が無ければ (録音開始直後・前の発話の直後など)、毎回足りない分を無音で補う。
+                // 発話の先頭に無音が無いと ASR が冒頭の短い語 (「えっと」「あの」) を落とすため (実測)。
+                // 発話は1件ずつ ASR に送るため、先頭の無音は害がない
+                let missing = p.pre_pad_frames.saturating_sub(first);
                 let first = first.saturating_sub(p.pre_pad_frames);
-                self.pad_frames = self.pre.len() - first;
+                self.pad_frames = missing + self.pre.len() - first;
+                self.audio.resize(missing * FRAME_SAMPLES, 0.0);
                 for (f, _) in self.pre.drain(..).skip(first) {
                     self.audio.extend_from_slice(&f);
                 }
@@ -253,7 +258,8 @@ mod tests {
         let SegmentEvent::Ended { audio } = &ev[1].1 else {
             panic!()
         };
-        assert_eq!(audio.len(), (12 + 60 + 5 + 10) * FRAME_SAMPLES);
+        // 補った無音 10 + 発話 + 末尾 10
+        assert_eq!(audio.len(), (10 + 12 + 60 + 5 + 10) * FRAME_SAMPLES);
     }
 
     #[test]
@@ -325,8 +331,8 @@ mod tests {
         let Some(SegmentEvent::Ended { audio }) = seg.stop() else {
             panic!("無音待ち中は確定する")
         };
-        // pre-pad 5 + 発話 20 + 末尾 10 (残す末尾の上限 10 と同じ)
-        assert_eq!(audio.len(), (5 + 20 + 10) * FRAME_SAMPLES);
+        // pre-pad 10 (無音 5 + 補った無音 5) + 発話 20 + 末尾 10 (残す末尾の上限 10 と同じ)
+        assert_eq!(audio.len(), (10 + 20 + 10) * FRAME_SAMPLES);
         assert!(!seg.is_speaking());
         assert_eq!(seg.stop(), None);
     }
@@ -358,8 +364,8 @@ mod tests {
         let Some(SegmentEvent::Ended { audio }) = seg.finish_now() else {
             panic!("話している最中でも確定する")
         };
-        // pre-pad 5 + 発話 20 (末尾の無音はまだない)
-        assert_eq!(audio.len(), (5 + 20) * FRAME_SAMPLES);
+        // pre-pad 10 (無音 5 + 補った無音 5) + 発話 20 (末尾の無音はまだない)
+        assert_eq!(audio.len(), (10 + 20) * FRAME_SAMPLES);
         assert!(!seg.is_speaking());
         assert_eq!(seg.finish_now(), None, "発話中でなければ何もしない");
 
@@ -369,7 +375,7 @@ mod tests {
         let Some(SegmentEvent::Ended { audio }) = seg.finish_now() else {
             panic!()
         };
-        assert_eq!(audio.len(), (20 + 10) * FRAME_SAMPLES);
+        assert_eq!(audio.len(), (10 + 20 + 10) * FRAME_SAMPLES);
     }
 
     #[test]
@@ -378,6 +384,54 @@ mod tests {
         run(&mut seg, &seq(&[(0.9, 3)]), -20.0);
         assert_eq!(seg.finish_now(), Some(SegmentEvent::Misfire));
         assert!(!seg.is_speaking());
+    }
+
+    /// 前に pre-pad 分の音声が無い発話 (録音開始直後など): 足りない分を先頭の無音で補い、
+    /// 確定時の末尾の削り (pad_frames を含む長さ) とも合う
+    #[test]
+    fn missing_prepad_is_filled_with_silence() {
+        let mut seg = Segmenter::new(params());
+        // 前に 3 フレームだけ (値は 1.0) → 発話 20 (値は 2.0) → 無音 50
+        let mut ev = Vec::new();
+        for i in 0..73 {
+            let (v, p) = match i {
+                0..3 => (1.0, 0.0),
+                3..23 => (2.0, 0.9),
+                _ => (3.0, 0.0),
+            };
+            if let Some(e) = seg.push(&vec![v; FRAME_SAMPLES], p, -20.0) {
+                ev.push(e);
+            }
+        }
+        let Some(SegmentEvent::Ended { audio }) = ev.last() else {
+            panic!("{ev:?}")
+        };
+        // 補った無音 7 + 前の 3 + 発話 20 + 末尾 10
+        assert_eq!(audio.len(), (7 + 3 + 20 + 10) * FRAME_SAMPLES);
+        assert!(audio[..7 * FRAME_SAMPLES].iter().all(|&x| x == 0.0));
+        assert_eq!(audio[7 * FRAME_SAMPLES], 1.0);
+        assert_eq!(audio[10 * FRAME_SAMPLES], 2.0);
+        assert_eq!(audio[30 * FRAME_SAMPLES], 3.0);
+
+        // 遡りの分だけで pre-pad が足りない: 遡った語頭の前に無音を補う
+        let mut seg = Segmenter::new(params());
+        seg.push(&vec![5.0; FRAME_SAMPLES], 0.4, -50.0);
+        seg.push(&vec![5.0; FRAME_SAMPLES], 0.4, -50.0);
+        assert_eq!(
+            seg.push(&vec![6.0; FRAME_SAMPLES], 0.9, -20.0),
+            Some(SegmentEvent::Started)
+        );
+        let audio = seg.current_audio().unwrap();
+        assert_eq!(audio.len(), (10 + 2 + 1) * FRAME_SAMPLES);
+        assert_eq!(audio[0], 0.0);
+        assert_eq!(audio[10 * FRAME_SAMPLES], 5.0);
+
+        // 十分な音声があれば補わない
+        let mut seg = Segmenter::new(params());
+        run(&mut seg, &seq(&[(0.0, 20), (0.9, 1)]), -20.0);
+        let audio = seg.current_audio().unwrap();
+        assert_eq!(audio.len(), 11 * FRAME_SAMPLES);
+        assert_eq!(audio[0], 10.0);
     }
 
     #[test]

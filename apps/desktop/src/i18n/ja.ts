@@ -106,6 +106,7 @@ export const ja = {
       vad_failed: "発話検出を開始できません",
       gpu_unavailable: "GPU を使えません",
     },
+    starting: "準備中",
     idle: "待機中",
     speaking: "認識中",
     finalizing: "確定しています…",

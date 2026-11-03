@@ -65,6 +65,7 @@ import {
   type Permissions,
   type ProvisioningStatus,
 } from "@/lib/ipc";
+import { showsInputLevel } from "@/lib/phase";
 import { useOsFeatures } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 
@@ -797,7 +798,8 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
   const [recognized, setRecognized] = useState(false);
   // 音声コマンドは欄にキー操作として届くため、何を送ったかをバッジで示す
   const [commandsSent, setCommandsSent] = useState<{ id: number; text: string; key: string }[]>([]);
-  const on = status != null && ["listening", "speaking", "finalizing", "done"].includes(status.phase);
+  // 準備中 (starting) は ON だが、マイクがまだ音を拾えていないのでレベルを出さない
+  const live = status != null && showsInputLevel(status.phase);
 
   // セットアップ完了前は panel が出ていないため、このステップに入った時に出す (パネルでオンにしてもらう)
   useEffect(() => {
@@ -834,7 +836,7 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
         </p>
         <div className="flex h-8 flex-none items-center gap-2.5 rounded-md bg-surface-muted px-3">
           <AudioLines size={16} className="flex-none text-blue-500" aria-hidden />
-          <SetupLevelBar on={on} />
+          <SetupLevelBar on={live} />
           <span className="text-xs text-fg-muted">{ts.inputLevel}</span>
         </div>
         {/* 実際の入力先。前面のこの欄に Rust から貼り付けられる */}

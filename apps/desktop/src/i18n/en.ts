@@ -102,6 +102,7 @@ export const en = {
       vad_failed: "Couldn’t start speech detection",
       gpu_unavailable: "GPU not available",
     },
+    starting: "Starting…",
     idle: "Listening",
     speaking: "Hearing you",
     finalizing: "Finishing…",

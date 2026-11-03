@@ -7,7 +7,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 // ---------- 型 ----------
 
-export type Phase = "loading" | "off" | "listening" | "speaking" | "finalizing" | "done" | "error";
+// starting: ON にしたがマイクがまだ音を拾えると判断できていない (準備中)。表示だけの区別で、この間の音声も文字起こしに使う (「録音開始の準備中」)
+export type Phase = "loading" | "off" | "starting" | "listening" | "speaking" | "finalizing" | "done" | "error";
 
 export type AppErrorCode =
   | "accessibility_denied"

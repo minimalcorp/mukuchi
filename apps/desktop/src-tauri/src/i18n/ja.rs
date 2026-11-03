@@ -19,6 +19,7 @@ pub(super) fn text(m: &Msg) -> String {
         MenuLoading(Some(p)) => format!("モデルを読み込んでいます… {p}%"),
         MenuLoading(None) => s("モデルを読み込んでいます…"),
         MenuOffReady => s("オフ・モデル読み込み済み"),
+        MenuStarting => s("準備中"),
         MenuListening => s("聞いています"),
         MenuError => s("エラー"),
         // Windows の「設定」はアプリの設定 (MenuSettings) と紛れるため Windows を付ける

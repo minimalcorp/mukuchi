@@ -69,9 +69,10 @@ function reducer(state: State, action: Action): State {
       const { status } = action;
       const enteringError = status.phase === "error" && state.status?.phase !== "error";
       // 発話中 (speaking) でなくなったら、話していた発話は確定処理に入っている。
-      // 以降に遅れて届いた途中表示は反映しない (表示の巻き戻り防止)
+      // 以降に遅れて届いた途中表示は反映しない (表示の巻き戻り防止)。
+      // 準備中 (starting) は発話中より優先して出る phase で、準備中に話し始めた発話はまだ続いているので確定扱いにしない
       const items =
-        status.phase === "speaking"
+        status.phase === "speaking" || status.phase === "starting"
           ? state.items
           : state.items.map((it) => (it.stage === "speaking" ? { ...it, stage: "finalizing" as const } : it));
       return {
@@ -165,7 +166,10 @@ export function usePanelModel() {
         cancelErrorTimer();
         errorTimer = later(ERROR_DISPLAY_MS, { type: "hideError" });
       }
-      if (status.phase === "off" || status.phase === "loading" || status.phase === "error") resetAudioLevel();
+      // starting も 0 に戻す: 前回 ON の間の最後のレベルを残さず、listening になってから届いた値から出す
+      if (status.phase === "off" || status.phase === "loading" || status.phase === "error" || status.phase === "starting") {
+        resetAudioLevel();
+      }
       lastPhase = status.phase;
     });
 

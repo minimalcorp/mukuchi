@@ -199,6 +199,24 @@
   }
 }
 
+/*
+ * 準備中 (starting) のコンパクト表示。ON の色のまま透明度をゆっくり脈動させ、待機中 (静止) と見分ける。
+ * 動きを減らす設定 (prefers-reduced-motion) では脈動をやめ、薄くしたまま止める (待機中との区別は残す)
+ */
+@utility animate-starting-pulse {
+  animation: starting-pulse var(--duration-starting-pulse) ease-in-out infinite;
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+    opacity: 0.55;
+  }
+}
+
+@keyframes starting-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
 @keyframes fade-in {
   from {
     opacity: 0;

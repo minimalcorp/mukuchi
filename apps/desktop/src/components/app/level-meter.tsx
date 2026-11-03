@@ -17,6 +17,7 @@ export function LevelMeter({
   level,
   threshold,
   active,
+  disabled = false,
   className,
   testId,
 }: {
@@ -26,6 +27,8 @@ export function LevelMeter({
   threshold: number;
   /** 発話として扱っている間 true (バーを青にする) */
   active: boolean;
+  /** 音を拾えていない間 (準備中) true。薄く出し、話せる状態ではないと分かるようにする (レベルは呼び出し側で 0 にする) */
+  disabled?: boolean;
   className?: string;
   testId?: string;
 }) {
@@ -35,7 +38,12 @@ export function LevelMeter({
     <div
       data-testid={testId}
       data-active={active}
-      className={cn("relative flex h-1.5 flex-1 overflow-hidden rounded-[3px]", className)}
+      data-disabled={disabled}
+      className={cn(
+        "relative flex h-1.5 flex-1 overflow-hidden rounded-[3px] transition-opacity duration-(--duration-fast) ease-standard",
+        disabled && "opacity-40",
+        className,
+      )}
     >
       <span data-testid={testId && `${testId}-below`} className="bg-meter-track" style={{ width: `${split}%` }} />
       <span className="flex-1 bg-meter-track-over" />

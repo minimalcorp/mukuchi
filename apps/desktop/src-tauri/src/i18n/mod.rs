@@ -201,6 +201,8 @@ pub enum Msg {
     /// 読み込みの進捗 (%)。分からなければ None
     MenuLoading(Option<u32>),
     MenuOffReady,
+    /// 録音開始の準備中 (Phase::Starting)
+    MenuStarting,
     MenuListening,
     MenuError,
     MenuOpenSystemSettings,
@@ -484,6 +486,7 @@ mod tests {
             MenuLoading(None),
             MenuLoading(Some(42)),
             MenuOffReady,
+            MenuStarting,
             MenuListening,
             MenuError,
             MenuOpenSystemSettings,
@@ -770,9 +773,10 @@ mod tests {
             ErrInsertElevated => 124,
             UninstallerMissing => 125,
             UninstallerLaunchFailed => 126,
+            MenuStarting => 127,
         }
     }
-    const VARIANTS: usize = 127;
+    const VARIANTS: usize = 128;
 
     fn has_japanese(s: &str) -> bool {
         s.chars().any(|c| {

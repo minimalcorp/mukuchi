@@ -71,7 +71,8 @@ impl IconKind {
         match phase {
             // 読み込み中も使えない状態として OFF と同じにする
             Phase::Loading | Phase::Off => Self::Off,
-            Phase::Listening | Phase::Done => Self::Listening,
+            // 準備中も ON の見た目にする (押下で OFF にできる)
+            Phase::Starting | Phase::Listening | Phase::Done => Self::Listening,
             Phase::Speaking => Self::Speaking,
             Phase::Finalizing => Self::Finalizing,
             Phase::Error => Self::Error,
@@ -141,6 +142,7 @@ pub fn status_text(s: &AppStatus) -> String {
         )
         .to_string(),
         Phase::Off => Msg::MenuOffReady.to_string(),
+        Phase::Starting => Msg::MenuStarting.to_string(),
         Phase::Listening | Phase::Speaking | Phase::Finalizing | Phase::Done => {
             Msg::MenuListening.to_string()
         }
@@ -584,6 +586,10 @@ mod tests {
         assert_eq!(m.recover, None);
 
         s.set_listening(true);
+        let m = MenuModel::of(&s.status(), true, true, None);
+        assert_eq!(m.status, "準備中");
+        assert!(m.toggle_enabled, "準備中も OFF にできる");
+        s.set_capture_ready(true);
         assert_eq!(
             MenuModel::of(&s.status(), true, true, None).status,
             "聞いています"
@@ -723,6 +729,7 @@ mod tests {
         assert_eq!(IconKind::of(Phase::Speaking), IconKind::Speaking);
         assert_eq!(IconKind::of(Phase::Finalizing), IconKind::Finalizing);
         assert_eq!(IconKind::of(Phase::Done), IconKind::Listening);
+        assert_eq!(IconKind::of(Phase::Starting), IconKind::Listening);
         // PNG が @1x=18px / @2x=36px であること
         for png in [ICON_LOGO, ICON_LOGO_OFF, ICON_LOGO_DOT] {
             assert_eq!(&png.x1[16..24], &[0, 0, 0, 18, 0, 0, 0, 18]);

@@ -21,6 +21,8 @@ pub(super) fn text(m: &Msg) -> String {
         MenuLoading(None) => s("Loading Model…"),
         MenuOffReady => s("Off · Model Loaded"),
         MenuStarting => s("Starting…"),
+        MenuNoInput => s("No audio from mic"),
+        MenuOpenSoundSettings => s("Open Sound Settings…"),
         MenuListening => s("Listening"),
         MenuError => s("Error"),
         // Windows の「設定」はアプリの設定 (MenuSettings) と紛れるため Windows を付ける

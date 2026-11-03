@@ -103,9 +103,9 @@ pub async fn request_microphone(core: State<'_, Arc<Core>>) -> CmdResult<Permiss
 }
 
 #[tauri::command]
-pub fn open_system_settings(pane: Pane) -> CmdResult<()> {
+pub fn open_system_settings(core: State<'_, Arc<Core>>, pane: Pane) -> CmdResult<()> {
     // macOS 13 未満の LoginItems は理由を出す (Msg)。それ以外は想定外
-    permissions::open_system_settings(pane).map_err(|e| {
+    permissions::open_system_settings(pane, &core.settings.get()).map_err(|e| {
         if e.downcast_ref::<Msg>().is_some() {
             err(e)
         } else {

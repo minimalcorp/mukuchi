@@ -304,7 +304,7 @@ export function createDb(locale: Locale, platform: Platform = "macos"): MockDb {
     // Mac の get_gpu_status は常に ok (GPU の名前は返さない)
     gpu: platform === "windows" ? gpuStatus("ok") : { kind: "ok", devices: [], selected: null, device: "gpu" },
     gpuProbe: null,
-    status: { phase: "off", loadingProgress: null, error: null, seq: 0 },
+    status: { phase: "off", loadingProgress: null, error: null, on: false, seq: 0 },
     settings,
     permissions: { microphone: "granted", accessibility: true },
     provisioning: provisioning("done", { locale }),

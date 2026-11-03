@@ -4,13 +4,16 @@
  * Rust はウィンドウをその大きさにし、アンカー (panel-anchor) の辺・角を固定して広げる/縮める (透明部分がクリックを奪わないように)。
  * 描画内容もアンカーに寄せて配置し、展開・収縮がアンカーの辺・角から始まるようにする。
  * 表示形式 (Settings.panelStyle) が compact の時はマイクの円形ボタンだけを出す。
- * 描画内容の種類 (OFF・待機中/認識中・読み込み中・エラー・コンパクト) が変わる時は、面の大きさをアニメーションさせる (useBodyMorph)。
+ * 描画内容の種類 (OFF・待機中/認識中・読み込み中・エラー・無音・コンパクト) が変わる時は、面の大きさをアニメーションさせる (useBodyMorph)。
+ * 準備中 (starting)・無音 (no_input) は ON だが待機中には見せず、OFF と同じ系統のピルで出す (「待機中 = マイク入力が有効」。
+ * docs/architecture.md「録音開始の準備中」)。待機中のピルへは listening になった時に広げる。
  */
 import {
   AudioLines,
   CircleAlert,
   CircleCheck,
   CornerDownLeft,
+  ExternalLink,
   Gpu,
   LoaderCircle,
   Mic,
@@ -39,7 +42,7 @@ import { useLevelEnvelope } from "@/lib/level-envelope";
 import { env } from "@/lib/env";
 import { errorActionView } from "@/lib/error-actions";
 import { usePanelDrag } from "@/lib/panel-drag";
-import { isOnPhase } from "@/lib/phase";
+import { showsInputLevel } from "@/lib/phase";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n/context";
 import type { Messages } from "@/i18n/context";
@@ -74,7 +77,7 @@ const sizeOf = (el: HTMLElement): Size => {
 };
 
 /** 描画内容の種類。種類が変わる時だけ大きさのアニメーション (useBodyMorph) を付ける */
-type BodyKind = "compact" | "listening" | "loading" | "error" | "off";
+type BodyKind = "compact" | "listening" | "loading" | "error" | "off" | "no_input";
 
 export function PanelWindow() {
   const { status, items, lastShown, errorVisible } = usePanelModel();
@@ -89,9 +92,8 @@ export function PanelWindow() {
   // 表示形式は右クリックメニュー・設定画面から変わる (settings-changed)
   useEffect(() => subscribeWithInitial("settings-changed", commands.getSettings, (s) => setStyle(s.panelStyle)), []);
 
-  const isOn = status ? isOnPhase(status.phase) : false;
-  // 準備中 (starting) も待機中と同じピル (同じ BodyKind) で出し、listening になった時に面を動かさない
-  const starting = status?.phase === "starting";
+  // 押下で何をするか (OFF なら ON にする) は on で決める。OFF の後の確定処理中 (finalizing) も OFF として出す
+  const isOn = status?.on ?? false;
   const expanded = items.length > 0;
 
   let kind: BodyKind | null = null;
@@ -101,17 +103,18 @@ export function PanelWindow() {
   } else if (style === "compact") {
     kind = "compact";
     body = <CompactPanel status={status} items={items} />;
+  } else if (status.phase === "starting") {
+    // OFF と同じ BodyKind にし、押下 (OFF→準備中) では面を動かさない。準備中に発話を検出して items が来ても広げない
+    // (待機中・認識中に見えると、まだ拾えていないのに話してよいと誤解される)。listening/speaking になってから広げる
+    kind = "off";
+    body = <StartingPill />;
+  } else if (status.phase === "no_input") {
+    // 文言とサウンド設定のボタンで OFF・準備中より幅が大きく変わるため、種類を分けて面の大きさをアニメーションさせる
+    kind = "no_input";
+    body = <NoInputPill />;
   } else if (expanded || isOn) {
     kind = "listening";
-    body = (
-      <ListeningPanel
-        anchor={anchor}
-        isOn={isOn}
-        starting={starting}
-        expanded={expanded}
-        items={expanded ? items : lastShown}
-      />
-    );
+    body = <ListeningPanel anchor={anchor} isOn={isOn} expanded={expanded} items={expanded ? items : lastShown} />;
   } else if (status.phase === "loading") {
     kind = "loading";
     body = <LoadingPill progress={status.loadingProgress} />;
@@ -162,7 +165,7 @@ const MORPH_DURATION = 180;
 const MORPH_EASING = "cubic-bezier(0.2, 0, 0, 1)";
 
 /**
- * 描画内容の種類の切り替え (OFF ⇄ 待機中、通常 ⇄ コンパクト、読み込み中・エラー ⇄ 他) のアニメーション。
+ * 描画内容の種類の切り替え (OFF・準備中 ⇄ 待機中、通常 ⇄ コンパクト、読み込み中・エラー・無音 ⇄ 他) のアニメーション。
  * ピル・カードと同じ面 (morph) を切り替え前の大きさから切り替え後の大きさへ 180ms で変え、その間 切り替え後の内容は見えないまま置く。
  * ウィンドウはアニメーションの間 切り替え前と後の大きい方に保ち (コンテナの min-width/height)、終わってから最終の大きさにする
  * (ListeningPanel の展開・収縮と同じ考え方。縮む途中でウィンドウを変えると、描画と反映がずれて面が揺れる)。
@@ -332,8 +335,84 @@ function OffPill() {
         className="press flex h-7 cursor-pointer items-center gap-1.5 rounded-full border-0 bg-transparent pr-3 pl-2.5 text-xs font-medium text-fg-strong transition-control hover:bg-surface-active"
       >
         <MicOff size={16} className="text-fg-muted" aria-hidden />
-        {t.panel.turnOn}
+        <PillLabel shown={t.panel.turnOn} />
       </button>
+    </div>
+  );
+}
+
+/**
+ * OFF・準備中のピルの文言。両方の文言を重ねて広い方の幅を取り、見えない方を隠す。
+ * OFF ⇄ 準備中で同じ BodyKind のまま (面のアニメーションなしで) 切り替わるので、幅が変わるとピルが跳ねて見えるため
+ */
+function PillLabel({ shown }: { shown: string }) {
+  const { t } = useI18n();
+  return (
+    // ボタンの中央揃えを継がず、アイコンの隣に寄せる (準備中は OFF の文言より短く、中央だとアイコンから離れる)
+    <span className="grid text-left whitespace-nowrap">
+      {[t.panel.turnOn, t.panel.starting].map((label) => (
+        <span key={label} className={cn("[grid-area:1/1]", label !== shown && "invisible")} aria-hidden={label !== shown}>
+          {label}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/**
+ * 準備中 (starting)。ON だがマイクがまだ音を拾えると判断できていないので、OFF と同じ形・色で回転するアイコンを出す。
+ * 押すと OFF (準備中も ON として扱う)
+ */
+function StartingPill() {
+  const { t } = useI18n();
+  const drag = usePanelDrag();
+  return (
+    <div
+      {...drag}
+      data-testid="panel-pill"
+      data-state="starting"
+      className="flex h-9 items-center select-none rounded-full border border-line-default bg-surface-card px-1 shadow-md"
+    >
+      <button
+        type="button"
+        aria-label={t.panel.turnOff}
+        onClick={() => runCommand(commands.setListening(false))}
+        className="press flex h-7 cursor-pointer items-center gap-1.5 rounded-full border-0 bg-transparent pr-3 pl-2.5 text-xs font-medium text-fg-strong transition-control hover:bg-surface-active"
+      >
+        {/* 動きを減らす設定では回さない (静止したアイコンと文言で準備中と分かる) */}
+        <LoaderCircle
+          size={16}
+          data-testid="panel-starting-icon"
+          className="flex-none text-fg-muted motion-safe:animate-spin"
+          aria-hidden
+        />
+        <PillLabel shown={t.panel.starting} />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * 無音 (no_input)。ON だがマイクの音が完全な 0 のまま (ミュート・入力音量 0 等)。待機中には見せず、
+ * 確かめる先 (OS のサウンドの入力設定) を出す。左のボタンで OFF にできる
+ */
+function NoInputPill() {
+  const { t } = useI18n();
+  const drag = usePanelDrag();
+  return (
+    <div
+      {...drag}
+      data-testid="panel-pill"
+      data-state="no_input"
+      className="flex h-9 items-center select-none gap-2 rounded-full border border-line-default bg-surface-card pr-1.5 pl-1 shadow-md"
+    >
+      <ToggleButton variant="pending" icon={<MicOff size={14} className="text-amber-500" aria-hidden />} />
+      <span role="status" className="text-xs font-medium whitespace-nowrap text-fg-strong">
+        {t.panel.noInput}
+      </span>
+      <PillActionButton icon={ExternalLink} onClick={() => runCommand(commands.openSystemSettings("sound_input"))}>
+        {t.panel.soundSettings}
+      </PillActionButton>
     </div>
   );
 }
@@ -414,15 +493,23 @@ function ErrorActionButton({ error }: { error: AppError }) {
   const { t, platform } = useI18n();
   const action = errorActionView(error.action, t, platform);
   if (!action) return null;
-  const Icon = action.icon;
+  return (
+    <PillActionButton icon={action.icon} onClick={() => runCommand(action.run())}>
+      {action.label}
+    </PillActionButton>
+  );
+}
+
+/** ピルの右端の小さなボタン (エラーの復旧・無音のサウンド設定) */
+function PillActionButton({ icon: Icon, onClick, children }: { icon: LucideIcon; onClick: () => void; children: ReactNode }) {
   return (
     <button
       type="button"
-      onClick={() => runCommand(action.run())}
+      onClick={onClick}
       className="press flex h-6 flex-none cursor-pointer items-center gap-1 rounded-full border-0 bg-surface-active px-2.5 text-2xs font-medium whitespace-nowrap text-fg-strong transition-control hover:bg-surface-hover"
     >
       <Icon size={12} aria-hidden />
-      {action.label}
+      {children}
     </button>
   );
 }
@@ -432,11 +519,9 @@ function ErrorActionButton({ error }: { error: AppError }) {
 // 収縮の終わりを知るためのカードの大きさのアニメーション (CSS transition)
 const SIZE_TRANSITIONS = new Set(["width", "grid-template-rows"]);
 
-function ListeningPanel({ anchor, isOn, starting, expanded, items }: {
+function ListeningPanel({ anchor, isOn, expanded, items }: {
   anchor: PanelAnchor;
   isOn: boolean;
-  /** 準備中 (マイクがまだ音を拾えていない)。メーターを無効の見た目にし、状態を「準備中」にする */
-  starting: boolean;
   expanded: boolean;
   items: PanelItem[];
 }) {
@@ -540,18 +625,27 @@ function ListeningPanel({ anchor, isOn, starting, expanded, items }: {
           className="flex items-center gap-2.5 pr-3 pl-1 transition-[height] duration-[180ms] ease-standard"
           style={{ height: expanded ? ROW_HEIGHT.expanded : ROW_HEIGHT.pill }}
         >
-          <ToggleButton isOn={isOn} />
-          <PanelLevelMeter active={isOn && !starting} disabled={starting} />
-          <StatusLabel expanded={expanded} starting={starting} items={items} />
+          <ToggleButton variant={isOn ? "on" : "off"} />
+          <PanelLevelMeter active={isOn} />
+          <StatusLabel expanded={expanded} items={items} />
         </div>
       </div>
     </div>
   );
 }
 
-function ToggleButton({ isOn, className }: { isOn: boolean; className?: string }) {
+/**
+ * 音声入力の切り替えボタン (円形)。
+ * pending: ON だがマイク入力がまだ有効でない (準備中・無音)。OFF と同じ色で、押すと OFF にする
+ */
+function ToggleButton({ variant, icon, className }: {
+  variant: "off" | "on" | "pending";
+  /** pending のアイコン (既定はマイク) */
+  icon?: ReactNode;
+  className?: string;
+}) {
   const { t } = useI18n();
-  if (!isOn) {
+  if (variant === "off") {
     return (
       <button
         type="button"
@@ -563,6 +657,21 @@ function ToggleButton({ isOn, className }: { isOn: boolean; className?: string }
         )}
       >
         <MicOff size={14} aria-hidden />
+      </button>
+    );
+  }
+  if (variant === "pending") {
+    return (
+      <button
+        type="button"
+        aria-label={t.panel.turnOff}
+        onClick={() => runCommand(commands.setListening(false))}
+        className={cn(
+          "press flex size-7 flex-none cursor-pointer items-center justify-center rounded-full border-0 bg-surface-active text-fg-muted transition-control hover:bg-surface-hover",
+          className,
+        )}
+      >
+        {icon ?? <Mic size={14} aria-hidden />}
       </button>
     );
   }
@@ -583,7 +692,7 @@ function ToggleButton({ isOn, className }: { isOn: boolean; className?: string }
 
 /* ---------- コンパクト表示 (マイクの円形ボタンのみ) ---------- */
 
-type CompactState = "off" | "loading" | "starting" | "listening" | "speaking" | "finalizing" | "error";
+type CompactState = "off" | "loading" | "starting" | "no_input" | "listening" | "speaking" | "finalizing" | "error";
 
 function compactState(status: AppStatus, items: PanelItem[]): CompactState {
   switch (status.phase) {
@@ -591,6 +700,7 @@ function compactState(status: AppStatus, items: PanelItem[]): CompactState {
     case "loading":
     case "error":
     case "starting":
+    case "no_input":
     case "speaking":
       return status.phase;
     default:
@@ -607,7 +717,9 @@ function CompactPanel({ status, items }: { status: AppStatus; items: PanelItem[]
   const { t } = useI18n();
   const drag = usePanelDrag();
   const state = compactState(status, items);
-  const isOn = isOnPhase(status.phase);
+  const isOn = status.on;
+  // 準備中・無音は ON だが OFF の色で出す (青 = マイク入力が有効、に揃える)
+  const pending = state === "starting" || state === "no_input";
   return (
     <div
       {...drag}
@@ -616,7 +728,7 @@ function CompactPanel({ status, items }: { status: AppStatus; items: PanelItem[]
       // 36px の円 (枠 1px + 余白 3px + ボタン 28px)。ピルと同じ面・枠・影
       className="relative flex size-9 items-center justify-center select-none rounded-full border border-line-default bg-surface-card shadow-md"
     >
-      {isOn ? <CompactLevelRing active={state === "speaking"} /> : null}
+      {showsInputLevel(status) ? <CompactLevelRing active={state === "speaking"} /> : null}
       {state === "finalizing" || state === "loading" ? <CompactSpinner muted={state === "loading"} /> : null}
       {state === "loading" ? (
         // 読み込み中は通常の表示と同じく切り替えを出さない
@@ -625,9 +737,21 @@ function CompactPanel({ status, items }: { status: AppStatus; items: PanelItem[]
         </span>
       ) : (
         // リング (absolute) より上に描くため relative にする。
-        // 準備中は ON の色のまま脈動させ、まだ話せないことを待機中 (静止) と見分けられるようにする
-        <ToggleButton isOn={isOn} className={cn("relative", state === "starting" && "animate-starting-pulse")} />
+        // 準備中は OFF の色で脈動させ、待機中 (青) になるまで待つことを OFF (静止) と見分けられるようにする
+        <ToggleButton
+          variant={pending ? "pending" : isOn ? "on" : "off"}
+          className={cn("relative", state === "starting" && "animate-starting-pulse")}
+        />
       )}
+      {state === "no_input" ? (
+        // エラーの赤い点と同じ位置。内容は読み上げ用のラベルに持つ (文言は出さない表示形式のため)
+        <span
+          role="img"
+          aria-label={t.panel.noInput}
+          data-testid="panel-compact-no-input"
+          className="pointer-events-none absolute -top-px -right-px size-2.5 rounded-full border-2 border-surface-card bg-amber-500"
+        />
+      ) : null}
       {state === "error" && status.error ? (
         <span
           role="img"
@@ -681,7 +805,7 @@ function CompactSpinner({ muted }: { muted: boolean }) {
 }
 
 /** 入力レベル。約15Hz で更新されるのでここだけが購読・再描画する */
-function PanelLevelMeter({ active, disabled }: { active: boolean; disabled: boolean }) {
+function PanelLevelMeter({ active }: { active: boolean }) {
   const { level, threshold } = useAudioLevel();
   return (
     <LevelMeter
@@ -691,7 +815,6 @@ function PanelLevelMeter({ active, disabled }: { active: boolean; disabled: bool
       level={active ? level : 0}
       threshold={threshold}
       active={active && level >= threshold}
-      disabled={disabled}
     />
   );
 }
@@ -723,24 +846,11 @@ function statusView(items: PanelItem[], t: Messages): StatusView | null {
   }
 }
 
-function StatusLabel({ expanded, starting, items }: { expanded: boolean; starting: boolean; items: PanelItem[] }) {
+function StatusLabel({ expanded, items }: { expanded: boolean; items: PanelItem[] }) {
   const { t } = useI18n();
-  // 準備中は発話の行 (プレビュー) が出ていても文言を準備中のままにする (メーターも無効の見た目のまま。
-  // 「認識中」と出すと準備ができたと誤解される)
-  const view = expanded && !starting ? statusView(items, t) : null;
+  const view = expanded ? statusView(items, t) : null;
   if (!view) {
-    // 準備中・待機中の文言を重ねて広い方の幅を取り、見えない方を隠す。
-    // 準備中 → 待機中で文言の幅 (en は Starting… / Listening) が変わってもメーターの長さが動かないように
-    return (
-      <span data-testid="panel-status" className="grid text-2xs leading-[1.6] whitespace-nowrap text-fg-muted">
-        <span className={cn("[grid-area:1/1]", !starting && "invisible")} aria-hidden={!starting}>
-          {t.panel.starting}
-        </span>
-        <span className={cn("[grid-area:1/1]", starting && "invisible")} aria-hidden={starting}>
-          {t.panel.idle}
-        </span>
-      </span>
-    );
+    return <span className="text-2xs leading-[1.6] whitespace-nowrap text-fg-muted">{t.panel.idle}</span>;
   }
   const Icon = view.icon;
   return (

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AppWindow, AudioLines, Plus, X } from "lucide-react";
+import { AppWindow, AudioLines, ExternalLink, MicOff, Plus, X } from "lucide-react";
 import { Select } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
@@ -19,6 +19,7 @@ import { ShortcutRecorder } from "@/components/app/shortcut-recorder";
 import { errorMessage, useDebouncedCommit } from "@/lib/hooks";
 import {
   commands,
+  runCommand,
   subscribeEvents,
   type AppStatus,
   type AudioDevice,
@@ -26,7 +27,7 @@ import {
   type RunningApp,
 } from "@/lib/ipc";
 import { autoSubmitKeyCombo, formatKeyCombo, formatSeconds } from "@/lib/format";
-import { isOnPhase, showsInputLevel } from "@/lib/phase";
+import { showsInputLevel } from "@/lib/phase";
 import { useOsFeatures } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n/context";
@@ -109,8 +110,8 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
   if (selected && devices && !list.some((d) => d.id === selected)) {
     options.push({ value: selected, label: v.disconnected });
   }
-  const isOn = status != null && isOnPhase(status.phase);
-  const live = status != null && showsInputLevel(status.phase);
+  const isOn = status?.on ?? false;
+  const live = status != null && showsInputLevel(status);
 
   return (
     <>
@@ -147,6 +148,7 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
       <InputLevel
         isOn={isOn}
         live={live}
+        noInput={status?.phase === "no_input"}
         sensitivity={sensitivity.value}
         editing={sensitivity.value !== settings.vadSensitivity}
       />
@@ -240,10 +242,12 @@ function AutoSubmit({ settings, update, errors }: SectionProps) {
  * 入力レベル。オンの間だけ Rust から届く。
  * トラックの塗り分け位置 (しきい値) は audio-level の threshold を使い、届く前・オフの間・感度の操作中 (保存前) は感度から求めた位置に置く
  */
-function InputLevel({ isOn, live, sensitivity, editing }: {
+function InputLevel({ isOn, live, noInput, sensitivity, editing }: {
   isOn: boolean;
-  /** レベルを出すか。準備中 (starting) は ON だがマイクがまだ音を拾えていないので出さない */
+  /** レベルを出すか。準備中 (starting)・無音 (no_input) は ON だがマイクがまだ音を拾えていないので出さない */
   live: boolean;
+  /** マイクの音が完全な 0 のまま (no_input)。確かめる所と OS のサウンドの入力設定を開くボタンを出す */
+  noInput: boolean;
   sensitivity: number;
   editing: boolean;
 }) {
@@ -251,7 +255,7 @@ function InputLevel({ isOn, live, sensitivity, editing }: {
   const { level, threshold, received } = useAudioLevel();
   const split = isOn && received && !editing ? threshold : thresholdFromSensitivity(sensitivity);
   const shown = live ? level : 0;
-  return (
+  const meter = (
     <div className="-mt-2 flex h-8 items-center gap-2.5 rounded-md bg-surface-muted px-3" data-testid="input-level">
       <AudioLines size={14} className="flex-none text-fg-muted" aria-hidden />
       {/* パネルと同じく、表示中の塗り分け位置を超えたら青にする (感度の操作中も見た目の境目と一致させる) */}
@@ -264,6 +268,22 @@ function InputLevel({ isOn, live, sensitivity, editing }: {
       />
       <span className="text-xs text-fg-muted">{t.settings.voice.inputLevel}</span>
     </div>
+  );
+  if (!noInput) return meter;
+  return (
+    // メーターの -mt-2 (マイクの選択に寄せる) を保つため、メーターの下に並べる
+    <>
+      {meter}
+      <div role="status" data-testid="input-level-no-input" className="-mt-2 flex items-start gap-3">
+        <p className="m-0 flex flex-1 items-start gap-1.5 text-xs leading-[1.5] text-fg-warning">
+          <MicOff size={14} className="mt-px flex-none" aria-hidden />
+          <span>{t.settings.voice.noInput}</span>
+        </p>
+        <Button size="sm" iconRight={ExternalLink} onClick={() => runCommand(commands.openSystemSettings("sound_input"))}>
+          {t.panel.soundSettings}
+        </Button>
+      </div>
+    </>
   );
 }
 

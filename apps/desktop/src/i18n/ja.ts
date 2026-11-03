@@ -107,6 +107,8 @@ export const ja = {
       gpu_unavailable: "GPU を使えません",
     },
     starting: "準備中",
+    noInput: "マイクの音が届いていません",
+    soundSettings: "サウンド設定",
     idle: "待機中",
     speaking: "認識中",
     finalizing: "確定しています…",
@@ -294,6 +296,7 @@ export const ja = {
       systemDefaultWith: (name: string) => `システムの既定（${name}）`,
       disconnected: "選択中のマイク（接続されていません）",
       inputLevel: "入力レベル",
+      noInput: "マイクの音が届いていません。ミュート・入力音量・選んでいるマイクを確認してください",
       sensitivity: "発話検出の感度",
       sensitivityHelp:
         "高くすると小さな声も拾います。周囲がうるさい場合は下げてください。入力レベルのトラックが薄い青に変わる位置が検出のしきい値です",

@@ -28,7 +28,7 @@ use crate::provisioning::runtime::UvRuntime;
 use crate::provisioning::{Provisioner, RuntimeStep, ServerVerify, Stage};
 use crate::settings::{InputMode, Settings, SettingsStore};
 use crate::shortcut::{PluginRegistrar, ShortcutManager};
-use crate::state::{AppError, ErrorCode, StateManager, DONE_DISPLAY};
+use crate::state::{AppError, CaptureState, ErrorCode, StateManager, DONE_DISPLAY};
 use crate::storage::{self, DevScope, UninstallContext};
 use crate::update::UpdateManager;
 use crate::vad::VadParams;
@@ -1356,7 +1356,7 @@ impl Core {
         // 発話中だったものは破棄される。1回ずつ聞き取るの無発話タイマーは新しい録音の準備完了から張り直す
         self.cancel_no_speech_timer();
         self.stop_capture(false).await;
-        self.state.set_capture_ready(false);
+        self.state.set_capture(CaptureState::Starting);
         if let Err(e) = self.start_capture_locked(origin).await {
             log::error!("マイク切り替え後の再開に失敗: {e:#}");
         }
@@ -1444,13 +1444,14 @@ impl Core {
         self.no_speech_timer.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// 無発話タイマーを張り直す (1回ずつ聞き取るで ON かつ録音の準備完了後、話していない時のみ。
+    /// 無発話タイマーを張り直す (1回ずつ聞き取るで ON かつ準備中を抜けた後 (聞き取り中・無音)、話していない時のみ。
     /// それ以外は取り消すだけ)。準備中は数えない (docs/architecture.md「録音開始の準備中」)。
+    /// 無音でも数えるのは、音が届かないまま ON で残さないため。
     /// 準備中に話し始めていれば、準備完了の時点では張らない (発話の確定・破棄で決まる)
     fn reset_no_speech_timer(self: &Arc<Self>) {
         let seq = self.no_speech_timer.fetch_add(1, Ordering::SeqCst) + 1;
         if self.input_mode() != InputMode::OneShot
-            || !self.state.is_capture_ready()
+            || !self.state.is_capture_settled()
             || self.state.is_speaking()
         {
             return;
@@ -2218,8 +2219,24 @@ impl PipelineSink for Sink {
             if c.capture_generation.load(Ordering::SeqCst) != self.generation {
                 return;
             }
-            c.state.set_capture_ready(true);
-            c.reset_no_speech_timer();
+            // 無発話タイマーは準備中を抜けた最初の1回だけ張る (無音⇄聞き取りの繰り返しで数え直さない)
+            if c.state.set_capture(CaptureState::Ready) {
+                c.reset_no_speech_timer();
+            }
+        }
+    }
+
+    // 準備中のフォールバック (開始から 5 秒) は録音の登録の前には届かないが、capture_ready と同じ判定にそろえる
+    fn capture_no_input(&self) {
+        if let Some(c) = self.core.upgrade() {
+            if c.capture_generation.load(Ordering::SeqCst) != self.generation {
+                return;
+            }
+            // 1回ずつ聞き取るでは準備中のまま無音になった時点から数える (音が届かないまま ON で残さない)。
+            // 聞き取り中に無音になった時は数え直さない (無音⇄聞き取りの繰り返しで自動の OFF が延びないように)
+            if c.state.set_capture(CaptureState::NoInput) {
+                c.reset_no_speech_timer();
+            }
         }
     }
 
@@ -2229,7 +2246,7 @@ impl PipelineSink for Sink {
                 return;
             }
             c.cancel_no_speech_timer();
-            c.state.set_capture_ready(false);
+            c.state.set_capture(CaptureState::Starting);
         }
     }
 }

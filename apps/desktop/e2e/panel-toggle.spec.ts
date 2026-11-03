@@ -36,11 +36,14 @@ async function pillSize(page: Page): Promise<Size> {
   return { width: box.width, height: box.height };
 }
 
-/** ボタンを押してから、面が出て消えるまで毎フレーム記録する */
+/**
+ * ボタンを押してから、面が出て消えるまで毎フレーム記録する。
+ * ボタンは表示中の文字 (innerText) で探す (OFF のピルは幅をそろえるため、見えない「準備中」も持つ)
+ */
 function recordToggle(page: Page, name: string): Promise<Frame[]> {
   return page.evaluate(async (name) => {
     const q = (id: string) => document.querySelector<HTMLElement>(`[data-testid="${id}"]`)!;
-    const button = [...document.querySelectorAll("button")].find((b) => b.textContent === name || b.ariaLabel === name)!;
+    const button = [...document.querySelectorAll("button")].find((b) => b.innerText.trim() === name || b.ariaLabel === name)!;
     button.click();
     const out: { morph: { width: number; height: number } | null; bodyVisible: boolean }[] = [];
     const t0 = performance.now();
@@ -135,7 +138,7 @@ test("panel: 動きを減らす設定では面を出さずに切り替える", a
   await expect(page.getByText(m.panel.turnOn)).toBeVisible();
   const frames = await page.evaluate(async (turnOn) => {
     const morph = document.querySelector<HTMLElement>('[data-testid="panel-morph"]')!;
-    [...document.querySelectorAll("button")].find((b) => b.textContent === turnOn)!.click();
+    [...document.querySelectorAll("button")].find((b) => b.innerText.trim() === turnOn)!.click();
     const out: boolean[] = [];
     for (let i = 0; i < 10; i++) {
       await new Promise((r) => requestAnimationFrame(r));

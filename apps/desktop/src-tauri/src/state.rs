@@ -23,6 +23,10 @@ pub enum Phase {
     Off,
     /// ON にしたがマイクがまだ音を拾い始めていない (docs/architecture.md「録音開始の準備中」)
     Starting,
+    /// ON だがマイクの音が完全な 0 のまま (準備中の 5 秒のフォールバック、または聞き取り中に 0 が 5 秒)。
+    /// 音声は VAD に入れ続け、音が届けば Listening に戻る
+    #[serde(rename = "no_input")]
+    NoInput,
     Listening,
     Speaking,
     Finalizing,
@@ -160,6 +164,9 @@ pub struct AppStatus {
     pub phase: Phase,
     pub loading_progress: Option<f64>,
     pub error: Option<AppError>,
+    /// 音声入力が ON か (準備中・無音を含む。エラーで OFF になれば false)。phase は OFF の後も確定処理中なら
+    /// Finalizing になるため、フロントエンドの OFF→ON の判定 (前回の結果の表示を引き継がない) はこれで行う
+    pub on: bool,
     /// 状態が変わるたびに増える通番。通知が前後して届いても、受け手は古いものを捨てられる
     /// (`get_status` の応答と `status-changed` の前後も含む)
     pub seq: u64,
@@ -171,7 +178,20 @@ impl AppStatus {
         self.phase == o.phase
             && self.loading_progress == o.loading_progress
             && self.error == o.error
+            && self.on == o.on
     }
+}
+
+/// 録音の準備の状態 (ON の間の意味。OFF・エラーでは `Starting` に戻す)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureState {
+    /// マイクが音を拾い始めたと判断できていない (`Phase::Starting`)
+    #[default]
+    Starting,
+    /// マイクの音が完全な 0 のまま (`Phase::NoInput`)
+    NoInput,
+    /// 音を拾っている (準備中・無音を抜けた)
+    Ready,
 }
 
 #[derive(Debug, Default)]
@@ -180,9 +200,8 @@ struct Facts {
     loading_progress: Option<f64>,
     /// ON (準備中を含む)
     listening: bool,
-    /// ON の後、マイクが音を拾い始めて VAD に音声を入れ始めた (`Phase::Starting` を抜ける)。
-    /// ON/OFF・エラーのたびに false に戻す
-    capture_ready: bool,
+    /// 録音の準備の状態。ON/OFF・エラーのたびに `Starting` に戻す
+    capture: CaptureState,
     speaking: bool,
     finalizing: usize,
     done_until: Option<Instant>,
@@ -197,9 +216,12 @@ impl Facts {
             Phase::Error
         } else if !self.asr_ready {
             Phase::Loading
-        } else if self.listening && !self.capture_ready {
+        } else if self.listening && self.capture == CaptureState::Starting {
             // 前の発話の確定処理中に ON にし直した場合も、拾えない間は準備中と見せる (Finalizing より優先)
             Phase::Starting
+        } else if self.listening && self.capture == CaptureState::NoInput {
+            // 音が届かないことを知らせるのを優先する (発話中・確定処理中の表示で隠さない)
+            Phase::NoInput
         } else if self.listening && self.speaking {
             Phase::Speaking
         } else if self.finalizing > 0 {
@@ -220,6 +242,7 @@ impl Facts {
                 None
             },
             error: self.error.clone(),
+            on: self.listening,
             seq: 0,
         }
     }
@@ -269,10 +292,10 @@ impl StateManager {
         lock(&self.facts).0.listening
     }
 
-    /// ON で、録音の準備が済んでいる (準備中ではない)
-    pub fn is_capture_ready(&self) -> bool {
+    /// ON で、準備中を抜けている (聞き取り中または無音)。1回ずつ聞き取るの無発話タイマーを数えてよいか
+    pub fn is_capture_settled(&self) -> bool {
         let f = &lock(&self.facts).0;
-        f.listening && f.capture_ready
+        f.listening && f.capture != CaptureState::Starting
     }
 
     /// ON で発話中か (VAD が発話を検出してから確定・破棄まで)
@@ -300,7 +323,7 @@ impl StateManager {
     pub fn set_listening(&self, on: bool) {
         self.mutate(|f| {
             if !(on && f.listening) {
-                f.capture_ready = false;
+                f.capture = CaptureState::Starting;
             }
             f.listening = on;
             if !on {
@@ -310,18 +333,26 @@ impl StateManager {
         });
     }
 
-    /// 録音の準備完了 (true) / 準備中に戻す (false。録音の開き直し・マイクの切り替え)。
-    /// OFF の間の準備完了は無視する (止める途中に処理スレッドから届いた通知で ON に見せない)
-    pub fn set_capture_ready(&self, ready: bool) {
+    /// 録音の準備の状態。`Starting` は録音の開き直し・マイクの切り替え (発話中のものは破棄されるため発話中も解除)。
+    /// OFF の間の `NoInput`・`Ready` は無視する (止める途中に処理スレッドから届いた通知で ON に見せない)。
+    /// `NoInput` では発話中を解除しない (音声は VAD に入れ続けており、発話は確定・破棄の通知で終わる)。
+    /// 戻り値は、この呼び出しで準備中を抜けたか (ON で `Starting` → `NoInput`/`Ready`)。
+    /// 1回ずつ聞き取るの無発話タイマーはその時だけ張る (`NoInput`⇄`Ready` の繰り返しで数え直すと自動で OFF にならないため)。
+    /// 判定を事実の更新と同じロックの中で行い、通知が並んでも準備中を抜けるのは1回だけにする
+    pub fn set_capture(&self, capture: CaptureState) -> bool {
+        let mut left_starting = false;
         self.mutate(|f| {
-            if ready && !f.listening {
+            if capture != CaptureState::Starting && !f.listening {
                 return;
             }
-            f.capture_ready = ready;
-            if !ready {
+            left_starting =
+                f.capture == CaptureState::Starting && capture != CaptureState::Starting;
+            f.capture = capture;
+            if capture == CaptureState::Starting {
                 f.speaking = false;
             }
         });
+        left_starting
     }
 
     pub fn set_speaking(&self, speaking: bool) {
@@ -355,7 +386,7 @@ impl StateManager {
             }
             f.error = Some(error);
             f.listening = false;
-            f.capture_ready = false;
+            f.capture = CaptureState::Starting;
             f.speaking = false;
         });
     }
@@ -496,7 +527,7 @@ mod tests {
         assert_eq!(s.status().phase, Phase::Loading);
         s.set_asr_ready(true);
         s.set_listening(true);
-        s.set_capture_ready(true);
+        s.set_capture(CaptureState::Ready);
         s.set_speaking(true);
         s.set_speaking(false);
         s.finalizing_started();
@@ -701,10 +732,10 @@ mod tests {
         s.set_listening(true);
         assert_eq!(s.status().phase, Phase::Starting);
         assert!(s.is_listening());
-        assert!(!s.is_capture_ready());
-        s.set_capture_ready(true);
+        assert!(!s.is_capture_settled());
+        s.set_capture(CaptureState::Ready);
         assert_eq!(s.status().phase, Phase::Listening);
-        assert!(s.is_capture_ready());
+        assert!(s.is_capture_settled());
         // ON のままの再設定では準備中に戻さない
         s.set_listening(true);
         assert_eq!(s.status().phase, Phase::Listening);
@@ -712,15 +743,15 @@ mod tests {
         // 開き直し・マイクの切り替え: 準備中に戻り、発話中も解除する
         s.set_speaking(true);
         assert_eq!(s.status().phase, Phase::Speaking);
-        s.set_capture_ready(false);
+        s.set_capture(CaptureState::Starting);
         assert_eq!(s.status().phase, Phase::Starting);
         assert!(!s.is_speaking());
-        s.set_capture_ready(true);
+        s.set_capture(CaptureState::Ready);
 
         // OFF で準備完了を落とし、次の ON は準備中から
         s.set_listening(false);
         assert_eq!(s.status().phase, Phase::Off);
-        assert!(!s.is_capture_ready());
+        assert!(!s.is_capture_settled());
         s.set_listening(true);
         assert_eq!(s.status().phase, Phase::Starting);
     }
@@ -734,7 +765,7 @@ mod tests {
         assert_eq!(s.status().phase, Phase::Finalizing);
         s.set_listening(true);
         assert_eq!(s.status().phase, Phase::Starting);
-        s.set_capture_ready(true);
+        s.set_capture(CaptureState::Ready);
         assert_eq!(s.status().phase, Phase::Finalizing);
 
         // 読み込み中・エラーは準備中より優先
@@ -747,20 +778,129 @@ mod tests {
         assert_eq!(s.status().phase, Phase::Error);
         assert!(!s.is_listening());
         // エラーで落ちた後は準備完了の通知が来ても ON にならない
-        s.set_capture_ready(true);
+        s.set_capture(CaptureState::Ready);
         s.clear_error();
         assert_eq!(s.status().phase, Phase::Off);
-        assert!(!s.is_capture_ready());
+        assert!(!s.is_capture_settled());
+    }
+
+    /// 無音: ON のまま (is_listening)、準備中を抜けた扱い (is_capture_settled)。
+    /// 優先順位は Error > Loading > Starting > NoInput > Speaking > Finalizing
+    #[test]
+    fn no_input_priority() {
+        let s = StateManager::new();
+        s.set_asr_ready(true);
+        s.set_listening(true);
+        s.set_capture(CaptureState::NoInput);
+        assert_eq!(s.status().phase, Phase::NoInput);
+        assert!(s.is_listening());
+        assert!(s.is_capture_settled());
+        // 発話中・確定処理中より優先し、発話中は解除しない (確定・破棄の通知で終わる)
+        s.set_speaking(true);
+        s.finalizing_started();
+        assert_eq!(s.status().phase, Phase::NoInput);
+        assert!(s.is_speaking());
+        s.set_capture(CaptureState::Ready);
+        assert_eq!(s.status().phase, Phase::Speaking);
+        s.set_speaking(false);
+        assert_eq!(s.status().phase, Phase::Finalizing);
+        // 開き直しで準備中に戻る (準備中が優先)
+        s.set_capture(CaptureState::NoInput);
+        s.set_capture(CaptureState::Starting);
+        assert_eq!(s.status().phase, Phase::Starting);
+        assert!(!s.is_capture_settled());
+
+        // 読み込み中・エラーは無音より優先
+        let s = StateManager::new();
+        s.set_listening(true);
+        s.set_capture(CaptureState::NoInput);
+        assert_eq!(s.status().phase, Phase::Loading);
+        s.set_asr_ready(true);
+        assert_eq!(s.status().phase, Phase::NoInput);
+        s.set_error(AppError::microphone_missing("x"));
+        assert_eq!(s.status().phase, Phase::Error);
+        // OFF の間の無音の通知は無視し、次の ON は準備中から
+        s.set_capture(CaptureState::NoInput);
+        s.clear_error();
+        assert_eq!(s.status().phase, Phase::Off);
+        s.set_listening(true);
+        assert_eq!(s.status().phase, Phase::Starting);
+    }
+
+    #[test]
+    fn no_input_serializes_as_no_input() {
+        let s = StateManager::new();
+        s.set_asr_ready(true);
+        s.set_listening(true);
+        s.set_capture(CaptureState::NoInput);
+        let v = serde_json::to_value(s.status()).unwrap();
+        assert_eq!(v["phase"], "no_input");
     }
 
     #[test]
     fn capture_ready_ignored_while_off() {
         let s = StateManager::new();
         s.set_asr_ready(true);
-        s.set_capture_ready(true);
-        assert!(!s.is_capture_ready());
+        s.set_capture(CaptureState::Ready);
+        assert!(!s.is_capture_settled());
         s.set_listening(true);
         assert_eq!(s.status().phase, Phase::Starting);
+    }
+
+    /// 準備中を抜けたことを知らせるのは、準備中からの最初の1回だけ (開き直しの後はまた1回)
+    #[test]
+    fn set_capture_reports_leaving_starting_once() {
+        let s = StateManager::new();
+        s.set_asr_ready(true);
+        assert!(!s.set_capture(CaptureState::Ready), "OFF の間は無視");
+        s.set_listening(true);
+        assert!(s.set_capture(CaptureState::NoInput));
+        assert!(!s.set_capture(CaptureState::Ready));
+        assert!(!s.set_capture(CaptureState::NoInput));
+        assert!(!s.set_capture(CaptureState::Ready));
+        // 開き直し
+        assert!(!s.set_capture(CaptureState::Starting));
+        assert!(s.set_capture(CaptureState::Ready));
+        assert!(!s.set_capture(CaptureState::Ready));
+        // OFF→ON で準備中から
+        s.set_listening(false);
+        s.set_listening(true);
+        assert!(s.set_capture(CaptureState::Ready));
+    }
+
+    /// on は ON/OFF の意図 (準備中・無音も true、OFF 後の確定処理中は false)。変わるだけでも通知する
+    #[test]
+    fn on_follows_listening_and_notifies() {
+        let s = StateManager::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        s.subscribe(move |st| seen2.lock().unwrap().push((st.phase, st.on)));
+        assert!(!s.status().on);
+        // 読み込み中は phase が変わらなくても on の変化を通知する
+        s.set_listening(true);
+        s.set_asr_ready(true);
+        s.set_capture(CaptureState::NoInput);
+        s.set_capture(CaptureState::Ready);
+        s.set_speaking(true);
+        s.finalizing_started();
+        s.set_listening(false);
+        s.set_listening(true);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                (Phase::Loading, true),
+                (Phase::Starting, true),
+                (Phase::NoInput, true),
+                (Phase::Listening, true),
+                (Phase::Speaking, true),
+                (Phase::Finalizing, false),
+                (Phase::Starting, true),
+            ]
+        );
+        s.set_error(AppError::accessibility_denied());
+        assert!(!s.status().on);
+        let v = serde_json::to_value(s.status()).unwrap();
+        assert_eq!(v["on"], false);
     }
 
     #[test]

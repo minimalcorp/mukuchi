@@ -6,6 +6,7 @@ import { useEffect, useReducer, useRef } from "react";
 import { commands, latestStatusOnly, subscribeWithInitial, type AppStatus, type Utterance, type UtteranceResult } from "@/lib/ipc";
 import { resetAudioLevel } from "@/lib/audio-level";
 import { devOverrides } from "@/lib/env";
+import { isPendingPhase } from "@/lib/phase";
 import { diffPreview, type DiffSegment } from "./preview-diff";
 
 /**
@@ -39,6 +40,11 @@ type State = {
   // 収縮アニメーション中も直前の内容を表示し続けるため、最後に表示していた発話を残す
   lastShown: PanelItem[];
   errorVisible: boolean;
+  /**
+   * OFF→ON で表示から外した発話の id の上限。これ以下の id の結果・途中表示は出さない
+   * (OFF の時に確定させた前回の発話の結果が ON の後に届いても、前回の表示を引き継がないように。id は起動中ずっと増え続ける)
+   */
+  clearedThrough: number;
 };
 
 type Action =
@@ -68,11 +74,18 @@ function reducer(state: State, action: Action): State {
     case "status": {
       const { status } = action;
       const enteringError = status.phase === "error" && state.status?.phase !== "error";
+      // OFF→ON では前回の結果の表示 (収縮中の内容も) を引き継がない。準備中のピルから待機中へ広がる時に古い結果を出さないため。
+      // phase ではなく on で見る (OFF の後も確定処理中は phase が finalizing のままで、finalizing → starting も OFF→ON)。
+      // 初回の status (前が無い) は判定しない
+      if (state.status && !state.status.on && status.on) {
+        const clearedThrough = Math.max(state.clearedThrough, ...state.items.map((it) => it.id));
+        return { ...state, status, items: [], lastShown: [], clearedThrough, errorVisible: false };
+      }
       // 発話中 (speaking) でなくなったら、話していた発話は確定処理に入っている。
       // 以降に遅れて届いた途中表示は反映しない (表示の巻き戻り防止)。
-      // 準備中 (starting) は発話中より優先して出る phase で、準備中に話し始めた発話はまだ続いているので確定扱いにしない
+      // 準備中 (starting)・無音 (no_input) は発話中より優先して出る phase で、その間に話し始めた発話はまだ続いているので確定扱いにしない
       const items =
-        status.phase === "speaking" || status.phase === "starting"
+        status.phase === "speaking" || isPendingPhase(status.phase)
           ? state.items
           : state.items.map((it) => (it.stage === "speaking" ? { ...it, stage: "finalizing" as const } : it));
       return {
@@ -82,6 +95,7 @@ function reducer(state: State, action: Action): State {
       };
     }
     case "started": {
+      if (action.id <= state.clearedThrough) return state;
       // 次の発話が始まった時点で、前の発話は確定処理中
       const prev = state.items.map((it) => (it.stage === "speaking" ? { ...it, stage: "finalizing" as const } : it));
       if (prev.some((it) => it.id === action.id)) return withItems(state, prev);
@@ -89,6 +103,7 @@ function reducer(state: State, action: Action): State {
     }
     case "partial": {
       const { u } = action;
+      if (u.id <= state.clearedThrough) return state;
       const exists = state.items.some((it) => it.id === u.id);
       if (!exists) {
         // started を取りこぼした場合 (ウィンドウ再読み込み直後など) も表示する
@@ -105,6 +120,7 @@ function reducer(state: State, action: Action): State {
     }
     case "result": {
       const { r } = action;
+      if (r.id <= state.clearedThrough) return state;
       // 結果が空・誤検出は表示を消して何も入力しない
       if (r.kind === "empty" || r.kind === "discarded") {
         return withItems(
@@ -134,7 +150,13 @@ function reducer(state: State, action: Action): State {
 }
 
 export function usePanelModel() {
-  const [state, dispatch] = useReducer(reducer, { status: null, items: [], lastShown: [], errorVisible: false });
+  const [state, dispatch] = useReducer(reducer, {
+    status: null,
+    items: [],
+    lastShown: [],
+    errorVisible: false,
+    clearedThrough: 0,
+  });
   const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
 
   useEffect(() => {
@@ -166,8 +188,8 @@ export function usePanelModel() {
         cancelErrorTimer();
         errorTimer = later(ERROR_DISPLAY_MS, { type: "hideError" });
       }
-      // starting も 0 に戻す: 前回 ON の間の最後のレベルを残さず、listening になってから届いた値から出す
-      if (status.phase === "off" || status.phase === "loading" || status.phase === "error" || status.phase === "starting") {
+      // starting・no_input も 0 に戻す: 前回 ON の間の最後のレベルを残さず、listening になってから届いた値から出す
+      if (status.phase === "off" || status.phase === "loading" || status.phase === "error" || isPendingPhase(status.phase)) {
         resetAudioLevel();
       }
       lastPhase = status.phase;

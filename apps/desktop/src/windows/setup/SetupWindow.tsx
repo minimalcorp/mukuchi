@@ -799,7 +799,7 @@ function TestStep({ onBack, onNext }: { onBack: () => void; onNext: () => void }
   // 音声コマンドは欄にキー操作として届くため、何を送ったかをバッジで示す
   const [commandsSent, setCommandsSent] = useState<{ id: number; text: string; key: string }[]>([]);
   // 準備中 (starting) は ON だが、マイクがまだ音を拾えていないのでレベルを出さない
-  const live = status != null && showsInputLevel(status.phase);
+  const live = status != null && showsInputLevel(status);
 
   // セットアップ完了前は panel が出ていないため、このステップに入った時に出す (パネルでオンにしてもらう)
   useEffect(() => {

@@ -25,6 +25,11 @@ UV_TEAM_ID=2DC432GLL2
 EXPECTED_ENTITLEMENTS='{"com.apple.security.device.audio-input":true}'
 
 hostxcrun() { env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun "$@"; }
+# stapler validate は Apple (CloudKit) への問い合わせが通信断で落ちることがあるため、その時だけやり直す。
+# 再試行の告知は fd 3 に出る。check が出力を握って PASS 時に捨てても告知がログに残るよう、fd 3 を stderr にする
+# shellcheck source=lib/stapler-retry.sh
+. "$root/scripts/lib/stapler-retry.sh"
+exec 3>&2
 
 npass=0 nfail=0 nskip=0
 pass() { echo "  PASS  $*"; npass=$((npass + 1)); }
@@ -141,7 +146,7 @@ if [ "$mode" = devid ]; then
   else
     fail "spctl -t exec"; printf '%s\n' "$out" | sed 's/^/        /'
   fi
-  check "stapler validate (.app)" hostxcrun stapler validate "$APP"
+  check "stapler validate (.app)" retry_network hostxcrun stapler validate "$APP"
 else
   skip "spctl -t exec (ad-hoc は Gatekeeper に拒否されるのが正しい)"
   skip "stapler validate (.app) (ad-hoc は公証しない)"
@@ -166,7 +171,7 @@ else
     else
       fail "dmg: spctl -t open"; printf '%s\n' "$out" | sed 's/^/        /'
     fi
-    check "dmg: stapler validate" hostxcrun stapler validate "$dmg"
+    check "dmg: stapler validate" retry_network hostxcrun stapler validate "$dmg"
   else
     skip "dmg: 署名・spctl・stapler (make dmg-local の .dmg は署名しない)"
   fi
@@ -180,7 +185,7 @@ else
     a="$(/usr/bin/codesign -dvvv "$APP" 2>&1 | grep '^CDHash=')"; b="$(/usr/bin/codesign -dvvv "$inner" 2>&1 | grep '^CDHash=')"
     [ -n "$a" ] && [ "$a" = "$b" ] && pass "dmg: 中の .app = $APP ($a)" || fail "dmg: 中の .app が $APP と違う ($b / $a)"
     if [ "$mode" = devid ]; then
-      check "dmg: 中の .app の stapler validate" hostxcrun stapler validate "$inner"
+      check "dmg: 中の .app の stapler validate" retry_network hostxcrun stapler validate "$inner"
     else
       skip "dmg: 中の .app の stapler validate (ad-hoc は公証しない)"
     fi
@@ -210,7 +215,7 @@ else
     a="$(/usr/bin/codesign -dvvv "$APP" 2>&1 | grep '^CDHash=')"; b="$(/usr/bin/codesign -dvvv "$ex/mukuchi.app" 2>&1 | grep '^CDHash=')"
     [ -n "$a" ] && [ "$a" = "$b" ] && pass "updater: 展開した .app = $APP ($a)" || fail "updater: 展開した .app が $APP と違う ($b / $a)"
     if [ "$mode" = devid ]; then
-      check "updater: 展開した .app の stapler validate" hostxcrun stapler validate "$ex/mukuchi.app"
+      check "updater: 展開した .app の stapler validate" retry_network hostxcrun stapler validate "$ex/mukuchi.app"
     else
       skip "updater: 展開した .app の stapler validate (ad-hoc は公証しない)"
     fi

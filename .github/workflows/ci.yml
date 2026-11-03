@@ -104,6 +104,8 @@ jobs:
             '^apps/desktop/package\.json$'
             # scripts/check-release-blockers.test.mjs が実ファイルを読む
             '^apps/desktop/src-tauri/src/provisioning/models\.rs$'
+            # scripts/stapler-retry.test.mjs が source してテストする
+            '^apps/desktop/scripts/lib/stapler-retry\.sh$'
           )
           # どの job の検査にも影響しない (ビルド・テストが読む .md は無い)。各 job の対象より優先する
           # (apps/web/README.md 等、job の対象のディレクトリにある文書だけの変更で job を動かさないため)

@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -42,6 +42,13 @@ const SPLIT_STEP_SAMPLES: usize = SAMPLE_RATE as usize * 2 / 100;
 /// 即確定 (`Running::finish`) の時、止める前に溜まっている音声を処理する上限
 /// (押した瞬間までの声を取りこぼさない。録音は続いているため、空になるまで待つと終わらないことがある)
 const FINISH_DRAIN_LIMIT: Duration = Duration::from_millis(300);
+/// 録音開始の準備: マイクの音声が届き始めて (先頭の完全な 0 は数えない) から、音声の長さでこれだけ経つまでは
+/// 準備中と表示する (docs/architecture.md「録音開始の準備中」)。区別は表示だけで、音声は VAD に入れる。
+/// 届き始めても内蔵マイクは約150〜200ms 減衰した音を返す (実測の最大 約190ms) ため、それに合わせて最短にする
+pub const CAPTURE_SETTLE_MS: u32 = 200;
+const CAPTURE_SETTLE_SAMPLES: usize = SAMPLE_RATE as usize * CAPTURE_SETTLE_MS as usize / 1000;
+/// 届いた音声が完全な 0 のまま (ハードウェアのミュート等) これだけ続いたら warn を1回出す (エラーにはしない)
+const ZERO_WARN_SAMPLES: usize = SAMPLE_RATE as usize * 5;
 /// デバイスが失われた時に開き直すまでの待ち (AirPods のプロファイル切り替え等が落ち着くまで)
 const REOPEN_DELAY: Duration = Duration::from_millis(500);
 /// 開き直してからこの時間内に再び失われたら諦める (開き直しは1回まで)
@@ -66,6 +73,10 @@ pub trait PipelineSink: Send + Sync {
     fn utterance_discarded(&self, id: u64);
     /// デバイス切断など、録音を続けられない
     fn capture_lost(&self, message: String);
+    /// 録音の準備が済んだ (以後の音声を VAD に入れる)。ストリームごとに1回
+    fn capture_ready(&self);
+    /// 録音を開き直すため準備中に戻る (この後、開き直せれば再び `capture_ready`)
+    fn capture_starting(&self);
 }
 
 /// 途中表示の要求。音声は確定済みの区切りの後から
@@ -159,17 +170,81 @@ fn open(source: &Source) -> Result<Stream> {
     })
 }
 
-pub fn start(source: Source, sink: Arc<dyn PipelineSink>) -> Result<Running, StartError> {
-    // VAD の読み込み失敗は録音開始前に検出する
-    let mut vad = SileroVad::new().map_err(StartError::Vad)?;
+/// 読み込み済みの VAD の置き場。モデルの読み込み (約50ms) を ON のたびに行わず、準備中を短くするため
+/// アプリの起動時に読み込み (`preload`)、録音ごとに取り出して (`start`)、処理スレッドの終了時に戻す。
+/// 取り出している間は空になるため、2つの録音が同じ VAD を使うことはない (空なら新しく読み込む)
+#[derive(Default)]
+pub struct VadPool(Mutex<Option<SileroVad>>);
+
+impl VadPool {
+    /// 空なら読み込んでおく。失敗は ON の時に読み込み直して知らせる (`StartError::Vad`) ため、ここではログだけ
+    pub fn preload(&self) {
+        let mut slot = lock(&self.0);
+        if slot.is_some() {
+            return;
+        }
+        match SileroVad::new() {
+            Ok(v) => *slot = Some(v),
+            Err(e) => log::warn!("VAD を先に読み込めません (ON の時に読み込み直す): {e:#}"),
+        }
+    }
+
+    fn take(&self) -> Option<SileroVad> {
+        lock(&self.0).take()
+    }
+
+    /// 処理スレッドの終了時に戻す。並行して新しく読み込んだものが既にあれば、そちらを残す
+    fn put_back(&self, vad: SileroVad) {
+        let mut slot = lock(&self.0);
+        if slot.is_none() {
+            *slot = Some(vad);
+        }
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// `origin` は開始の操作 (ON・マイクの切り替え) の時刻。準備完了までの時間のログに使う
+pub fn start(
+    source: Source,
+    sink: Arc<dyn PipelineSink>,
+    origin: Instant,
+    pool: Arc<VadPool>,
+) -> Result<Running, StartError> {
+    // VAD の読み込み失敗は録音開始前に検出する。使い回せる VAD が無ければ、デバイスを開く間に並行して読み込む
+    let (vad, stream) = match pool.take() {
+        Some(v) => (Ok(v), open(&source)),
+        None => std::thread::scope(|s| {
+            let loading = s.spawn(SileroVad::new);
+            let stream = open(&source);
+            let vad = loading
+                .join()
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("VAD の読み込みが異常終了しました")));
+            (vad, stream)
+        }),
+    };
+    let mut vad = vad.map_err(StartError::Vad)?;
+    let stream = match stream {
+        Ok(s) => s,
+        Err(e) => {
+            pool.put_back(vad);
+            return Err(StartError::Capture(e));
+        }
+    };
     vad.reset();
-    let stream = open(&source).map_err(StartError::Capture)?;
     let stop = Arc::new(AtomicBool::new(false));
     let finish = Arc::new(AtomicBool::new(false));
     let (stop2, finish2) = (stop.clone(), finish.clone());
     let worker = std::thread::Builder::new()
         .name("mukuchi-pipeline".into())
-        .spawn(move || run(source, stream, vad, sink, stop2, finish2))
+        .spawn(move || {
+            // 推論に失敗した VAD は戻さない (セッションが壊れていると使い回しで直らないため)。次の ON で読み込み直す
+            if let Some(vad) = run(source, stream, vad, sink, origin, stop2, finish2) {
+                pool.put_back(vad);
+            }
+        })
         .context("処理スレッドを起動できません")
         .map_err(StartError::Capture)?;
     Ok(Running {
@@ -184,10 +259,14 @@ fn run(
     mut stream: Stream,
     vad: SileroVad,
     sink: Arc<dyn PipelineSink>,
+    origin: Instant,
     stop: Arc<AtomicBool>,
     finish: Arc<AtomicBool>,
-) {
+) -> Option<SileroVad> {
     let mut proc = Processor::new(vad, sink.clone());
+    // 開発用の WAV (先頭1秒が完全な 0) には待ちを掛けず、最初のフレームで準備完了にする
+    let settle = !matches!(source, Source::File(_));
+    proc.begin_stream(origin, settle);
     let mut reopened_at: Option<Instant> = None;
     while !stop.load(Ordering::SeqCst) {
         let lost = match stream.rx.recv_timeout(Duration::from_millis(100)) {
@@ -205,24 +284,28 @@ fn run(
         log::warn!("録音が中断されました: {lost}");
         if reopened_at.is_some_and(|t| t.elapsed() < REOPEN_WINDOW) {
             sink.capture_lost(lost);
-            return;
+            return proc.into_vad();
         }
         // 開き直す前に古いストリームを閉じる (同じデバイスを二重に開かない。録音スレッドの終了も待つ)
         drop(stream);
+        sink.capture_starting();
+        let reopen_origin = Instant::now();
         std::thread::sleep(REOPEN_DELAY);
         if stop.load(Ordering::SeqCst) {
-            return;
+            return proc.into_vad();
         }
         match open(&source) {
             Ok(s) => {
                 log::info!("録音を開き直しました");
                 stream = s;
                 reopened_at = Some(Instant::now());
+                // 新しいストリームとして準備をやり直す
+                proc.begin_stream(reopen_origin, settle);
             }
             Err(e) => {
                 log::error!("録音を開き直せません: {e:#}");
                 sink.capture_lost(lost);
-                return;
+                return proc.into_vad();
             }
         }
     }
@@ -240,6 +323,26 @@ fn run(
     } else {
         proc.stop();
     }
+    proc.into_vad()
+}
+
+/// 録音開始の準備 (ストリームごと)。`Processor::begin_stream` で始め、済んだら `Ready`。
+/// 準備完了 (`capture_ready`) を通知する時点を決めるだけで、音声は止めない
+#[derive(Debug)]
+enum Gate {
+    Ready,
+    Settling {
+        /// 届き始めと固定の待ちで判定するか (false なら最初のフレームで準備完了)
+        settle: bool,
+        origin: Instant,
+        /// 先頭の完全な 0 のサンプル数
+        zero_samples: usize,
+        /// 最初の非 0 フレームからのサンプル数
+        settled_samples: usize,
+        /// 最初の非 0 フレームを受け取った時刻
+        first_audio_at: Option<Instant>,
+        zero_warned: bool,
+    },
 }
 
 /// フレーム単位の処理。スレッドから切り離してテストできるようにする。
@@ -256,6 +359,7 @@ pub struct Processor<V: VoiceActivityDetector> {
     level_frames: usize,
     level_peak_db: f32,
     vad_failed: bool,
+    gate: Gate,
 }
 
 impl<V: VoiceActivityDetector> Processor<V> {
@@ -272,10 +376,78 @@ impl<V: VoiceActivityDetector> Processor<V> {
             level_frames: 0,
             level_peak_db: f32::MIN,
             vad_failed: false,
+            // `begin_stream` を呼ばなければゲートなし (テスト・調整用)
+            gate: Gate::Ready,
         }
     }
 
+    /// 新しいストリームの開始。`settle` なら届き始め + `CAPTURE_SETTLE_MS` に達した時点で
+    /// `PipelineSink::capture_ready` を1回呼ぶ。`settle` でなければ最初のフレームで呼ぶ。
+    /// 準備中の音声も VAD に入れる (区別は表示だけ。準備中に話し始めた分も捨てない)
+    pub fn begin_stream(&mut self, origin: Instant, settle: bool) {
+        self.gate = Gate::Settling {
+            settle,
+            origin,
+            zero_samples: 0,
+            settled_samples: 0,
+            first_audio_at: None,
+            zero_warned: false,
+        };
+    }
+
+    /// 準備中ならフレームを数え、準備が済んだフレームで `capture_ready` を呼ぶ。
+    /// 数え方はウォールクロックではなく音声の長さ (処理の遅れで待ちが縮まない)
+    fn settle(&mut self, frame: &[f32]) {
+        let Gate::Settling {
+            settle,
+            origin,
+            zero_samples,
+            settled_samples,
+            first_audio_at,
+            zero_warned,
+        } = &mut self.gate
+        else {
+            return;
+        };
+        if *settle {
+            if first_audio_at.is_none() {
+                if frame.iter().all(|&x| x == 0.0) {
+                    *zero_samples += frame.len();
+                    if *zero_samples >= ZERO_WARN_SAMPLES && !*zero_warned {
+                        *zero_warned = true;
+                        log::warn!(
+                            "マイクの音声が完全な無音のまま {}ms 続いている (ミュートの可能性)",
+                            *zero_samples * 1000 / SAMPLE_RATE as usize
+                        );
+                    }
+                    return;
+                }
+                *first_audio_at = Some(Instant::now());
+            }
+            *settled_samples += frame.len();
+            if *settled_samples < CAPTURE_SETTLE_SAMPLES {
+                return;
+            }
+        }
+        let now = Instant::now();
+        let first = first_audio_at.unwrap_or(now);
+        log::info!(
+            "録音の準備完了: 開始から {}ms (最初の音声まで {}ms、読み飛ばした無音 {}ms)",
+            now.duration_since(*origin).as_millis(),
+            first.duration_since(*origin).as_millis(),
+            *zero_samples * 1000 / SAMPLE_RATE as usize
+        );
+        self.gate = Gate::Ready;
+        self.sink.capture_ready();
+    }
+
+    /// 処理スレッドの終了時に VAD を置き場へ戻すため。推論に失敗したことがあれば None (使い回さない)
+    pub fn into_vad(self) -> Option<V> {
+        (!self.vad_failed).then_some(self.vad)
+    }
+
     pub fn frame(&mut self, frame: &[f32]) {
+        self.settle(frame);
         self.frames += 1;
         if self.frames.is_multiple_of(PARAMS_REFRESH_FRAMES) {
             let p = self.sink.vad_params();
@@ -660,6 +832,164 @@ mod tests {
             self.log.lock().unwrap().push(format!("discard {id}"));
         }
         fn capture_lost(&self, _: String) {}
+        fn capture_ready(&self) {
+            self.log.lock().unwrap().push("ready".into());
+        }
+        fn capture_starting(&self) {
+            self.log.lock().unwrap().push("starting".into());
+        }
+    }
+
+    /// 受け取った音声を記録する VAD (準備中も VAD に渡していることの確認用)
+    struct Recording(Arc<Mutex<Vec<f32>>>, f32);
+    impl VoiceActivityDetector for Recording {
+        fn predict(&mut self, frame: &[f32]) -> Result<f32> {
+            self.0.lock().unwrap().push(frame[0]);
+            Ok(self.1)
+        }
+        fn reset(&mut self) {}
+    }
+
+    fn frame_of(v: f32) -> Vec<f32> {
+        vec![v; FRAME_SAMPLES]
+    }
+
+    /// 先頭の完全な 0 は数えず、最初の非 0 から 200ms (7 フレーム = 224ms) に達した時点で ready を1回通知する。
+    /// 準備中も音声は (0 も含めて) すべて VAD・レベル表示に渡す
+    #[test]
+    fn gate_skips_leading_zeros_and_settles_200ms() {
+        assert_eq!(CAPTURE_SETTLE_SAMPLES.div_ceil(FRAME_SAMPLES), 7);
+        let sink = Arc::new(Sink::default());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut p = Processor::new(Recording(seen.clone(), 0.0), sink.clone());
+        p.begin_stream(Instant::now(), true);
+        for _ in 0..20 {
+            p.frame(&frame_of(0.0));
+        }
+        assert!(sink.log.lock().unwrap().is_empty(), "0 の間は準備中");
+        // 最初の非 0 から 6 フレーム (192ms) では未達。途中の 0 も数える
+        p.frame(&frame_of(0.01));
+        for i in 0..5 {
+            p.frame(&frame_of(if i == 2 { 0.0 } else { 0.02 }));
+        }
+        assert!(sink.log.lock().unwrap().is_empty());
+        p.frame(&frame_of(0.03));
+        assert_eq!(*sink.log.lock().unwrap(), vec!["ready"]);
+        assert_eq!(seen.lock().unwrap().len(), 27, "準備中も VAD に渡す");
+        assert_eq!(*sink.levels.lock().unwrap(), 13, "準備中もレベルを送る");
+        p.frame(&frame_of(0.5));
+        assert_eq!(*seen.lock().unwrap().last().unwrap(), 0.5);
+        assert_eq!(*sink.log.lock().unwrap(), vec!["ready"], "ready は1回だけ");
+    }
+
+    /// 準備中に話し始めた発話も捨てずに切り出す。開始直後で前の音声が無いため、前置きは無音で補う
+    #[test]
+    fn speech_while_starting_is_kept_with_silent_prepad() {
+        let sink = Arc::new(Sink::default());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut p = Processor::new(Recording(seen, 0.9), sink.clone());
+        p.begin_stream(Instant::now(), true);
+        p.frame(&frame_of(0.3));
+        assert_eq!(*sink.log.lock().unwrap(), vec!["start 1"]);
+        let audio = p.segmenter.current_audio().unwrap();
+        let pad = p.segmenter.params().pre_pad_frames * FRAME_SAMPLES;
+        assert_eq!(audio.len(), pad + FRAME_SAMPLES);
+        assert!(audio[..pad].iter().all(|&x| x == 0.0));
+        for _ in 0..6 {
+            p.frame(&frame_of(0.3));
+        }
+        assert_eq!(sink.log.lock().unwrap().last().unwrap(), "ready");
+        assert!(p.segmenter.is_speaking(), "準備完了で発話を切らない");
+    }
+
+    /// 開発用の WAV: 待ちを掛けず、最初のフレームで ready にする
+    #[test]
+    fn file_source_is_ready_on_first_frame() {
+        let sink = Arc::new(Sink::default());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut p = Processor::new(Recording(seen.clone(), 0.0), sink.clone());
+        p.begin_stream(Instant::now(), false);
+        p.frame(&frame_of(0.0));
+        p.frame(&frame_of(0.0));
+        assert_eq!(*sink.log.lock().unwrap(), vec!["ready"]);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    /// 開き直し: 新しいストリームとして判定をやり直す
+    #[test]
+    fn gate_restarts_per_stream() {
+        let sink = Arc::new(Sink::default());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut p = Processor::new(Recording(seen, 0.0), sink.clone());
+        p.begin_stream(Instant::now(), true);
+        for _ in 0..7 {
+            p.frame(&frame_of(0.1));
+        }
+        assert_eq!(*sink.log.lock().unwrap(), vec!["ready"]);
+        p.stop();
+        p.begin_stream(Instant::now(), true);
+        for _ in 0..6 {
+            p.frame(&frame_of(0.1));
+        }
+        assert_eq!(*sink.log.lock().unwrap(), vec!["ready"]);
+        p.frame(&frame_of(0.1));
+        assert_eq!(*sink.log.lock().unwrap(), vec!["ready", "ready"]);
+    }
+
+    /// 完全な 0 のままなら準備中のまま (エラーにしない)。warn は1回
+    #[test]
+    fn gate_stays_while_all_zero() {
+        let sink = Arc::new(Sink::default());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut p = Processor::new(Recording(seen, 0.0), sink.clone());
+        p.begin_stream(Instant::now(), true);
+        // 5 秒の警告を越える 6 秒分
+        for _ in 0..(SAMPLE_RATE as usize * 6 / FRAME_SAMPLES) {
+            p.frame(&frame_of(0.0));
+        }
+        assert!(sink.log.lock().unwrap().is_empty());
+        assert!(matches!(
+            p.gate,
+            Gate::Settling {
+                zero_warned: true,
+                ..
+            }
+        ));
+    }
+
+    /// 推論に失敗した VAD は返さない (置き場に戻して使い回さない)
+    #[test]
+    fn failed_vad_is_not_returned() {
+        struct Failing;
+        impl VoiceActivityDetector for Failing {
+            fn predict(&mut self, _: &[f32]) -> Result<f32> {
+                anyhow::bail!("broken")
+            }
+            fn reset(&mut self) {}
+        }
+        let sink = Arc::new(Sink::default());
+        let mut p = Processor::new(Failing, sink.clone());
+        p.frame(&frame_of(0.1));
+        assert!(p.into_vad().is_none());
+
+        let mut p = Processor::new(Scripted(vec![], 0), sink);
+        p.frame(&frame_of(0.1));
+        assert!(p.into_vad().is_some(), "失敗していなければ返す");
+    }
+
+    /// VAD の置き場: 取り出している間は空 (二重に使わない)。戻す時に既にあれば新しい方を残す
+    #[test]
+    fn vad_pool_lends_one_at_a_time() {
+        let pool = VadPool::default();
+        pool.preload();
+        let a = pool.take().expect("読み込み済み");
+        assert!(pool.take().is_none(), "貸し出し中は空");
+        pool.preload();
+        let b = pool.take().unwrap();
+        pool.put_back(a);
+        pool.put_back(b);
+        assert!(pool.take().is_some());
+        assert!(pool.take().is_none());
     }
 
     /// 決まった確率を返すVAD
@@ -747,8 +1077,8 @@ mod tests {
     #[test]
     fn no_partials_during_silence_wait() {
         let sink = Arc::new(Sink::default());
-        // 発話 20 フレーム → 無音 40 フレーム (無音待ち中に 0.8秒を超えても送らない)
-        let mut probs = vec![0.9; 20];
+        // 発話 12 フレーム (前置き 10 と合わせて 0.8秒未満) → 無音 40 フレーム (無音待ち中に 0.8秒を超えても送らない)
+        let mut probs = vec![0.9; 12];
         probs.extend(vec![0.0; 40]);
         let mut p = Processor::new(Scripted(probs, 0), sink.clone());
         let loud = vec![0.3f32; FRAME_SAMPLES];
@@ -774,7 +1104,7 @@ mod tests {
         let loud = vec![0.3f32; FRAME_SAMPLES];
         for i in 0..105 {
             // 3回目の要求時期 (音声 75 フレーム) は前の要求が処理中
-            sink.busy.store((70..80).contains(&i), Ordering::SeqCst);
+            sink.busy.store((65..75).contains(&i), Ordering::SeqCst);
             p.frame(&loud);
         }
         let partials: Vec<String> = sink
@@ -785,10 +1115,15 @@ mod tests {
             .filter(|l| l.starts_with("partial"))
             .cloned()
             .collect();
-        // 音声は pre-pad 5 フレーム + 発話。25 フレームごと、処理中の間は待って空いたら送る
+        // 音声は pre-pad 10 フレーム (前の 5 + 補った無音 5) + 発話。25 フレームごと、処理中の間は待って空いたら送る
         assert_eq!(
             partials,
-            vec!["partial 1 25", "partial 1 50", "partial 1 81"]
+            vec![
+                "partial 1 25",
+                "partial 1 50",
+                "partial 1 81",
+                "partial 1 106"
+            ]
         );
     }
 
@@ -859,14 +1194,16 @@ mod tests {
             .map(|r| r.1)
             .collect();
         assert!(commits.len() >= 2, "{reqs:?}");
-        // 最初の区切りは話の間で終わる (音声は pre-pad を含むためフレーム番号は少しずれる)
-        assert!((335..=355).contains(&commits[0]), "{commits:?}");
+        // 最初の区切りは話の間で終わる (音声は pre-pad 10 フレーム (前の 1 + 補った無音 9) を含むため、
+        // フレーム番号は 9 ずれる)
+        assert!((344..=364).contains(&commits[0]), "{commits:?}");
         assert!(
             reqs.iter().all(|(_, n)| *n <= chunk_frames + 25),
             "{reqs:?}"
         );
         // 区切りの後も途中表示を送り続ける (0.8秒ごと)
         assert!(reqs.len() >= total / 25 - 2, "{}", reqs.len());
-        assert_eq!(reqs.last().unwrap().0, "partial");
+        let first_commit = reqs.iter().position(|(k, _)| k == "commit").unwrap();
+        assert_eq!(reqs[first_commit + 1].0, "partial", "{reqs:?}");
     }
 }

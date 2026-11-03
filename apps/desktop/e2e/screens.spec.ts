@@ -26,6 +26,7 @@ const cases: Case[] = [
   // ---- パネル (03 / 06) ----
   { name: "panel-off", query: "window=panel&mock=off", texts: (m) => [m.panel.turnOn], viewport: PANEL },
   { name: "panel-loading", query: "window=panel&mock=loading", texts: (m) => [`${m.panel.loadingModel} 64%`], viewport: PANEL },
+  { name: "panel-starting", query: "window=panel&mock=starting", texts: (m) => [m.panel.starting], viewport: PANEL },
   { name: "panel-idle", query: "window=panel&mock=idle", texts: (m) => [m.panel.idle], viewport: PANEL },
   { name: "panel-speaking", query: "window=panel&mock=speaking", texts: (m, _, sp) => [sp.partial, m.panel.speaking], viewport: PANEL },
   { name: "panel-finalizing", query: "window=panel&mock=finalizing", texts: (m, _, sp) => [sp.text, m.panel.finalizing], viewport: PANEL },
@@ -41,6 +42,7 @@ const cases: Case[] = [
   { name: "panel-error-mic-denied", query: "window=panel&mock=error-mic-denied", texts: (m) => [m.panel.errors.microphone_denied], viewport: PANEL },
   { name: "panel-error-runtime", query: "window=panel&mock=error-runtime", texts: (m) => [m.panel.errors.runtime_missing, m.errorActions.start_setup], viewport: PANEL },
   { name: "panel-off-dark", query: "window=panel&mock=off", texts: (m) => [m.panel.turnOn], viewport: PANEL, dark: true },
+  { name: "panel-starting-dark", query: "window=panel&mock=starting", texts: (m) => [m.panel.starting], viewport: PANEL, dark: true },
   { name: "panel-idle-dark", query: "window=panel&mock=idle", texts: (m) => [m.panel.idle], viewport: PANEL, dark: true },
   { name: "panel-speaking-dark", query: "window=panel&mock=speaking", texts: (m) => [m.panel.speaking], viewport: PANEL, dark: true },
 

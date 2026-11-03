@@ -26,6 +26,7 @@ import {
   type RunningApp,
 } from "@/lib/ipc";
 import { autoSubmitKeyCombo, formatKeyCombo, formatSeconds } from "@/lib/format";
+import { isOnPhase, showsInputLevel } from "@/lib/phase";
 import { useOsFeatures } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n/context";
@@ -33,8 +34,6 @@ import { Card, FieldError, FieldHeading, Row, TitleWithSub, type SectionProps } 
 
 /** 送信キーの選択肢の並び */
 const AUTO_SUBMIT_KEYS: AutoSubmitKey[] = ["enter", "modEnter"];
-
-const ON_PHASES: AppStatus["phase"][] = ["listening", "speaking", "finalizing", "done"];
 
 /**
  * 感度から求めた入力レベル上のしきい値 (0..1)。audio-level が届く前・オフの間に使う。
@@ -110,7 +109,8 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
   if (selected && devices && !list.some((d) => d.id === selected)) {
     options.push({ value: selected, label: v.disconnected });
   }
-  const isOn = status != null && ON_PHASES.includes(status.phase);
+  const isOn = status != null && isOnPhase(status.phase);
+  const live = status != null && showsInputLevel(status.phase);
 
   return (
     <>
@@ -146,6 +146,7 @@ export function VoiceSection({ settings, update, errors, status }: SectionProps 
       </div>
       <InputLevel
         isOn={isOn}
+        live={live}
         sensitivity={sensitivity.value}
         editing={sensitivity.value !== settings.vadSensitivity}
       />
@@ -239,16 +240,28 @@ function AutoSubmit({ settings, update, errors }: SectionProps) {
  * 入力レベル。オンの間だけ Rust から届く。
  * トラックの塗り分け位置 (しきい値) は audio-level の threshold を使い、届く前・オフの間・感度の操作中 (保存前) は感度から求めた位置に置く
  */
-function InputLevel({ isOn, sensitivity, editing }: { isOn: boolean; sensitivity: number; editing: boolean }) {
+function InputLevel({ isOn, live, sensitivity, editing }: {
+  isOn: boolean;
+  /** レベルを出すか。準備中 (starting) は ON だがマイクがまだ音を拾えていないので出さない */
+  live: boolean;
+  sensitivity: number;
+  editing: boolean;
+}) {
   const { t } = useI18n();
   const { level, threshold, received } = useAudioLevel();
   const split = isOn && received && !editing ? threshold : thresholdFromSensitivity(sensitivity);
-  const shown = isOn ? level : 0;
+  const shown = live ? level : 0;
   return (
     <div className="-mt-2 flex h-8 items-center gap-2.5 rounded-md bg-surface-muted px-3" data-testid="input-level">
       <AudioLines size={14} className="flex-none text-fg-muted" aria-hidden />
       {/* パネルと同じく、表示中の塗り分け位置を超えたら青にする (感度の操作中も見た目の境目と一致させる) */}
-      <LevelMeter testId="input-level-meter" level={shown} threshold={split} active={isOn && shown >= split} />
+      <LevelMeter
+        testId="input-level-meter"
+        level={shown}
+        threshold={split}
+        active={live && shown >= split}
+        disabled={isOn && !live}
+      />
       <span className="text-xs text-fg-muted">{t.settings.voice.inputLevel}</span>
     </div>
   );

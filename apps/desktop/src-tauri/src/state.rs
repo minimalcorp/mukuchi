@@ -1,6 +1,6 @@
 //! アプリ状態 (`Phase`) の一元管理。
 //!
-//! 個々の事実 (ON/OFF、ASR準備完了、発話中、確定処理中の件数、エラー) だけを保持し、
+//! 個々の事実 (ON/OFF、録音の準備完了、ASR準備完了、発話中、確定処理中の件数、エラー) だけを保持し、
 //! `Phase` はそこから導出する。遷移のたびに購読者 (Tauri event・メニュー) へ通知する。
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -21,6 +21,8 @@ pub const ERROR_DISPLAY: Duration = Duration::from_secs(3);
 pub enum Phase {
     Loading,
     Off,
+    /// ON にしたがマイクがまだ音を拾い始めていない (docs/architecture.md「録音開始の準備中」)
+    Starting,
     Listening,
     Speaking,
     Finalizing,
@@ -176,7 +178,11 @@ impl AppStatus {
 struct Facts {
     asr_ready: bool,
     loading_progress: Option<f64>,
+    /// ON (準備中を含む)
     listening: bool,
+    /// ON の後、マイクが音を拾い始めて VAD に音声を入れ始めた (`Phase::Starting` を抜ける)。
+    /// ON/OFF・エラーのたびに false に戻す
+    capture_ready: bool,
     speaking: bool,
     finalizing: usize,
     done_until: Option<Instant>,
@@ -191,6 +197,9 @@ impl Facts {
             Phase::Error
         } else if !self.asr_ready {
             Phase::Loading
+        } else if self.listening && !self.capture_ready {
+            // 前の発話の確定処理中に ON にし直した場合も、拾えない間は準備中と見せる (Finalizing より優先)
+            Phase::Starting
         } else if self.listening && self.speaking {
             Phase::Speaking
         } else if self.finalizing > 0 {
@@ -255,8 +264,15 @@ impl StateManager {
         lock(&self.facts).1.clone()
     }
 
+    /// ON か (準備中を含む)
     pub fn is_listening(&self) -> bool {
         lock(&self.facts).0.listening
+    }
+
+    /// ON で、録音の準備が済んでいる (準備中ではない)
+    pub fn is_capture_ready(&self) -> bool {
+        let f = &lock(&self.facts).0;
+        f.listening && f.capture_ready
     }
 
     /// ON で発話中か (VAD が発話を検出してから確定・破棄まで)
@@ -280,12 +296,30 @@ impl StateManager {
         });
     }
 
+    /// ON/OFF。OFF から ON にした時は準備中 (`Phase::Starting`) から始まる
     pub fn set_listening(&self, on: bool) {
         self.mutate(|f| {
+            if !(on && f.listening) {
+                f.capture_ready = false;
+            }
             f.listening = on;
             if !on {
                 f.speaking = false;
                 f.done_until = None;
+            }
+        });
+    }
+
+    /// 録音の準備完了 (true) / 準備中に戻す (false。録音の開き直し・マイクの切り替え)。
+    /// OFF の間の準備完了は無視する (止める途中に処理スレッドから届いた通知で ON に見せない)
+    pub fn set_capture_ready(&self, ready: bool) {
+        self.mutate(|f| {
+            if ready && !f.listening {
+                return;
+            }
+            f.capture_ready = ready;
+            if !ready {
+                f.speaking = false;
             }
         });
     }
@@ -321,6 +355,7 @@ impl StateManager {
             }
             f.error = Some(error);
             f.listening = false;
+            f.capture_ready = false;
             f.speaking = false;
         });
     }
@@ -461,6 +496,7 @@ mod tests {
         assert_eq!(s.status().phase, Phase::Loading);
         s.set_asr_ready(true);
         s.set_listening(true);
+        s.set_capture_ready(true);
         s.set_speaking(true);
         s.set_speaking(false);
         s.finalizing_started();
@@ -471,6 +507,7 @@ mod tests {
             *seen.lock().unwrap(),
             vec![
                 Phase::Off,
+                Phase::Starting,
                 Phase::Listening,
                 Phase::Speaking,
                 Phase::Listening,
@@ -496,7 +533,7 @@ mod tests {
         });
         s.set_asr_ready(true);
         s.set_listening(true);
-        assert_eq!(s.status().phase, Phase::Listening);
+        assert_eq!(s.status().phase, Phase::Starting);
     }
 
     #[test]
@@ -652,6 +689,86 @@ mod tests {
             }
         });
         s.set_asr_ready(true);
-        assert_eq!(*seen.lock().unwrap(), vec![Phase::Off, Phase::Listening]);
+        assert_eq!(*seen.lock().unwrap(), vec![Phase::Off, Phase::Starting]);
+    }
+
+    /// 準備中: ON で未準備なら Starting。is_listening は準備中も含む。
+    /// 優先順位は Error > Loading > Starting > Speaking > Finalizing
+    #[test]
+    fn starting_until_capture_ready() {
+        let s = StateManager::new();
+        s.set_asr_ready(true);
+        s.set_listening(true);
+        assert_eq!(s.status().phase, Phase::Starting);
+        assert!(s.is_listening());
+        assert!(!s.is_capture_ready());
+        s.set_capture_ready(true);
+        assert_eq!(s.status().phase, Phase::Listening);
+        assert!(s.is_capture_ready());
+        // ON のままの再設定では準備中に戻さない
+        s.set_listening(true);
+        assert_eq!(s.status().phase, Phase::Listening);
+
+        // 開き直し・マイクの切り替え: 準備中に戻り、発話中も解除する
+        s.set_speaking(true);
+        assert_eq!(s.status().phase, Phase::Speaking);
+        s.set_capture_ready(false);
+        assert_eq!(s.status().phase, Phase::Starting);
+        assert!(!s.is_speaking());
+        s.set_capture_ready(true);
+
+        // OFF で準備完了を落とし、次の ON は準備中から
+        s.set_listening(false);
+        assert_eq!(s.status().phase, Phase::Off);
+        assert!(!s.is_capture_ready());
+        s.set_listening(true);
+        assert_eq!(s.status().phase, Phase::Starting);
+    }
+
+    #[test]
+    fn starting_priority() {
+        // 前の発話の確定処理中に ON にし直しても準備中を見せる
+        let s = StateManager::new();
+        s.set_asr_ready(true);
+        s.finalizing_started();
+        assert_eq!(s.status().phase, Phase::Finalizing);
+        s.set_listening(true);
+        assert_eq!(s.status().phase, Phase::Starting);
+        s.set_capture_ready(true);
+        assert_eq!(s.status().phase, Phase::Finalizing);
+
+        // 読み込み中・エラーは準備中より優先
+        let s = StateManager::new();
+        s.set_listening(true);
+        assert_eq!(s.status().phase, Phase::Loading);
+        s.set_asr_ready(true);
+        assert_eq!(s.status().phase, Phase::Starting);
+        s.set_error(AppError::microphone_missing("x"));
+        assert_eq!(s.status().phase, Phase::Error);
+        assert!(!s.is_listening());
+        // エラーで落ちた後は準備完了の通知が来ても ON にならない
+        s.set_capture_ready(true);
+        s.clear_error();
+        assert_eq!(s.status().phase, Phase::Off);
+        assert!(!s.is_capture_ready());
+    }
+
+    #[test]
+    fn capture_ready_ignored_while_off() {
+        let s = StateManager::new();
+        s.set_asr_ready(true);
+        s.set_capture_ready(true);
+        assert!(!s.is_capture_ready());
+        s.set_listening(true);
+        assert_eq!(s.status().phase, Phase::Starting);
+    }
+
+    #[test]
+    fn starting_serializes_as_starting() {
+        let s = StateManager::new();
+        s.set_asr_ready(true);
+        s.set_listening(true);
+        let v = serde_json::to_value(s.status()).unwrap();
+        assert_eq!(v["phase"], "starting");
     }
 }

@@ -139,6 +139,8 @@
   /* プレビューの差分の色付け: 色のまま保つ時間 → 通常の文字色へ戻す時間 (計 900ms) */
   --duration-diff-hold: 200ms;
   --duration-diff-fade: 700ms;
+  /* 準備中 (starting) のコンパクト表示の脈動 1 周期。待機中と見分けられ、せかさない遅さ */
+  --duration-starting-pulse: 1600ms;
   --transition-control: background-color var(--duration-fast) var(--ease-standard),
     border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard),
     box-shadow var(--duration-fast) var(--ease-standard);

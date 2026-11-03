@@ -18,7 +18,7 @@ use crate::i18n::{self, Locale, Msg};
 use crate::insert::{InsertConfig, InsertQueue, Job, UtteranceResult};
 use crate::paths::{DataPaths, Resources};
 use crate::pipeline::{
-    self, PartialRequest, PipelineSink, Running, StartError, PARTIAL_CHUNK_MAX_SAMPLES,
+    self, PartialRequest, PipelineSink, Running, StartError, VadPool, PARTIAL_CHUNK_MAX_SAMPLES,
 };
 use crate::platform::{self, MicAuthorization};
 use crate::provisioning::hf::HfModel;
@@ -209,6 +209,8 @@ pub struct Core {
     insert: Mutex<Option<InsertQueue>>,
     running: Mutex<Option<Capture>>,
     capture_generation: AtomicU64,
+    /// 読み込み済みの VAD (起動時に読み込み、録音ごとに使い回す。準備中を短くするため)
+    vad_pool: Arc<VadPool>,
     next_id: AtomicU64,
     partial: Mutex<PartialState>,
     /// 応答待ちの確定リクエストの数。0 でない間は途中表示を送らない (ASR は直列のため確定を遅らせる)
@@ -308,6 +310,7 @@ impl Core {
             insert: Mutex::new(None),
             running: Mutex::new(None),
             capture_generation: AtomicU64::new(0),
+            vad_pool: Arc::new(VadPool::default()),
             next_id: AtomicU64::new(0),
             partial: Mutex::new(PartialState::default()),
             finals_in_flight: AtomicUsize::new(0),
@@ -428,6 +431,9 @@ impl Core {
 
         let core = self.clone();
         tauri::async_runtime::spawn(async move { core.connect_asr().await });
+        // 最初の ON でモデルの読み込みを待たないよう先に読み込む
+        let pool = self.vad_pool.clone();
+        tauri::async_runtime::spawn_blocking(move || pool.preload());
         self.clone().spawn_health_monitor();
         let weak = Arc::downgrade(self);
         self.updates.spawn_scheduler(move || {
@@ -1232,7 +1238,8 @@ impl Core {
     }
 
     /// 音声入力の ON/OFF。開始手段 (パネル・メニューバー・ショートカット) によらずここを通る。
-    /// 1回ずつ聞き取るでは ON にした時点から無発話タイマーを張る
+    /// ON は準備中 (`Phase::Starting`) から始まり、マイクが音を拾い始めたら聞き取りになる (`Sink::capture_ready`)。
+    /// 1回ずつ聞き取るの無発話タイマーは準備完了の時点から張る
     pub async fn set_listening(self: &Arc<Self>, on: bool) -> Result<()> {
         let _guard = self.toggle_lock.lock().await;
         self.set_listening_locked(on).await
@@ -1244,6 +1251,7 @@ impl Core {
             self.off_locked(false).await;
             return Ok(());
         }
+        let pressed_at = Instant::now();
         if self.state.is_listening() {
             return Ok(());
         }
@@ -1272,6 +1280,15 @@ impl Core {
             return Err(anyhow!(e.message));
         }
 
+        // ここから準備中。マイク許可の確認・録音の開始 (デバイスを開くのに機器により 76ms〜約4秒) の間も、
+        // 押下が届いたことを見せる。以後の失敗は set_error / set_listening(false) で準備中を残さない
+        self.state.set_listening(true);
+        self.cancel_no_speech_timer();
+        // セットアップを閉じてパネルが隠れたままでも、メニューバー等からONにしたら様子が見えるようにする
+        if let Err(e) = crate::windows::show_panel(&self.app) {
+            log::warn!("パネルを表示できません: {e:#}");
+        }
+
         if matches!(self.audio_source(), Source::Device(_)) {
             let mut mic = platform::microphone_authorization();
             if mic == MicAuthorization::NotDetermined {
@@ -1285,27 +1302,24 @@ impl Core {
             }
         }
 
-        self.start_capture_locked().await?;
-        self.state.set_listening(true);
-        self.reset_no_speech_timer();
-        // セットアップを閉じてパネルが隠れたままでも、メニューバー等からONにしたら様子が見えるようにする
-        if let Err(e) = crate::windows::show_panel(&self.app) {
-            log::warn!("パネルを表示できません: {e:#}");
-        }
-        Ok(())
+        self.start_capture_locked(pressed_at).await
     }
 
     /// 録音を開始する。`toggle_lock` を持って呼ぶ。失敗時はエラー状態にする (OFFになる)。
-    async fn start_capture_locked(self: &Arc<Self>) -> Result<()> {
+    /// `origin` は開始の操作の時刻 (準備完了までの時間のログ用)
+    async fn start_capture_locked(self: &Arc<Self>, origin: Instant) -> Result<()> {
         let source = self.audio_source();
         let generation = self.capture_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let sink: Arc<dyn PipelineSink> = Arc::new(Sink {
             core: Arc::downgrade(self),
             generation,
         });
-        // VAD の読み込みとデバイスの初期化は時間がかかりうるため async ランタイムを塞がない
-        let started =
-            tauri::async_runtime::spawn_blocking(move || pipeline::start(source, sink)).await;
+        // VAD の読み込み (使い回せない時) とデバイスの初期化は時間がかかりうるため async ランタイムを塞がない
+        let pool = self.vad_pool.clone();
+        let started = tauri::async_runtime::spawn_blocking(move || {
+            pipeline::start(source, sink, origin, pool)
+        })
+        .await;
         let running = match started {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
@@ -1338,13 +1352,14 @@ impl Core {
             return;
         }
         log::info!("マイクの変更のため録音をやり直す");
+        let origin = Instant::now();
+        // 発話中だったものは破棄される。1回ずつ聞き取るの無発話タイマーは新しい録音の準備完了から張り直す
+        self.cancel_no_speech_timer();
         self.stop_capture(false).await;
-        if let Err(e) = self.start_capture_locked().await {
+        self.state.set_capture_ready(false);
+        if let Err(e) = self.start_capture_locked(origin).await {
             log::error!("マイク切り替え後の再開に失敗: {e:#}");
-            return;
         }
-        // 発話中だったものは破棄されたため、1回ずつ聞き取るなら待ち直す
-        self.reset_no_speech_timer();
     }
 
     /// OFF にする。`toggle_lock` を持って呼ぶ。`finish` なら発話中のものも確定してから止める
@@ -1368,9 +1383,9 @@ impl Core {
     /// (話していなければ取り消して OFF。どちらになるかは処理スレッドが止める時点で決める: `Running::finish`)。
     /// 失敗はログだけ (エラーは状態としてパネル・メニューバーに出ている)
     ///
-    /// ON/OFF の判定は `toggle_lock` を取ってから行う。ON の処理 (マイク許可の確認・録音の開始) は
-    /// ロックを持ったまま最後に listening を立てるため、先に判定すると、その間の再押下 (取り消し) が
-    /// 「OFF なので ON」と扱われて無視される。押下は順に処理され、2回目は ON になった後の OFF になる
+    /// ON/OFF の判定は `toggle_lock` を取ってから行う。ON の処理は先に準備中 (listening) にしてから
+    /// マイク許可の確認・録音の開始をロックを持ったまま行うため、先に判定すると、録音の開始を待つ間の
+    /// 再押下 (取り消し) が開始の途中の状態で判定される。押下は順に処理され、2回目は録音を開始した後の OFF になる
     pub async fn on_shortcut(self: &Arc<Self>) {
         let _guard = self.toggle_lock.lock().await;
         // エラーを表示している間の押下は「OFF にする操作」: やり直さずに表示を消す。
@@ -1429,10 +1444,15 @@ impl Core {
         self.no_speech_timer.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// 無発話タイマーを張り直す (1回ずつ聞き取るで ON の間のみ。それ以外は取り消すだけ)
+    /// 無発話タイマーを張り直す (1回ずつ聞き取るで ON かつ録音の準備完了後、話していない時のみ。
+    /// それ以外は取り消すだけ)。準備中は数えない (docs/architecture.md「録音開始の準備中」)。
+    /// 準備中に話し始めていれば、準備完了の時点では張らない (発話の確定・破棄で決まる)
     fn reset_no_speech_timer(self: &Arc<Self>) {
         let seq = self.no_speech_timer.fetch_add(1, Ordering::SeqCst) + 1;
-        if self.input_mode() != InputMode::OneShot || !self.state.is_listening() {
+        if self.input_mode() != InputMode::OneShot
+            || !self.state.is_capture_ready()
+            || self.state.is_speaking()
+        {
             return;
         }
         let core = self.clone();
@@ -2187,6 +2207,29 @@ impl PipelineSink for Sink {
         if let Some(c) = self.core.upgrade() {
             // 処理スレッド自身から stop (join) できないため、別タスクで止める
             c.fail_later(AppError::microphone_missing(message), Some(self.generation));
+        }
+    }
+
+    // 準備の通知は、録音を `running` に登録する前 (pipeline::start から戻る前) に届きうる
+    // (開発用の WAV は最初のバッファで準備完了)。そのため is_current_capture ではなく、
+    // 最後に開始した録音の generation と比べて古い録音からの通知だけを捨てる
+    fn capture_ready(&self) {
+        if let Some(c) = self.core.upgrade() {
+            if c.capture_generation.load(Ordering::SeqCst) != self.generation {
+                return;
+            }
+            c.state.set_capture_ready(true);
+            c.reset_no_speech_timer();
+        }
+    }
+
+    fn capture_starting(&self) {
+        if let Some(c) = self.core.upgrade() {
+            if c.capture_generation.load(Ordering::SeqCst) != self.generation {
+                return;
+            }
+            c.cancel_no_speech_timer();
+            c.state.set_capture_ready(false);
         }
     }
 }

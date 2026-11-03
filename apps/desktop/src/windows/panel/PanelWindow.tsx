@@ -39,13 +39,12 @@ import { useLevelEnvelope } from "@/lib/level-envelope";
 import { env } from "@/lib/env";
 import { errorActionView } from "@/lib/error-actions";
 import { usePanelDrag } from "@/lib/panel-drag";
+import { isOnPhase } from "@/lib/phase";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n/context";
 import type { Messages } from "@/i18n/context";
 import { usePanelModel, type PanelItem } from "./usePanelModel";
 import type { DiffKind } from "./preview-diff";
-
-const ON_PHASES: AppStatus["phase"][] = ["listening", "speaking", "finalizing", "done"];
 
 // ピル・カードの大きさ。展開の最終の大きさを先に求めるため、クラスではなくここで持つ
 const CARD_WIDTH = { pill: 240, expanded: 360 };
@@ -90,7 +89,9 @@ export function PanelWindow() {
   // 表示形式は右クリックメニュー・設定画面から変わる (settings-changed)
   useEffect(() => subscribeWithInitial("settings-changed", commands.getSettings, (s) => setStyle(s.panelStyle)), []);
 
-  const isOn = status ? ON_PHASES.includes(status.phase) : false;
+  const isOn = status ? isOnPhase(status.phase) : false;
+  // 準備中 (starting) も待機中と同じピル (同じ BodyKind) で出し、listening になった時に面を動かさない
+  const starting = status?.phase === "starting";
   const expanded = items.length > 0;
 
   let kind: BodyKind | null = null;
@@ -102,7 +103,15 @@ export function PanelWindow() {
     body = <CompactPanel status={status} items={items} />;
   } else if (expanded || isOn) {
     kind = "listening";
-    body = <ListeningPanel anchor={anchor} isOn={isOn} expanded={expanded} items={expanded ? items : lastShown} />;
+    body = (
+      <ListeningPanel
+        anchor={anchor}
+        isOn={isOn}
+        starting={starting}
+        expanded={expanded}
+        items={expanded ? items : lastShown}
+      />
+    );
   } else if (status.phase === "loading") {
     kind = "loading";
     body = <LoadingPill progress={status.loadingProgress} />;
@@ -423,9 +432,11 @@ function ErrorActionButton({ error }: { error: AppError }) {
 // 収縮の終わりを知るためのカードの大きさのアニメーション (CSS transition)
 const SIZE_TRANSITIONS = new Set(["width", "grid-template-rows"]);
 
-function ListeningPanel({ anchor, isOn, expanded, items }: {
+function ListeningPanel({ anchor, isOn, starting, expanded, items }: {
   anchor: PanelAnchor;
   isOn: boolean;
+  /** 準備中 (マイクがまだ音を拾えていない)。メーターを無効の見た目にし、状態を「準備中」にする */
+  starting: boolean;
   expanded: boolean;
   items: PanelItem[];
 }) {
@@ -530,8 +541,8 @@ function ListeningPanel({ anchor, isOn, expanded, items }: {
           style={{ height: expanded ? ROW_HEIGHT.expanded : ROW_HEIGHT.pill }}
         >
           <ToggleButton isOn={isOn} />
-          <PanelLevelMeter active={isOn} />
-          <StatusLabel expanded={expanded} items={items} />
+          <PanelLevelMeter active={isOn && !starting} disabled={starting} />
+          <StatusLabel expanded={expanded} starting={starting} items={items} />
         </div>
       </div>
     </div>
@@ -572,13 +583,14 @@ function ToggleButton({ isOn, className }: { isOn: boolean; className?: string }
 
 /* ---------- コンパクト表示 (マイクの円形ボタンのみ) ---------- */
 
-type CompactState = "off" | "loading" | "listening" | "speaking" | "finalizing" | "error";
+type CompactState = "off" | "loading" | "starting" | "listening" | "speaking" | "finalizing" | "error";
 
 function compactState(status: AppStatus, items: PanelItem[]): CompactState {
   switch (status.phase) {
     case "off":
     case "loading":
     case "error":
+    case "starting":
     case "speaking":
       return status.phase;
     default:
@@ -595,7 +607,7 @@ function CompactPanel({ status, items }: { status: AppStatus; items: PanelItem[]
   const { t } = useI18n();
   const drag = usePanelDrag();
   const state = compactState(status, items);
-  const isOn = ON_PHASES.includes(status.phase);
+  const isOn = isOnPhase(status.phase);
   return (
     <div
       {...drag}
@@ -612,8 +624,9 @@ function CompactPanel({ status, items }: { status: AppStatus; items: PanelItem[]
           <MicOff size={14} aria-label={t.panel.loadingModelShort} />
         </span>
       ) : (
-        // リング (absolute) より上に描くため relative にする
-        <ToggleButton isOn={isOn} className="relative" />
+        // リング (absolute) より上に描くため relative にする。
+        // 準備中は ON の色のまま脈動させ、まだ話せないことを待機中 (静止) と見分けられるようにする
+        <ToggleButton isOn={isOn} className={cn("relative", state === "starting" && "animate-starting-pulse")} />
       )}
       {state === "error" && status.error ? (
         <span
@@ -668,7 +681,7 @@ function CompactSpinner({ muted }: { muted: boolean }) {
 }
 
 /** 入力レベル。約15Hz で更新されるのでここだけが購読・再描画する */
-function PanelLevelMeter({ active }: { active: boolean }) {
+function PanelLevelMeter({ active, disabled }: { active: boolean; disabled: boolean }) {
   const { level, threshold } = useAudioLevel();
   return (
     <LevelMeter
@@ -678,6 +691,7 @@ function PanelLevelMeter({ active }: { active: boolean }) {
       level={active ? level : 0}
       threshold={threshold}
       active={active && level >= threshold}
+      disabled={disabled}
     />
   );
 }
@@ -709,11 +723,24 @@ function statusView(items: PanelItem[], t: Messages): StatusView | null {
   }
 }
 
-function StatusLabel({ expanded, items }: { expanded: boolean; items: PanelItem[] }) {
+function StatusLabel({ expanded, starting, items }: { expanded: boolean; starting: boolean; items: PanelItem[] }) {
   const { t } = useI18n();
-  const view = expanded ? statusView(items, t) : null;
+  // 準備中は発話の行 (プレビュー) が出ていても文言を準備中のままにする (メーターも無効の見た目のまま。
+  // 「認識中」と出すと準備ができたと誤解される)
+  const view = expanded && !starting ? statusView(items, t) : null;
   if (!view) {
-    return <span className="text-2xs leading-[1.6] whitespace-nowrap text-fg-muted">{t.panel.idle}</span>;
+    // 準備中・待機中の文言を重ねて広い方の幅を取り、見えない方を隠す。
+    // 準備中 → 待機中で文言の幅 (en は Starting… / Listening) が変わってもメーターの長さが動かないように
+    return (
+      <span data-testid="panel-status" className="grid text-2xs leading-[1.6] whitespace-nowrap text-fg-muted">
+        <span className={cn("[grid-area:1/1]", !starting && "invisible")} aria-hidden={!starting}>
+          {t.panel.starting}
+        </span>
+        <span className={cn("[grid-area:1/1]", starting && "invisible")} aria-hidden={starting}>
+          {t.panel.idle}
+        </span>
+      </span>
+    );
   }
   const Icon = view.icon;
   return (

@@ -496,13 +496,13 @@ test("settings: 認識のヒントは待ち時間内にページが隠れても�
 test("panel: seq が前回より小さい status-changed は捨てる", async ({ page, m }) => {
   await open(page, "window=panel&mock=off", PANEL);
   await expect(page.getByRole("button", { name: m.panel.turnOn })).toBeVisible();
-  await mock(page, `api.fire("status-changed", { phase: "listening", loadingProgress: null, error: null, seq: 5 });`);
+  await mock(page, `api.fire("status-changed", { phase: "listening", loadingProgress: null, error: null, on: true, seq: 5 });`);
   await expect(page.getByText(m.panel.idle)).toBeVisible();
   // 遅れて届いた古い状態
-  await mock(page, `api.fire("status-changed", { phase: "off", loadingProgress: null, error: null, seq: 3 });`);
+  await mock(page, `api.fire("status-changed", { phase: "off", loadingProgress: null, error: null, on: false, seq: 3 });`);
   await page.waitForTimeout(200);
   await expect(page.getByText(m.panel.idle)).toBeVisible();
-  await mock(page, `api.fire("status-changed", { phase: "off", loadingProgress: null, error: null, seq: 6 });`);
+  await mock(page, `api.fire("status-changed", { phase: "off", loadingProgress: null, error: null, on: false, seq: 6 });`);
   await expect(page.getByRole("button", { name: m.panel.turnOn })).toBeVisible();
 });
 

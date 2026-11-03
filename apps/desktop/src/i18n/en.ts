@@ -103,6 +103,8 @@ export const en = {
       gpu_unavailable: "GPU not available",
     },
     starting: "Starting…",
+    noInput: "No audio from mic",
+    soundSettings: "Sound Settings",
     idle: "Listening",
     speaking: "Hearing you",
     finalizing: "Finishing…",
@@ -284,6 +286,7 @@ export const en = {
       systemDefaultWith: (name: string) => `System Default (${name})`,
       disconnected: "Selected microphone (not connected)",
       inputLevel: "Input level",
+      noInput: "No audio from the microphone. Check that it isn’t muted, the input volume, and the selected microphone.",
       sensitivity: "Speech detection sensitivity",
       sensitivityHelp:
         "Higher picks up quieter voices. Lower it in noisy places. The point where the track turns light blue is the detection threshold",

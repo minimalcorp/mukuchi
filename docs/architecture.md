@@ -28,16 +28,16 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 | ASR | Python + MLX (`mlx-qwen3-asr`)。既定のモデルは `neosophie/Qwen3-ASR-1.7B-JA` を全層8bit量子化したもの (自前変換、`minimalcorp/Qwen3-ASR-1.7B-JA-MLX-8bit`、約2.2GB)。元の bf16 版 (`neosophie/Qwen3-ASR-1.7B-JA`、約4.1GB) は既に手元にある導入でのみ一覧に出る (下の「モデルの管理」)。どちらも revision (commit) を固定して取得 | Rust実装(candle/MLX)は約3倍遅い (spikes/asr-bench)。8bitはfp16と同等精度・約2割速い・メモリ1/3 (spikes/asr-bench/MODEL_DECISION.md) |
 | モデルの管理 | 候補はアプリに固定 (`provisioning/models.rs` の `CATALOG`)。常に「取得済みのモデルが1つ選択されている」状態を保つ (取得途中は選べない、選択中は削除できない)。取得 (進捗・一時停止・再開・中止)・削除はモデルごと。**取得中にできるのは1つ** (一時停止・失敗で止まっているものは複数あってよい)。モデルの操作はセットアップ完了後のみ (セットアップの取得と同時に走らせない)。詳細は「モデルの管理」の節 | 2026-10-01 決定 |
 | 操作 | 音声入力のON/OFFは **常時表示パネルのボタン**・**メニューバー**・**グローバルショートカット** (既定 ⌥Space、`Settings.shortcut` で変更・無効化可。`tauri-plugin-global-shortcut` = macOS は Carbon `RegisterEventHotKey` で追加の権限は不要)。押下で、OFF なら ON。ON なら入力モードで分岐: 常に聞き取る→OFF / 1回ずつ聞き取るで未発話→取り消して OFF / 発話中→無音を待たずに確定して OFF。押している間だけ録音するモードは実装しない | 2026-09-30 確定、2026-10-02 ショートカットを追加 (周囲に人がいる環境で入力のタイミングを自分で決める「1回ずつ聞き取る」の開始手段として) |
-| 録音開始の準備中 | ON にした瞬間から phase は `starting` (表示「準備中」)。マイクの音声が届き始め (先頭の完全な 0 は数えない) てから、音声の長さで 200ms (`CAPTURE_SETTLE_MS`) 経ったら `listening` にする。区別は表示だけで、ON にしてから届いた音声はすべて VAD に入れて文字起こしに使う (準備中に話し始めた分も捨てない。発話を検出しても準備完了までは `starting` を表示し、パネルの文言も「準備中」のまま)。準備中を短くするため VAD のモデルは使い回す (ON のたびに読み込まない)。1回ずつ聞き取るの無発話タイマーも `listening` になった時点から数える。`starting` は ON として扱う (押下・ボタンで OFF にできる)。発話の前に前置き (pre-pad) 分の音声が無い時 (開始直後・前の発話の直後) は、足りない分を無音で補う (先頭に無音が無いと ASR が冒頭の短い語を落とす。実測) | 2026-11-03 決定。マイクを開く時間は機器で 76ms〜約4秒 (内蔵 / USB の Insta360 Mic Pro / iPhone の連係マイク) と幅があり、届き始めても内蔵マイクは約150〜200ms 減衰した音を返す (実測。生のデバイス出力でも同じ)。音声の中身からは「拾い始めた」と判定できない (静かな部屋と区別できない) ため、検知できる合図 (届き始め) と固定の待ちを組み合わせる。押してすぐ話すと語頭が欠けていたため、拾えない間は待機中に見せない。待ちは実測の最大 (約200ms) に合わせて最短にする |
+| 録音開始の準備中 | ON にした瞬間から phase は `starting` (表示「準備中」)。マイクの音声が届き始め (先頭の完全な 0 は数えない) てから、音声の長さで 200ms (`CAPTURE_SETTLE_MS`) 経ったら `listening` にする。区別は表示だけで、ON にしてから届いた音声はすべて VAD に入れて文字起こしに使う (準備中に話し始めた分も捨てない。発話を検出しても準備完了までは `starting` を表示し、パネルの文言も「準備中」のまま)。準備中を短くするため VAD のモデルは使い回す (ON のたびに読み込まない)。1回ずつ聞き取るの無発話タイマーも `listening` (または下の `no_input`) になった時点から数える。`starting` は ON として扱う (押下・ボタンで OFF にできる)。**無音のフォールバック**: ストリームの開始から 5 秒 (`CAPTURE_READY_TIMEOUT`、ウォールクロック。サンプルが届かない間も数える) 経っても準備が済まなければ phase `no_input` (表示「マイクの音が届いていません」) にする。`listening` の間に完全な 0 が音声の長さで 5 秒続いた時も `no_input` にする。`no_input` も ON で音声は VAD に入れ続け、0 でない音が届いてから 200ms で `listening` にする。**表示**: `starting`・`no_input` は待機中に見せない。パネルは OFF と同じ形・幅のピル (準備中は回転するアイコン +「準備中」で押すと OFF、無音は OFF ボタン + 文言 +「サウンド設定」)、コンパクト表示は OFF の色 (準備中は脈動、無音は amber の点)、メニューバーのアイコンは OFF。`listening` になった時に待機中のピルへ広げる (OFF→ON の押下ではなく)。準備中・無音の間に発話を検出してもパネルは広げず、`listening`/`speaking` になってから広げる。ON の間にマイクを開き直す時 (マイクの切り替え・既定のマイクの変更・ストリームの喪失) も `starting` に戻り、同じ表示になる (切り替え先が無音なら知らせるため)。OFF→ON では前回の結果の表示を引き継がない。発話の前に前置き (pre-pad) 分の音声が無い時 (開始直後・前の発話の直後) は、足りない分を無音で補う (先頭に無音が無いと ASR が冒頭の短い語を落とす。実測) | 2026-11-03 決定。マイクを開く時間は機器で 76ms〜約4秒 (内蔵 / USB の Insta360 Mic Pro / iPhone の連係マイク) と幅があり、届き始めても内蔵マイクは約150〜200ms 減衰した音を返す (実測。生のデバイス出力でも同じ)。音声の中身からは「拾い始めた」と判定できない (静かな部屋と区別できない) ため、検知できる合図 (届き始め) と固定の待ちを組み合わせる。押してすぐ話すと語頭が欠けていたため、拾えない間は待機中に見せない。待ちは実測の最大 (約200ms) に合わせて最短にする。2026-11-04: 完全な 0 のままのマイク (ミュート・入力音量 0・接続中の機器等) で準備中から抜けない事例があったため無音のフォールバックを追加 (5 秒はマイクを開く時間の実測の最大 約4秒 + 200ms に余裕を足した値)。表示は「待機中 = 入力が有効」に揃え、無音では利用者が確かめる先 (OS のサウンドの入力設定) を出す |
 | 入力単位 | ONの間、発話(VAD区間)ごとに文字起こしし、話し終わったら入力。入力は単一キューで直列化 | 必須要件 |
-| 入力モード | `Settings.inputMode`。`continuous` (常に聞き取る・既定): ONの間ずっと発話ごとに入力。`oneShot` (1回ずつ聞き取る): ONにしてから1発話を確定 (VAD の話し終わり・最大長、またはショートカットの再押下) したら自動で OFF。短すぎる発話 (誤検出) では OFF にしない。準備完了 (phase が `listening` になった時点。「録音開始の準備中」) または誤検出から10秒 (固定) 話し始めなければ OFF。開始手段 (パネル・メニューバー・ショートカット) によらず同じ。セットアップの「入力モード」ステップと 設定 > 音声入力 で選ぶ | 2026-10-02 決定。ひとりなら常に聞き取る、周りに人がいる・会話が聞こえる場所では入力のタイミングを自分で決めたいため |
+| 入力モード | `Settings.inputMode`。`continuous` (常に聞き取る・既定): ONの間ずっと発話ごとに入力。`oneShot` (1回ずつ聞き取る): ONにしてから1発話を確定 (VAD の話し終わり・最大長、またはショートカットの再押下) したら自動で OFF。短すぎる発話 (誤検出) では OFF にしない。準備完了 (phase が `listening` または `no_input` になった時点。「録音開始の準備中」) または誤検出から10秒 (固定) 話し始めなければ OFF。開始手段 (パネル・メニューバー・ショートカット) によらず同じ。セットアップの「入力モード」ステップと 設定 > 音声入力 で選ぶ | 2026-10-02 決定。ひとりなら常に聞き取る、周りに人がいる・会話が聞こえる場所では入力のタイミングを自分で決めたいため |
 | リアルタイムプレビュー | 発話中は前回から音声が0.8秒以上伸び、かつ途中表示の要求が処理中でなければ、発話開始からの音声を文字起こしし直してパネルに表示する。入力するのは話し終わり時点の最終結果のみ。確定後は最終結果で表示を置き換えて750ms表示する (入力成功時は成功マークのみで入力先アプリ名は出さない)。推論時間の見積もり(実測から学習)が話し終わりの無音(silenceMs)を超える場合は送らない。長い発話は区切り (見積もりが silenceMs に収まる最長、3〜12秒) ごとに静かな所で確定し、以後は区切りの後の音声だけを送る (表示は確定した区切りの文字 + 今の区切りの文字。1回の推論が発話の長さに比例して伸びず、確定を遅らせない) | 2026-09-30 確定。値はtsunagiの音声入力に準拠 (implementation-plan.md「音声入力の体験」)。途中表示の応答待ちを取り消してもサーバーの推論は止まらず(直列実行)、確定がその分遅れるため |
 | 入力方式 | クリップボード + ⌘V、元のクリップボードを復元 | IMEの影響を受けない |
 | 自動送信 | `Settings.autoSubmit` (既定 OFF) が ON なら、貼り付けた発話の直後に送信キー (`Settings.autoSubmitKey`: Enter または 主修飾キー+Enter) を送る。入力モードによらない。何も入力しなかった発話 (empty・discarded・skipped_excluded・failed)、音声コマンドに一致した発話、正規化 (音声コマンドと同じ) すると空になる文字列 (句読点だけ等。貼り付けはする)、貼り付けの間に前面アプリが変わった発話 (送信キーが別のアプリに届くため。貼り付けはする) では送らない。設定 > 音声入力 で切り替える | 2026-10-08 決定。チャット等で話すたびに手で送信しなくて済むように。キーは Windows 対応を見越して OS 非依存の値 (`modEnter`) で持つ |
 | 音声コマンド | 「言い方→キー」対応表(既定: 確定/エンター→Enter、改行→Shift+Enter、送信→⌘+Enter)。発話全体が正規化後に完全一致した時のみ。機能ごとON/OFF可 | 表記揺れは複数の言い方で吸収 |
-| パネルの表示形式 | 通常 (プレビュー・状態の文言あり) と コンパクト (マイクの円形ボタンのみ。OFF=グレー、ON=青、発話中は音量に合わせて広がるリング、文字起こし中は回転するリング、エラーは赤い点) を `Settings.panelStyle` で切り替え。パネルの右クリックメニューのチェック項目「コンパクト表示」と 設定 > 一般 から切り替える | 2026-09-30 決定。デザインは既存トークンで作成 |
+| パネルの表示形式 | 通常 (プレビュー・状態の文言あり) と コンパクト (マイクの円形ボタンのみ。OFF=グレー、ON=青、準備中=グレーで脈動、無音=グレーに amber の点、発話中は音量に合わせて広がるリング、文字起こし中は回転するリング、エラーは赤い点) を `Settings.panelStyle` で切り替え。パネルの右クリックメニューのチェック項目「コンパクト表示」と 設定 > 一般 から切り替える | 2026-09-30 決定。デザインは既存トークンで作成 |
 | 入力しないアプリ | 登録したアプリが前面にある間は入力しない(パネルに「このアプリには入力しません」) | デザインの任意提案Aを採用 |
-| メニューバー | macOS標準のメニュー(NSMenu)。状態・エラーは文字の行、復旧はメニュー項目で表す。アイコンはロゴ (`assets/brand/macos/MenuBarIcon`) から作ったテンプレート画像: OFF=50%の濃さ、ON=ロゴ、発話中・文字起こし中=右下に点、エラー=右上に赤い点 (非テンプレート。明暗で描き分け) | デザインの進捗バー・色付き表示は標準メニューで再現できないため |
+| メニューバー | macOS標準のメニュー(NSMenu)。状態・エラーは文字の行、復旧はメニュー項目で表す。アイコンはロゴ (`assets/brand/macos/MenuBarIcon`) から作ったテンプレート画像: OFF (準備中・無音も)=50%の濃さ、ON=ロゴ、発話中・文字起こし中=右下に点、エラー=右上に赤い点 (非テンプレート。明暗で描き分け) | デザインの進捗バー・色付き表示は標準メニューで再現できないため |
 | 常時表示パネル | フォーカスを奪わないパネル(NSPanel, non-activating。`tauri-nspanel`)。クリック・ドラッグ・右クリックで mukuchi を前面アプリにしない (前面アプリのキーフォーカス・IME の変換中の文字を保つ)。non-activating のスタイルは NSPanel の初期化時にしかウィンドウサーバーに伝わらず (FB16484811)、既存のウィンドウを後から NSPanel にする tauri-nspanel では効かないため、AppKit の非公開 API `_setPreventsActivation:` を作成直後と表示時に呼び、読み返して確認する (応答しない OS ではエラーをログに出す)。既定は画面下中央(Dockの上16px)、ドラッグで移動し位置を記憶。前面ウィンドウのあるディスプレイに表示。ピルはディスプレイの visibleFrame (Dock・メニューバーを除く) に収める。記憶するのは利用者のドラッグだけ(ディスプレイの取り外し等でシステムが動かした位置は記憶しない) | |
 | ログイン時に起動 | `SMAppService.mainAppService` (macOS 13+) で登録。登録・解除するのは利用者の操作の時だけ: セットアップ完了時 (その時点の launchAtLogin に揃える) と、完了後に設定を切り替えた時。セットアップ完了前の変更は保存のみ。登録後の status が `enabled` でなければ保存せずエラー (承認待ちなら「ログイン項目」を開く案内)。起動時は登録・解除せず、システム設定での変更 (オフ・削除・オン) を設定に取り込む。開発ビルドはセットアップ完了時・起動時の処理をせず、設定画面で切り替えた時だけ登録・解除する | status の意味は SDK の SMAppService.h: 利用者がシステム設定でオフにすると `requiresApproval`、解除済みは `notRegistered`。起動時に status から推測して登録し直すと利用者の選択を上書きするため | tauri-plugin-autostart の macOS 実装は LaunchAgent (plist をアプリ外に置く) か AppleScript (自動化の許可が要る) のみのため使わない |
 | Dock | 通常は非表示(Accessory)。設定・セットアップウィンドウ表示中のみ表示(Regular) | |
@@ -274,13 +274,16 @@ UIデザインの正: Claude Design handoff「mukuchi UI Proposal」(社内デ�
 
 ```ts
 // starting: ON にしたがマイクがまだ音を拾えると判断できていない (準備中)。表示だけの区別で、この間の音声も文字起こしに使う (「録音開始の準備中」)
-type Phase = "loading" | "off" | "starting" | "listening" | "speaking" | "finalizing" | "done" | "error";
+// no_input: ON だがマイクの音が完全な 0 のまま (準備中の 5 秒のフォールバック、または聞き取り中に 0 が 5 秒)。音声は VAD に入れ続け、音が届けば listening
+type Phase = "loading" | "off" | "starting" | "no_input" | "listening" | "speaking" | "finalizing" | "done" | "error";
 
 type AppStatus = {
   phase: Phase;
   // phase=loading: モデル読み込み・ASR起動中。進捗が取れない場合は null (不定表示)
   loadingProgress: number | null;
   error: AppError | null;
+  // 音声入力が ON か (set_listening の状態)。phase は OFF の後も確定処理中なら finalizing になるため、OFF→ON の判定 (前回の結果の表示を引き継がない) はこれで行う
+  on: boolean;
   // 状態が変わるたびに1ずつ増える通番。受け手は手元より小さい seq の status-changed / get_status の結果を捨てる
   seq: number;
 };
@@ -412,7 +415,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | `get_permissions` | → `Permissions` | 権限表示(setupでは1秒ごとに再取得) |
 | `request_microphone` | → `Permissions` | マイク許可ダイアログを出す |
 | `get_gpu_status` / `probe_gpu` | → `GpuStatus` / → `GpuStatus` | Windows のみ (Mac は常に ok)。判定結果の取得 / 再検出 (設定 > 認識・セットアップ・`gpu_unavailable` の復旧) |
-| `open_system_settings` | `{ pane: "microphone" \| "accessibility" \| "login_items" }` → `()` | システム設定 (Windows は「設定」アプリ: microphone → `ms-settings:privacy-microphone`、login_items → `ms-settings:startupapps`、accessibility は使わない) を開く。`login_items` はログイン項目 (`SMAppService.openSystemSettingsLoginItems`。launchAtLogin を ON にできなかった時の案内用) |
+| `open_system_settings` | `{ pane: "microphone" \| "accessibility" \| "login_items" \| "sound_input" }` → `()` | システム設定 (Windows は「設定」アプリ: microphone → `ms-settings:privacy-microphone`、login_items → `ms-settings:startupapps`、sound_input → 既定のマイクを使っている時 `ms-settings:sound-defaultinputproperties`・マイクを選んでいる時 `ms-settings:sound`、accessibility は使わない) を開く。`sound_input` は macOS では サウンド > 入力 (`x-apple.systempreferences:com.apple.Sound-Settings.extension?input`。Apple の公開文書に無いアンカーのため実機で確認する)。`login_items` はログイン項目 (`SMAppService.openSystemSettingsLoginItems`。launchAtLogin を ON にできなかった時の案内用) |
 | `restart_asr` | → `()` | エラーからの復旧 (選択中のモデルで起動し直す。モデルの切り替え中はエラー) |
 | `get_provisioning_status` | → `ProvisioningStatus` | |
 | `start_provisioning` / `pause_provisioning` | → `()` | ダウンロード開始・再開・失敗後の再試行 (実行中・完了済み・削除やアップデートのインストールの実行中なら何もしない) / 一時停止 (止まるまで待って返る) |
@@ -445,7 +448,7 @@ type SettingsCategory = "general" | "voice" | "commands" | "recognition" | "perm
 | event | payload | 頻度・備考 |
 |---|---|---|
 | `status-changed` | `AppStatus` | 状態遷移時 |
-| `audio-level` | `{ level: number; threshold: number; speech: boolean }` (0..1) | ON中のみ、約15Hz (VADフレーム2つごと)。準備中 (`starting`) も送るが、表示側は 0 として扱う。levelはRMSを表示用に正規化、thresholdは感度から求めたしきい値の位置 |
+| `audio-level` | `{ level: number; threshold: number; speech: boolean }` (0..1) | ON中のみ、約15Hz (VADフレーム2つごと)。準備中 (`starting`)・無音 (`no_input`) も送るが、表示側は 0 として扱う。levelはRMSを表示用に正規化、thresholdは感度から求めたしきい値の位置 |
 | `utterance-started` | `{ id: number }` | 発話検出。前の発話の確定処理中に次の発話が始まることがある(idで区別) |
 | `utterance-partial` | `Utterance` | リアルタイムプレビュー |
 | `utterance-result` | `UtteranceResult` | 最終結果と入力結果 |

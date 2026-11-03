@@ -47,8 +47,15 @@ const FINISH_DRAIN_LIMIT: Duration = Duration::from_millis(300);
 /// 届き始めても内蔵マイクは約150〜200ms 減衰した音を返す (実測の最大 約190ms) ため、それに合わせて最短にする
 pub const CAPTURE_SETTLE_MS: u32 = 200;
 const CAPTURE_SETTLE_SAMPLES: usize = SAMPLE_RATE as usize * CAPTURE_SETTLE_MS as usize / 1000;
-/// 届いた音声が完全な 0 のまま (ハードウェアのミュート等) これだけ続いたら warn を1回出す (エラーにはしない)
-const ZERO_WARN_SAMPLES: usize = SAMPLE_RATE as usize * 5;
+/// 無音のフォールバック: ストリームを開いてからこれだけ経っても準備が済まなければ「音が届いていない」と知らせる
+/// (`PipelineSink::capture_no_input`)。マイクが完全な 0 を返し続ける (ミュート・入力音量 0 等) か、
+/// サンプルが届かないと準備中から抜けないため。ウォールクロックで数える (サンプルが届かない間も判定する)。
+/// 起点は押下ではなくストリームを開いた後 (初回のマイク許可のダイアログを待つ間を数えない)。
+/// マイクを開く時間の実測の最大 (約4秒) + `CAPTURE_SETTLE_MS` に余裕を足した値
+pub const CAPTURE_READY_TIMEOUT: Duration = Duration::from_secs(5);
+/// 聞き取り中に完全な 0 がこれだけ (音声の長さ) 続いたら「音が届いていない」と知らせる。
+/// 録音の途中のミュート等。静かな部屋でも完全な 0 にはならない (実測) ため、0 だけを数える
+const NO_INPUT_ZERO_SAMPLES: usize = SAMPLE_RATE as usize * 5;
 /// デバイスが失われた時に開き直すまでの待ち (AirPods のプロファイル切り替え等が落ち着くまで)
 const REOPEN_DELAY: Duration = Duration::from_millis(500);
 /// 開き直してからこの時間内に再び失われたら諦める (開き直しは1回まで)
@@ -73,8 +80,11 @@ pub trait PipelineSink: Send + Sync {
     fn utterance_discarded(&self, id: u64);
     /// デバイス切断など、録音を続けられない
     fn capture_lost(&self, message: String);
-    /// 録音の準備が済んだ (以後の音声を VAD に入れる)。ストリームごとに1回
+    /// 録音の準備が済んだ・音が届き始めた。準備中・無音から抜ける時に1回ずつ
     fn capture_ready(&self);
+    /// マイクの音が届いていない (準備中のまま `CAPTURE_READY_TIMEOUT`、または聞き取り中に 0 が続いた)。
+    /// 音声は VAD に入れ続け、0 でない音が届けば `capture_ready`
+    fn capture_no_input(&self);
     /// 録音を開き直すため準備中に戻る (この後、開き直せれば再び `capture_ready`)
     fn capture_starting(&self);
 }
@@ -266,9 +276,12 @@ fn run(
     let mut proc = Processor::new(vad, sink.clone());
     // 開発用の WAV (先頭1秒が完全な 0) には待ちを掛けず、最初のフレームで準備完了にする
     let settle = !matches!(source, Source::File(_));
-    proc.begin_stream(origin, settle);
+    // 開くのは pipeline::start で済んでいる。フォールバックはここから数える
+    proc.begin_stream(origin, Instant::now(), settle);
     let mut reopened_at: Option<Instant> = None;
     while !stop.load(Ordering::SeqCst) {
+        // サンプルが届かない間 (recv_timeout の Timeout) も無音のフォールバックを判定する
+        proc.tick(Instant::now());
         let lost = match stream.rx.recv_timeout(Duration::from_millis(100)) {
             Ok(AudioMsg::Samples(buf)) => {
                 stream.resampler.push(&buf, |frame| proc.frame(frame));
@@ -300,7 +313,7 @@ fn run(
                 stream = s;
                 reopened_at = Some(Instant::now());
                 // 新しいストリームとして準備をやり直す
-                proc.begin_stream(reopen_origin, settle);
+                proc.begin_stream(reopen_origin, Instant::now(), settle);
             }
             Err(e) => {
                 log::error!("録音を開き直せません: {e:#}");
@@ -326,23 +339,43 @@ fn run(
     proc.into_vad()
 }
 
-/// 録音開始の準備 (ストリームごと)。`Processor::begin_stream` で始め、済んだら `Ready`。
-/// 準備完了 (`capture_ready`) を通知する時点を決めるだけで、音声は止めない
+/// 録音開始の準備と無音の判定 (ストリームごと)。`Processor::begin_stream` で始める。
+/// 通知 (`capture_ready`・`capture_no_input`) の時点を決めるだけで、音声は止めない
 #[derive(Debug)]
 enum Gate {
-    Ready,
+    /// 音を拾っている。`watch` なら完全な 0 が続くのを数える (`zero_samples`)
+    Ready { watch: bool, zero_samples: usize },
+    /// 準備中 (`no_input` = false) または音が届いていない (true)
     Settling {
         /// 届き始めと固定の待ちで判定するか (false なら最初のフレームで準備完了)
         settle: bool,
+        /// 開始の操作 (ON・マイクの切り替え・開き直し) または無音になった時刻 (ログ用)
         origin: Instant,
+        /// 準備中のフォールバック (`CAPTURE_READY_TIMEOUT`) の起点 (ストリームを開いた時刻)
+        opened_at: Instant,
+        /// `capture_no_input` を通知済み
+        no_input: bool,
         /// 先頭の完全な 0 のサンプル数
         zero_samples: usize,
         /// 最初の非 0 フレームからのサンプル数
         settled_samples: usize,
         /// 最初の非 0 フレームを受け取った時刻
         first_audio_at: Option<Instant>,
-        zero_warned: bool,
     },
+}
+
+impl Gate {
+    fn settling(settle: bool, origin: Instant, opened_at: Instant, no_input: bool) -> Self {
+        Self::Settling {
+            settle,
+            origin,
+            opened_at,
+            no_input,
+            zero_samples: 0,
+            settled_samples: 0,
+            first_audio_at: None,
+        }
+    }
 }
 
 /// フレーム単位の処理。スレッドから切り離してテストできるようにする。
@@ -377,67 +410,122 @@ impl<V: VoiceActivityDetector> Processor<V> {
             level_peak_db: f32::MIN,
             vad_failed: false,
             // `begin_stream` を呼ばなければゲートなし (テスト・調整用)
-            gate: Gate::Ready,
+            gate: Gate::Ready {
+                watch: false,
+                zero_samples: 0,
+            },
         }
     }
 
     /// 新しいストリームの開始。`settle` なら届き始め + `CAPTURE_SETTLE_MS` に達した時点で
     /// `PipelineSink::capture_ready` を1回呼ぶ。`settle` でなければ最初のフレームで呼ぶ。
-    /// 準備中の音声も VAD に入れる (区別は表示だけ。準備中に話し始めた分も捨てない)
-    pub fn begin_stream(&mut self, origin: Instant, settle: bool) {
-        self.gate = Gate::Settling {
-            settle,
-            origin,
-            zero_samples: 0,
-            settled_samples: 0,
-            first_audio_at: None,
-            zero_warned: false,
-        };
+    /// 準備中の音声も VAD に入れる (区別は表示だけ。準備中に話し始めた分も捨てない)。
+    /// `settle` でなければ (開発用の WAV) 聞き取り中の 0 は数えない (ファイルの後は 0 を流し続けるため)
+    /// `origin` は開始の操作の時刻 (ログ用)、`opened_at` はストリームを開いた時刻 (フォールバックの起点)
+    pub fn begin_stream(&mut self, origin: Instant, opened_at: Instant, settle: bool) {
+        self.gate = Gate::settling(settle, origin, opened_at, false);
     }
 
-    /// 準備中ならフレームを数え、準備が済んだフレームで `capture_ready` を呼ぶ。
-    /// 数え方はウォールクロックではなく音声の長さ (処理の遅れで待ちが縮まない)
-    fn settle(&mut self, frame: &[f32]) {
+    /// 時刻での判定 (受信ループの毎回。テストのため時刻は引数)。準備中のまま `CAPTURE_READY_TIMEOUT` 経ったら
+    /// `capture_no_input` を1回呼ぶ。以後も準備中と同じく 0 でない音 + `CAPTURE_SETTLE_MS` で `capture_ready`
+    pub fn tick(&mut self, now: Instant) {
         let Gate::Settling {
-            settle,
             origin,
-            zero_samples,
-            settled_samples,
+            opened_at,
+            no_input,
             first_audio_at,
-            zero_warned,
+            zero_samples,
+            ..
         } = &mut self.gate
         else {
             return;
         };
-        if *settle {
-            if first_audio_at.is_none() {
-                if frame.iter().all(|&x| x == 0.0) {
-                    *zero_samples += frame.len();
-                    if *zero_samples >= ZERO_WARN_SAMPLES && !*zero_warned {
-                        *zero_warned = true;
-                        log::warn!(
-                            "マイクの音声が完全な無音のまま {}ms 続いている (ミュートの可能性)",
-                            *zero_samples * 1000 / SAMPLE_RATE as usize
-                        );
-                    }
-                    return;
-                }
-                *first_audio_at = Some(Instant::now());
-            }
-            *settled_samples += frame.len();
-            if *settled_samples < CAPTURE_SETTLE_SAMPLES {
-                return;
-            }
+        if *no_input || now.saturating_duration_since(*opened_at) < CAPTURE_READY_TIMEOUT {
+            return;
         }
-        let now = Instant::now();
-        let first = first_audio_at.unwrap_or(now);
-        log::info!(
-            "録音の準備完了: 開始から {}ms (最初の音声まで {}ms、読み飛ばした無音 {}ms)",
+        *no_input = true;
+        log::warn!(
+            "マイクの音が届いていない: 開始から {}ms 準備が済まない (最初の音声 {}、届いた無音 {}ms。ミュート・入力音量の可能性)",
             now.duration_since(*origin).as_millis(),
-            first.duration_since(*origin).as_millis(),
+            if first_audio_at.is_some() { "あり" } else { "なし" },
             *zero_samples * 1000 / SAMPLE_RATE as usize
         );
-        self.gate = Gate::Ready;
+        self.sink.capture_no_input();
+    }
+
+    /// フレームを数え、準備が済んだ・無音になったフレームで通知する。
+    /// 数え方はウォールクロックではなく音声の長さ (処理の遅れで待ちが縮まない)
+    fn settle(&mut self, frame: &[f32]) {
+        let all_zero = || frame.iter().all(|&x| x == 0.0);
+        let (settle, origin, no_input, zero_samples, first_audio_at) = match &mut self.gate {
+            Gate::Ready {
+                watch,
+                zero_samples,
+            } => {
+                if !*watch {
+                    return;
+                }
+                if !all_zero() {
+                    *zero_samples = 0;
+                    return;
+                }
+                *zero_samples += frame.len();
+                if *zero_samples < NO_INPUT_ZERO_SAMPLES {
+                    return;
+                }
+                log::warn!(
+                    "マイクの音が届いていない: 聞き取り中に完全な無音が {}ms 続いた (ミュート・入力音量の可能性)",
+                    *zero_samples * 1000 / SAMPLE_RATE as usize
+                );
+                let now = Instant::now();
+                self.gate = Gate::settling(true, now, now, true);
+                self.sink.capture_no_input();
+                return;
+            }
+            Gate::Settling {
+                settle,
+                origin,
+                no_input,
+                zero_samples,
+                settled_samples,
+                first_audio_at,
+                ..
+            } => {
+                if *settle {
+                    if first_audio_at.is_none() {
+                        if all_zero() {
+                            *zero_samples += frame.len();
+                            return;
+                        }
+                        *first_audio_at = Some(Instant::now());
+                    }
+                    *settled_samples += frame.len();
+                    if *settled_samples < CAPTURE_SETTLE_SAMPLES {
+                        return;
+                    }
+                }
+                (*settle, *origin, *no_input, *zero_samples, *first_audio_at)
+            }
+        };
+        let now = Instant::now();
+        let first = first_audio_at.unwrap_or(now);
+        let skipped_ms = zero_samples * 1000 / SAMPLE_RATE as usize;
+        if no_input {
+            log::info!(
+                "マイクの音が届き始めた: 準備中・無音の起点から {}ms (読み飛ばした無音 {skipped_ms}ms)",
+                now.duration_since(origin).as_millis(),
+            );
+        } else {
+            log::info!(
+                "録音の準備完了: 開始から {}ms (最初の音声まで {}ms、読み飛ばした無音 {skipped_ms}ms)",
+                now.duration_since(origin).as_millis(),
+                first.duration_since(origin).as_millis(),
+            );
+        }
+        self.gate = Gate::Ready {
+            watch: settle,
+            zero_samples: 0,
+        };
         self.sink.capture_ready();
     }
 
@@ -835,6 +923,9 @@ mod tests {
         fn capture_ready(&self) {
             self.log.lock().unwrap().push("ready".into());
         }
+        fn capture_no_input(&self) {
+            self.log.lock().unwrap().push("no_input".into());
+        }
         fn capture_starting(&self) {
             self.log.lock().unwrap().push("starting".into());
         }
@@ -862,7 +953,7 @@ mod tests {
         let sink = Arc::new(Sink::default());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let mut p = Processor::new(Recording(seen.clone(), 0.0), sink.clone());
-        p.begin_stream(Instant::now(), true);
+        p.begin_stream(Instant::now(), Instant::now(), true);
         for _ in 0..20 {
             p.frame(&frame_of(0.0));
         }
@@ -888,7 +979,7 @@ mod tests {
         let sink = Arc::new(Sink::default());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let mut p = Processor::new(Recording(seen, 0.9), sink.clone());
-        p.begin_stream(Instant::now(), true);
+        p.begin_stream(Instant::now(), Instant::now(), true);
         p.frame(&frame_of(0.3));
         assert_eq!(*sink.log.lock().unwrap(), vec!["start 1"]);
         let audio = p.segmenter.current_audio().unwrap();
@@ -908,7 +999,7 @@ mod tests {
         let sink = Arc::new(Sink::default());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let mut p = Processor::new(Recording(seen.clone(), 0.0), sink.clone());
-        p.begin_stream(Instant::now(), false);
+        p.begin_stream(Instant::now(), Instant::now(), false);
         p.frame(&frame_of(0.0));
         p.frame(&frame_of(0.0));
         assert_eq!(*sink.log.lock().unwrap(), vec!["ready"]);
@@ -921,13 +1012,13 @@ mod tests {
         let sink = Arc::new(Sink::default());
         let seen = Arc::new(Mutex::new(Vec::new()));
         let mut p = Processor::new(Recording(seen, 0.0), sink.clone());
-        p.begin_stream(Instant::now(), true);
+        p.begin_stream(Instant::now(), Instant::now(), true);
         for _ in 0..7 {
             p.frame(&frame_of(0.1));
         }
         assert_eq!(*sink.log.lock().unwrap(), vec!["ready"]);
         p.stop();
-        p.begin_stream(Instant::now(), true);
+        p.begin_stream(Instant::now(), Instant::now(), true);
         for _ in 0..6 {
             p.frame(&frame_of(0.1));
         }
@@ -936,25 +1027,163 @@ mod tests {
         assert_eq!(*sink.log.lock().unwrap(), vec!["ready", "ready"]);
     }
 
-    /// 完全な 0 のままなら準備中のまま (エラーにしない)。warn は1回
+    fn log_of(sink: &Sink) -> Vec<String> {
+        sink.log.lock().unwrap().clone()
+    }
+
+    /// サンプルが届かなくても、開始から 5 秒 (ウォールクロック) で no_input を1回通知する
     #[test]
-    fn gate_stays_while_all_zero() {
+    fn no_samples_times_out_to_no_input() {
+        let sink = Arc::new(Sink::default());
+        let mut p = Processor::new(Recording(Arc::default(), 0.0), sink.clone());
+        let t0 = Instant::now();
+        p.begin_stream(t0, t0, true);
+        p.tick(t0 + CAPTURE_READY_TIMEOUT - Duration::from_millis(1));
+        assert!(log_of(&sink).is_empty());
+        p.tick(t0 + CAPTURE_READY_TIMEOUT);
+        p.tick(t0 + CAPTURE_READY_TIMEOUT * 2);
+        assert_eq!(log_of(&sink), vec!["no_input"], "no_input は1回だけ");
+    }
+
+    /// フォールバックはストリームを開いた時刻から数える (押下からマイク許可のダイアログを待った時間は数えない)
+    #[test]
+    fn timeout_counts_from_stream_open() {
+        let sink = Arc::new(Sink::default());
+        let mut p = Processor::new(Recording(Arc::default(), 0.0), sink.clone());
+        let pressed = Instant::now();
+        let opened = pressed + Duration::from_secs(20);
+        p.begin_stream(pressed, opened, true);
+        p.tick(pressed + CAPTURE_READY_TIMEOUT);
+        p.tick(opened + CAPTURE_READY_TIMEOUT - Duration::from_millis(1));
+        assert!(log_of(&sink).is_empty());
+        p.tick(opened + CAPTURE_READY_TIMEOUT);
+        assert_eq!(log_of(&sink), vec!["no_input"]);
+    }
+
+    /// 完全な 0 のままでも 5 秒で no_input。その後 0 でない音から 200ms で ready (音声はずっと VAD に入れる)
+    #[test]
+    fn all_zero_times_out_then_audio_makes_ready() {
         let sink = Arc::new(Sink::default());
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut p = Processor::new(Recording(seen, 0.0), sink.clone());
-        p.begin_stream(Instant::now(), true);
-        // 5 秒の警告を越える 6 秒分
+        let mut p = Processor::new(Recording(seen.clone(), 0.0), sink.clone());
+        let t0 = Instant::now();
+        p.begin_stream(t0, t0, true);
         for _ in 0..(SAMPLE_RATE as usize * 6 / FRAME_SAMPLES) {
             p.frame(&frame_of(0.0));
         }
-        assert!(sink.log.lock().unwrap().is_empty());
-        assert!(matches!(
-            p.gate,
-            Gate::Settling {
-                zero_warned: true,
-                ..
-            }
-        ));
+        assert!(log_of(&sink).is_empty(), "0 の間は時刻でしか判定しない");
+        p.tick(t0 + CAPTURE_READY_TIMEOUT);
+        assert_eq!(log_of(&sink), vec!["no_input"]);
+        for _ in 0..6 {
+            p.frame(&frame_of(0.1));
+        }
+        assert_eq!(log_of(&sink), vec!["no_input"], "200ms 未満は無音のまま");
+        p.frame(&frame_of(0.1));
+        assert_eq!(log_of(&sink), vec!["no_input", "ready"]);
+        p.tick(t0 + CAPTURE_READY_TIMEOUT * 3);
+        p.frame(&frame_of(0.1));
+        assert_eq!(
+            log_of(&sink),
+            vec!["no_input", "ready"],
+            "ready は重複しない"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 187 + 8, "無音の間も VAD に渡す");
+    }
+
+    /// 音は届いたが 200ms に達する前に 5 秒経った場合も no_input (準備が済んでいない)。届き続ければ ready
+    #[test]
+    fn timeout_applies_until_settled() {
+        let sink = Arc::new(Sink::default());
+        let mut p = Processor::new(Recording(Arc::default(), 0.0), sink.clone());
+        let t0 = Instant::now();
+        p.begin_stream(t0, t0, true);
+        p.frame(&frame_of(0.1));
+        p.tick(t0 + CAPTURE_READY_TIMEOUT);
+        assert_eq!(log_of(&sink), vec!["no_input"]);
+        for _ in 0..6 {
+            p.frame(&frame_of(0.1));
+        }
+        assert_eq!(log_of(&sink), vec!["no_input", "ready"]);
+    }
+
+    /// 準備が済んでいれば時刻では no_input にしない
+    #[test]
+    fn ready_does_not_time_out() {
+        let sink = Arc::new(Sink::default());
+        let mut p = Processor::new(Recording(Arc::default(), 0.0), sink.clone());
+        let t0 = Instant::now();
+        p.begin_stream(t0, t0, true);
+        for _ in 0..7 {
+            p.frame(&frame_of(0.1));
+        }
+        p.tick(t0 + CAPTURE_READY_TIMEOUT * 2);
+        assert_eq!(log_of(&sink), vec!["ready"]);
+    }
+
+    /// 聞き取り中に完全な 0 が音声の長さで 5 秒続いたら no_input。途中に音があれば数え直す。
+    /// その後は 0 でない音 + 200ms で ready
+    #[test]
+    fn zeros_while_ready_become_no_input() {
+        assert_eq!(NO_INPUT_ZERO_SAMPLES.div_ceil(FRAME_SAMPLES), 157);
+        let sink = Arc::new(Sink::default());
+        let mut p = Processor::new(Recording(Arc::default(), 0.0), sink.clone());
+        p.begin_stream(Instant::now(), Instant::now(), true);
+        for _ in 0..7 {
+            p.frame(&frame_of(0.1));
+        }
+        for _ in 0..156 {
+            p.frame(&frame_of(0.0));
+        }
+        p.frame(&frame_of(0.01));
+        for _ in 0..156 {
+            p.frame(&frame_of(0.0));
+        }
+        assert_eq!(log_of(&sink), vec!["ready"], "途中に音があれば数え直す");
+        p.frame(&frame_of(0.0));
+        assert_eq!(log_of(&sink), vec!["ready", "no_input"]);
+        // 無音の後は時刻のフォールバックを重ねない
+        p.tick(Instant::now() + CAPTURE_READY_TIMEOUT * 2);
+        for _ in 0..200 {
+            p.frame(&frame_of(0.0));
+        }
+        assert_eq!(
+            log_of(&sink),
+            vec!["ready", "no_input"],
+            "no_input は重複しない"
+        );
+        for _ in 0..7 {
+            p.frame(&frame_of(0.1));
+        }
+        assert_eq!(log_of(&sink), vec!["ready", "no_input", "ready"]);
+    }
+
+    /// 開発用の WAV (ファイルの後は 0 を流し続ける) では聞き取り中の 0 を数えない
+    #[test]
+    fn file_source_does_not_watch_zeros() {
+        let sink = Arc::new(Sink::default());
+        let mut p = Processor::new(Recording(Arc::default(), 0.0), sink.clone());
+        p.begin_stream(Instant::now(), Instant::now(), false);
+        for _ in 0..(SAMPLE_RATE as usize * 10 / FRAME_SAMPLES) {
+            p.frame(&frame_of(0.0));
+        }
+        assert_eq!(log_of(&sink), vec!["ready"]);
+    }
+
+    /// 開き直し (begin_stream) は無音からでも準備中として判定し直す
+    #[test]
+    fn reopen_restarts_from_starting() {
+        let sink = Arc::new(Sink::default());
+        let mut p = Processor::new(Recording(Arc::default(), 0.0), sink.clone());
+        let t0 = Instant::now();
+        p.begin_stream(t0, t0, true);
+        p.tick(t0 + CAPTURE_READY_TIMEOUT);
+        assert_eq!(log_of(&sink), vec!["no_input"]);
+        let t1 = t0 + CAPTURE_READY_TIMEOUT * 2;
+        p.begin_stream(t1, t1, true);
+        p.tick(t1 + Duration::from_secs(1));
+        assert_eq!(log_of(&sink), vec!["no_input"]);
+        p.tick(t1 + CAPTURE_READY_TIMEOUT);
+        assert_eq!(log_of(&sink), vec!["no_input", "no_input"]);
     }
 
     /// 推論に失敗した VAD は返さない (置き場に戻して使い回さない)

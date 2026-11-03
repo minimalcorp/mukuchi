@@ -35,6 +35,7 @@ import type {
 } from "@/lib/ipc";
 import { ASR_CONTEXT_MAX } from "@/lib/ipc";
 import { devOverrides } from "@/lib/env";
+import { isOnPhase } from "@/lib/phase";
 import { formatShortcut } from "@/lib/shortcut";
 import { findScenario } from "./scenarios";
 import {
@@ -127,8 +128,10 @@ export function installMock(params: URLSearchParams) {
   let provisioningTimer: ReturnType<typeof setInterval> | null = null;
 
   // Rust と同じく状態を変えるたびに seq を増やす
+  // on を渡さず phase を変えた時は phase から既定値を決める (OFF の後の確定処理中 (finalizing・on = false) を再現する時は on を渡す)
   const setStatus = (patch: Partial<Omit<AppStatus, "seq">>) => {
-    db.status = { ...db.status, ...patch, seq: db.status.seq + 1 };
+    const on = patch.on ?? (patch.phase ? isOnPhase(patch.phase) : db.status.on);
+    db.status = { ...db.status, ...patch, on, seq: db.status.seq + 1 };
     fire("status-changed", db.status);
   };
 
@@ -331,7 +334,7 @@ export function installMock(params: URLSearchParams) {
           return db.status;
         case "set_listening": {
           const on = Boolean(a.on);
-          setStatus({ phase: on ? "listening" : "off", error: null });
+          setStatus({ phase: on ? "listening" : "off", on, error: null });
           if (on) db.onListen?.(api);
           return null;
         }
@@ -412,7 +415,7 @@ export function installMock(params: URLSearchParams) {
           // システム設定で許可した想定。1.5 秒後に許可済みにする (setup の 1 秒ごとの再取得で反映される)
           setTimeout(() => {
             const pane = a.pane as string;
-            if (pane === "login_items") return;
+            if (pane === "login_items" || pane === "sound_input") return;
             db.permissions =
               pane === "accessibility"
                 ? { ...db.permissions, accessibility: true }

@@ -36,6 +36,7 @@ use crate::windows::{self, SettingsCategory};
 const TRAY_ID: &str = "main";
 const ID_STATUS: &str = "status";
 const ID_RECOVER: &str = "recover";
+const ID_SOUND_SETTINGS: &str = "sound_settings";
 const ID_TOGGLE: &str = "toggle";
 const ID_SETTINGS: &str = "settings";
 const ID_SETUP: &str = "setup";
@@ -70,9 +71,10 @@ impl IconKind {
     fn of(phase: Phase) -> Self {
         match phase {
             // 読み込み中も使えない状態として OFF と同じにする
-            Phase::Loading | Phase::Off => Self::Off,
-            // 準備中も ON の見た目にする (押下で OFF にできる)
-            Phase::Starting | Phase::Listening | Phase::Done => Self::Listening,
+            // 準備中・無音は OFF の見た目にする (ON の見た目 = 入力が有効、にそろえる。
+            // docs/architecture.md「録音開始の準備中」)。押下で OFF にできるのはメニューの項目で示す
+            Phase::Loading | Phase::Off | Phase::Starting | Phase::NoInput => Self::Off,
+            Phase::Listening | Phase::Done => Self::Listening,
             Phase::Speaking => Self::Speaking,
             Phase::Finalizing => Self::Finalizing,
             Phase::Error => Self::Error,
@@ -109,6 +111,8 @@ struct MenuModel {
     locale: Locale,
     status: String,
     recover: Option<ErrorAction>,
+    /// 「サウンド設定を開く…」を出すか (無音の間だけ。利用者が確かめる先を出す)
+    sound_settings: bool,
     listening: bool,
     toggle_enabled: bool,
     /// 「セットアップを開く…」を出すか
@@ -126,6 +130,7 @@ impl MenuModel {
             setup_item: !setup_completed && recover != Some(ErrorAction::StartSetup),
             status: status_text(s),
             recover,
+            sound_settings: s.phase == Phase::NoInput,
             listening,
             // 読み込み中はONにできない。エラー中にONを選ぶとエラーを消して再試行する
             toggle_enabled: s.phase != Phase::Loading,
@@ -143,6 +148,7 @@ pub fn status_text(s: &AppStatus) -> String {
         .to_string(),
         Phase::Off => Msg::MenuOffReady.to_string(),
         Phase::Starting => Msg::MenuStarting.to_string(),
+        Phase::NoInput => Msg::MenuNoInput.to_string(),
         Phase::Listening | Phase::Speaking | Phase::Finalizing | Phase::Done => {
             Msg::MenuListening.to_string()
         }
@@ -417,6 +423,9 @@ fn menu_entries(m: &MenuModel, variant: MenuVariant) -> Vec<Entry> {
     if let Some(a) = m.recover {
         v.push(item(ID_RECOVER, t(recover_text(a))));
     }
+    if m.sound_settings {
+        v.push(item(ID_SOUND_SETTINGS, t(Msg::MenuOpenSoundSettings)));
+    }
     v.push(Entry::Separator);
     v.push(match variant {
         MenuVariant::Tray => Entry::Item {
@@ -510,6 +519,13 @@ fn on_menu(app: &AppHandle, id: &str) {
             }
         }
         ID_RECOVER => recover(app, &core),
+        ID_SOUND_SETTINGS => {
+            if let Err(e) =
+                permissions::open_system_settings(Pane::SoundInput, &core.settings.get())
+            {
+                log::error!("サウンド設定を開けません: {e:#}");
+            }
+        }
         ID_UPDATE => {
             // 失敗は設定の「このアプリについて」(update-status-changed) とログにだけ出す
             tauri::async_runtime::spawn(async move {
@@ -541,8 +557,12 @@ pub fn recover(app: &AppHandle, core: &Arc<Core>) {
         return;
     };
     let result = match action {
-        ErrorAction::OpenAccessibility => permissions::open_system_settings(Pane::Accessibility),
-        ErrorAction::OpenMicrophone => permissions::open_system_settings(Pane::Microphone),
+        ErrorAction::OpenAccessibility => {
+            permissions::open_system_settings(Pane::Accessibility, &core.settings.get())
+        }
+        ErrorAction::OpenMicrophone => {
+            permissions::open_system_settings(Pane::Microphone, &core.settings.get())
+        }
         ErrorAction::SelectMicrophone => windows::open_settings(app, Some(SettingsCategory::Voice)),
         ErrorAction::StartSetup => windows::open_setup(app),
         ErrorAction::RestartAsr => {
@@ -570,7 +590,7 @@ pub fn recover(app: &AppHandle, core: &Arc<Core>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{AppError, StateManager};
+    use crate::state::{AppError, CaptureState, StateManager};
 
     #[test]
     fn menu_model_per_state() {
@@ -589,7 +609,20 @@ mod tests {
         let m = MenuModel::of(&s.status(), true, true, None);
         assert_eq!(m.status, "準備中");
         assert!(m.toggle_enabled, "準備中も OFF にできる");
-        s.set_capture_ready(true);
+        assert!(!m.sound_settings);
+        s.set_capture(CaptureState::NoInput);
+        let m = MenuModel::of(&s.status(), true, true, None);
+        assert_eq!(m.status, "マイクの音が届いていません");
+        assert!(m.toggle_enabled, "無音も OFF にできる");
+        assert!(m.sound_settings);
+        let e = menu_entries(&m, MenuVariant::Tray);
+        assert_eq!(
+            e[1],
+            item(ID_SOUND_SETTINGS, "サウンド設定を開く…"),
+            "状態の行の直後"
+        );
+        s.set_capture(CaptureState::Ready);
+        assert!(!MenuModel::of(&s.status(), true, true, None).sound_settings);
         assert_eq!(
             MenuModel::of(&s.status(), true, true, None).status,
             "聞いています"
@@ -729,7 +762,8 @@ mod tests {
         assert_eq!(IconKind::of(Phase::Speaking), IconKind::Speaking);
         assert_eq!(IconKind::of(Phase::Finalizing), IconKind::Finalizing);
         assert_eq!(IconKind::of(Phase::Done), IconKind::Listening);
-        assert_eq!(IconKind::of(Phase::Starting), IconKind::Listening);
+        assert_eq!(IconKind::of(Phase::Starting), IconKind::Off);
+        assert_eq!(IconKind::of(Phase::NoInput), IconKind::Off);
         // PNG が @1x=18px / @2x=36px であること
         for png in [ICON_LOGO, ICON_LOGO_OFF, ICON_LOGO_DOT] {
             assert_eq!(&png.x1[16..24], &[0, 0, 0, 18, 0, 0, 0, 18]);

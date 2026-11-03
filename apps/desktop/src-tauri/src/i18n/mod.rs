@@ -203,6 +203,10 @@ pub enum Msg {
     MenuOffReady,
     /// 録音開始の準備中 (Phase::Starting)
     MenuStarting,
+    /// マイクの音が届いていない (Phase::NoInput)
+    MenuNoInput,
+    /// 無音の間だけ出す。OS のサウンドの入力設定を開く
+    MenuOpenSoundSettings,
     MenuListening,
     MenuError,
     MenuOpenSystemSettings,
@@ -487,6 +491,8 @@ mod tests {
             MenuLoading(Some(42)),
             MenuOffReady,
             MenuStarting,
+            MenuNoInput,
+            MenuOpenSoundSettings,
             MenuListening,
             MenuError,
             MenuOpenSystemSettings,
@@ -774,9 +780,11 @@ mod tests {
             UninstallerMissing => 125,
             UninstallerLaunchFailed => 126,
             MenuStarting => 127,
+            MenuNoInput => 128,
+            MenuOpenSoundSettings => 129,
         }
     }
-    const VARIANTS: usize = 128;
+    const VARIANTS: usize = 130;
 
     fn has_japanese(s: &str) -> bool {
         s.chars().any(|c| {

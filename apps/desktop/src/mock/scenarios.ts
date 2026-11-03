@@ -4,6 +4,7 @@
  * 発話・アプリ名は話す言語 (MOCK_SPEECH_TEXTS)、Rust の文言は表示言語 (MOCK_UI_TEXTS) で作る。
  */
 import type { AppError, AppErrorAction, AppErrorCode, AppStatus, Locale } from "@/lib/ipc";
+import { isOnPhase } from "@/lib/phase";
 import { formatShortcut } from "@/lib/shortcut";
 import type { MockApi } from "./index";
 import {
@@ -40,8 +41,9 @@ const ui = (db: MockDb) => MOCK_UI_TEXTS[resolvedLocale(db)];
 const otherLocale = (l: Locale): Locale => (l === "ja" ? "en" : "ja");
 
 /** シナリオの初期状態。Rust と同じく状態を変えるたびに seq を増やす */
-const setStatus = (db: MockDb, s: Omit<AppStatus, "seq">) => {
-  db.status = { ...s, seq: db.status.seq + 1 };
+// on は phase から決める (準備中・無音へは db.status.phase を書き換えるので、on は listening の true のまま)
+const setStatus = (db: MockDb, s: Omit<AppStatus, "seq" | "on">) => {
+  db.status = { ...s, on: isOnPhase(s.phase), seq: db.status.seq + 1 };
 };
 
 const listening = (db: MockDb, level = 0.18) => {
@@ -72,6 +74,9 @@ const errorScenario = (key: string): Scenario => ({
 });
 
 /** 発話 → 途中表示 → 確定 → 入力 を繰り返す (live) */
+// 発話の id は Rust と同じく起動中ずっと増やす (ON のたびに戻すと、パネルが OFF→ON で前回の発話として扱い表示しない)
+let liveId = 100;
+
 function liveLoop(api: MockApi) {
   const t = sp(api.db);
   const sentences = [
@@ -79,14 +84,13 @@ function liveLoop(api: MockApi) {
     { text: t.command, command: "Enter" },
     { text: t.second, app: "Slack" },
   ];
-  let id = 100;
   let i = 0;
   const run = () => {
     if (api.db.status.phase === "off") return;
     const s = sentences[i % sentences.length];
     i += 1;
-    id += 1;
-    const myId = id;
+    liveId += 1;
+    const myId = liveId;
     api.setLevel(0.72, true);
     api.setStatus({ phase: "speaking" });
     api.started(myId);
@@ -130,11 +134,10 @@ export const PREVIEW_DIFF_STEPS = [
 /** PREVIEW_DIFF_STEPS を途中表示 → 確定の順に繰り返し流す (live) */
 function previewDiffLoop(api: MockApi) {
   const STEP_MS = 1400;
-  let id = 200;
   const run = () => {
     if (api.db.status.phase === "off") return;
-    id += 1;
-    const myId = id;
+    liveId += 1;
+    const myId = liveId;
     api.setLevel(0.72, true);
     api.setStatus({ phase: "speaking" });
     api.started(myId);
@@ -203,7 +206,7 @@ const PANEL: Scenario[] = [
   {
     name: "starting",
     // 準備中も Rust の入力レベルが届きうる。メーターが反応しないことを見るため、しきい値を超える値にする
-    description: "オン・準備中 (マイクが音を拾い始める前。&style=compact でコンパクト表示)",
+    description: "オン・準備中 (マイクが音を拾い始める前。OFF と同じピル。&style=compact でコンパクト表示)",
     setup: (db) => {
       listening(db, 0.72);
       db.status.phase = "starting";
@@ -211,7 +214,7 @@ const PANEL: Scenario[] = [
   },
   {
     name: "starting-speaking",
-    description: "準備中に話し始めた (Rust は準備完了まで starting を出す。プレビューは出し、文言は準備中のまま)",
+    description: "準備中に話し始めた (Rust は準備完了まで starting を出す。パネルは広げず、listening/speaking で広げる)",
     setup: (db) => {
       listening(db, 0.72);
       db.status.phase = "starting";
@@ -220,6 +223,15 @@ const PANEL: Scenario[] = [
       api.started(1);
       const t = sp(api.db);
       api.partial({ id: 1, text: t.partial, stableLength: Math.max(0, t.partial.length - 5) });
+    },
+  },
+  {
+    name: "no-input",
+    // マイクの音が完全な 0 (ミュート・入力音量 0 等)。Rust は 5 秒で no_input にする。レベルは届いても 0 として扱う
+    description: "オン・マイクの音が届いていない (no_input。&style=compact でコンパクト表示)",
+    setup: (db) => {
+      listening(db, 0.72);
+      db.status.phase = "no_input";
     },
   },
   { name: "idle", description: "オン・待機中 (しきい値未満)", setup: (db) => listening(db) },
@@ -529,6 +541,15 @@ const SETUP: Scenario[] = [
 
 const SETTINGS: Scenario[] = [
   { name: "default", description: "通常 (オン・待機中)", live: true, setup: (db) => { listening(db, 0.3); db.levelStream = true; } },
+  {
+    name: "no-input",
+    description: "オン・マイクの音が届いていない (no_input。&category=voice で入力レベルの案内)",
+    setup: (db) => {
+      listening(db, 0.3);
+      db.levelStream = true;
+      db.status.phase = "no_input";
+    },
+  },
   { name: "shortcut-conflict", description: "起動時にショートカットを登録できなかった", setup: shortcutConflict },
   {
     name: "perm-denied",

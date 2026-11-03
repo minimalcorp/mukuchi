@@ -8,7 +8,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 // ---------- 型 ----------
 
 // starting: ON にしたがマイクがまだ音を拾えると判断できていない (準備中)。表示だけの区別で、この間の音声も文字起こしに使う (「録音開始の準備中」)
-export type Phase = "loading" | "off" | "starting" | "listening" | "speaking" | "finalizing" | "done" | "error";
+// no_input: ON だがマイクの音が完全な 0 のまま (準備中の 5 秒のフォールバック、または聞き取り中に 0 が 5 秒)。音声は VAD に入れ続け、音が届けば listening
+export type Phase = "loading" | "off" | "starting" | "no_input" | "listening" | "speaking" | "finalizing" | "done" | "error";
 
 export type AppErrorCode =
   | "accessibility_denied"
@@ -43,12 +44,18 @@ export type AppError = {
  * login_items: launchAtLogin を ON にできなかった時 (承認待ち等) の案内用。
  * Windows は「設定」アプリを開く (microphone → ms-settings:privacy-microphone、login_items → ms-settings:startupapps。accessibility は使わない)
  */
-export type SystemSettingsPane = "microphone" | "accessibility" | "login_items";
+// sound_input: OS のサウンドの入力設定。マイクの音が届かない (no_input) 時に、ミュート・入力音量・選んでいるマイクを確かめてもらう
+export type SystemSettingsPane = "microphone" | "accessibility" | "login_items" | "sound_input";
 
 export type AppStatus = {
   phase: Phase;
   loadingProgress: number | null;
   error: AppError | null;
+  /**
+   * 音声入力が ON か (set_listening の状態。starting・no_input は true、OFF の後の確定処理中 (finalizing) は false)。
+   * phase は OFF の後も確定処理中なら finalizing になるため、ON/OFF・OFF→ON の判定はこれで行う
+   */
+  on: boolean;
   /**
    * 状態の通し番号 (Rust が遷移ごとに増やす)。届く順序が前後しても古い状態で上書きしないために使う
    */

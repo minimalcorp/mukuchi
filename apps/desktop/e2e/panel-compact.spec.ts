@@ -70,7 +70,9 @@ const escapeRe = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const STATES: { mock: string; state: string; button: Toggle | null; spinner: boolean; ring: boolean; error: boolean }[] = [
   { mock: "off", state: "off", button: "turnOn", spinner: false, ring: false, error: false },
   { mock: "loading", state: "loading", button: null, spinner: true, ring: false, error: false },
-  { mock: "starting", state: "starting", button: "turnOff", spinner: false, ring: true, error: false },
+  // 準備中・無音は OFF の色で、入力レベルのリングは出さない (panel-starting.spec.ts)
+  { mock: "starting", state: "starting", button: "turnOff", spinner: false, ring: false, error: false },
+  { mock: "no-input", state: "no_input", button: "turnOff", spinner: false, ring: false, error: false },
   { mock: "idle", state: "listening", button: "turnOff", spinner: false, ring: true, error: false },
   { mock: "speaking", state: "speaking", button: "turnOff", spinner: false, ring: true, error: false },
   { mock: "finalizing", state: "finalizing", button: "turnOff", spinner: true, ring: true, error: false },
@@ -91,7 +93,7 @@ test("panel compact: 各状態で円形ボタンだけを表示する", { tag: S
     await expect(page.getByTestId("preview")).toHaveCount(0);
     await expect(page.getByTestId("panel-card")).toHaveCount(0);
     await expect(page.getByTestId("panel-pill")).toHaveCount(0);
-    const words = [m.panel.starting, m.panel.idle, m.panel.speaking, m.panel.finalizing, m.panel.errors.asr_stopped, m.panel.loadingModelShort];
+    const words = [m.panel.starting, m.panel.noInput, m.panel.idle, m.panel.speaking, m.panel.finalizing, m.panel.errors.asr_stopped, m.panel.loadingModelShort];
     await expect(page.locator("body")).not.toContainText(new RegExp(words.map(escapeRe).join("|")));
     // 36px の円
     await expect(compact(page)).toHaveCSS("width", "36px");

@@ -55,7 +55,7 @@ monorepo。JS/TS の依存はルートの pnpm workspace (`pnpm-workspace.yaml`�
 | `make build` / `make build-local` (Windows) | **Windows のインストーラー** `mukuchi_x64-setup.exe` (NSIS・`currentUser`・コード署名なし。`<target>/release/bundle/windows-release/` に .sha256 と)。中身は `apps/desktop/scripts/build-windows.mjs` (同梱物 (llama-server・VC++ ランタイム) → 依存の確認 → `tauri build --bundles nsis` → 中身の確認)。`build-local` は仮の値の検査 (`check-release-blockers`) だけ省く。手順・VC++ ランタイムの扱いは [docs/release.md](docs/release.md) の「Windows」 |
 | `node apps/desktop/scripts/check-windows-dlls.mjs [<file\|dir>...]` | Windows の同梱の exe・DLL の依存 (PE の import) が同じフォルダの DLL か Windows 標準に解決できるかを確かめる (OS 不問。既定は `bundle-resources/llama-server`)。VC++ ランタイムは `fetch-vc-runtime.mjs` (`fetch-llama-server.mjs` から呼ばれる) が sha256 固定で置く |
 | `make help` | ターゲット一覧 |
-| `pnpm lint` / `pnpm build` / `pnpm test` / `pnpm screenshots` (`apps/desktop` で実行) | desktop のフロントエンドの lint / 型チェック+ビルド / Playwright (撮影なし。ja は全件、en は表示とはみ出し・言語で分岐する所だけ、実時間を測るものは最後に 1 worker。分け方は `playwright.config.ts`) / ライト・ダークの主要画面を ja・en で撮影 (`apps/desktop/e2e/screenshots/{ja,en}/`) |
+| `pnpm lint` / `pnpm build` / `pnpm test` / `pnpm screenshots` (`apps/desktop` で実行) | desktop のフロントエンドの lint / 型チェック+ビルド / Playwright (撮影なし。ja は全件、en は表示とはみ出し・言語で分岐する所だけ。アニメーションの動きは確かめない。分け方は `playwright.config.ts`) / ライト・ダークの主要画面を ja・en で撮影 (`apps/desktop/e2e/screenshots/{ja,en}/`) |
 | `pnpm lint` / `pnpm typecheck` / `pnpm build` / `pnpm test` (`apps/web` で実行) | web の lint+prettier / 型検査 / 静的ビルド / Playwright (chromium) |
 
 `make` はnix devShell外で実行された場合 `nix develop -c` 経由で実行される。flake はgit管理下のファイルしか見ないため、`flake.nix` 等の新規ファイルは `git add` してから使う。

@@ -7,7 +7,6 @@
  * タグ (playwright.config.ts の projects が grep で振り分ける):
  * - I18N: en でも回す。UI は言語で共通で辞書の文言を差し替えているだけなので、en は「英語で表示されること」と
  *   「はみ出さないこと」、言語で分岐する所 (推奨モデルの並び・区切り文字・Intl の書式・OFF のピルの幅) だけを確かめる
- * - TIMING: 実時間 (毎フレームの採取・アニメーションの経過) を測る。並列の負荷で揺れないよう最後に 1 worker で回す
  * - SCREENSHOT: pnpm screenshots で撮影する (通常の pnpm test でも確認は行い、撮影だけを省く)
  * - SCREENSHOT_ONLY: 撮影のためだけのテスト。pnpm screenshots でだけ回す
  * - WINDOWS: Windows (appPlatform = windows) の表示。chromium (WebView2 は Chromium) の win-* project でだけ回し、
@@ -25,7 +24,6 @@ export { expect } from "@playwright/test";
 export type { Locale, Messages, PerOs };
 
 export const I18N = "@i18n";
-export const TIMING = "@timing";
 export const SCREENSHOT = "@screenshot";
 export const SCREENSHOT_ONLY = "@screenshot-only";
 export const WINDOWS = "@windows";

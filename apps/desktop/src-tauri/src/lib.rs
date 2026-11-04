@@ -1,6 +1,5 @@
 mod app_menu;
 mod asr;
-#[cfg(target_os = "windows")]
 mod asr_filters;
 mod asr_process;
 mod audio;

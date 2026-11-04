@@ -1,6 +1,6 @@
 [package]
 name = "mukuchi"
-version = "0.6.0"
+version = "0.6.1"
 description = "Voice input app"
 authors = ["minimalcorp"]
 edition = "2021"

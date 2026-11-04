@@ -11,6 +11,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
 
 use crate::asr::{self, AsrBackend, Transcript};
+use crate::asr_filters;
 use crate::asr_process::{AsrEvent, AsrProcess, LaunchSpec};
 use crate::audio::{self, Source};
 use crate::gpu::{GpuManager, GpuStatus};
@@ -1717,10 +1718,10 @@ impl Core {
             let secs = samples.len() as f64 / crate::vad::SAMPLE_RATE as f64;
             let result = async {
                 let wav = audio::encode_wav_16k(&samples)?;
-                client.transcribe(wav, language, context).await
+                client.transcribe(wav, language, context.clone()).await
             }
             .await;
-            core.partial_done(id, commit, result, secs, started);
+            core.partial_done(id, commit, result, context.as_deref(), secs, started);
         });
         true
     }
@@ -1730,6 +1731,7 @@ impl Core {
         id: u64,
         commit: bool,
         result: Result<Transcript>,
+        context: Option<&str>,
         secs: f64,
         started: Instant,
     ) {
@@ -1774,6 +1776,19 @@ impl Core {
             return;
         };
         if chunks.failed {
+            return;
+        }
+        // 認識のヒントの書き写しの疑いがあれば表示しない (区切りにも積まない)。途中表示は認識し直さない:
+        // 推論は直列のため確定を遅らせる。表示は確定 (全音声を認識し直して判定する) で置き換わる
+        if let Some(check) = context
+            .map(|c| asr_filters::context_echo_check(&text, c))
+            .filter(|c| c.is_suspect())
+        {
+            log::info!(
+                "発話 {id} の途中表示はヒントの書き写しの疑いのため表示しない: {}文字, 一致 {:.2}",
+                check.chars,
+                check.ratio
+            );
             return;
         }
         if commit {
@@ -1867,10 +1882,7 @@ impl Core {
             let result = async {
                 let client = client.ok_or_else(|| anyhow!("ASRサーバーに接続していません"))?;
                 let wav = audio::encode_wav_16k(&samples)?;
-                client
-                    .transcribe(wav, language, context)
-                    .await
-                    .map(|t| t.text)
+                transcribe_final(client.as_ref(), id, wav, language, context).await
             }
             .await;
             core.finals_in_flight.fetch_sub(1, Ordering::SeqCst);
@@ -1882,6 +1894,55 @@ impl Core {
             let _ = tx.send(result);
         });
     }
+}
+
+/// 確定の文字起こし。認識のヒントの書き写しの疑いがあれば、同じ音声をヒントなしで認識し直して
+/// 採用を決める (docs/architecture.md「決定事項」の認識のヒントの書き写しの除外。Mac・Windows 共通)
+async fn transcribe_final(
+    client: &dyn AsrBackend,
+    id: u64,
+    wav: Vec<u8>,
+    language: Locale,
+    context: Option<String>,
+) -> Result<String> {
+    let Some(ctx) = context else {
+        return client.transcribe(wav, language, None).await.map(|t| t.text);
+    };
+    // 認識し直す時に同じ音声を送るため残す (疑いがある時だけ使う)
+    let with_hint = client
+        .transcribe(wav.clone(), language, Some(ctx.clone()))
+        .await?
+        .text;
+    let check = asr_filters::context_echo_check(&with_hint, &ctx);
+    if !check.is_suspect() {
+        return Ok(with_hint);
+    }
+    let started = Instant::now();
+    let without_hint = match client.transcribe(wav, language, None).await {
+        Ok(t) => t.text,
+        Err(e) => {
+            // 書き写しの可能性が高いため、ヒントありの結果は入力しない
+            log::warn!(
+                "発話 {id} はヒントの書き写しの疑い ({}文字, 一致 {:.2}) だが、ヒントなしの認識に失敗したため入力しない: {e:#}",
+                check.chars,
+                check.ratio
+            );
+            return Ok(String::new());
+        }
+    };
+    let decision = asr_filters::decide_context_echo(&with_hint, &without_hint);
+    log::info!(
+        "発話 {id} はヒントの書き写しの疑い ({}文字, 一致 {:.2}): ヒントなし {}文字, {}ms → {decision:?}",
+        check.chars,
+        check.ratio,
+        without_hint.chars().count(),
+        started.elapsed().as_millis()
+    );
+    Ok(match decision {
+        asr_filters::EchoDecision::KeepWithHint => with_hint,
+        asr_filters::EchoDecision::UseWithoutHint => without_hint,
+        asr_filters::EchoDecision::Drop => String::new(),
+    })
 }
 
 /// 自動で起動し直さない異常終了 (Crashed{will_restart:false}) への対応
@@ -2258,6 +2319,105 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ヒントあり・なしで決まった結果を返す ASR (呼ばれたヒントを記録する)
+    struct FakeAsr {
+        with_hint: String,
+        without_hint: Result<String, String>,
+        calls: Mutex<Vec<Option<String>>>,
+    }
+
+    impl FakeAsr {
+        fn new(with_hint: &str, without_hint: Result<&str, &str>) -> Self {
+            Self {
+                with_hint: with_hint.into(),
+                without_hint: without_hint.map(Into::into).map_err(Into::into),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl AsrBackend for FakeAsr {
+        fn base_url(&self) -> &str {
+            "fake"
+        }
+
+        fn health(&self) -> asr::BoxFuture<Result<String>> {
+            Box::pin(async { Ok(String::new()) })
+        }
+
+        fn transcribe(
+            &self,
+            _wav: Vec<u8>,
+            _language: Locale,
+            context: Option<String>,
+        ) -> asr::BoxFuture<Result<Transcript>> {
+            let r = match context {
+                Some(_) => Ok(self.with_hint.clone()),
+                None => self.without_hint.clone().map_err(|e| anyhow!(e)),
+            };
+            self.calls.lock().unwrap().push(context);
+            Box::pin(async move {
+                r.map(|text| Transcript {
+                    text,
+                    server_ms: None,
+                })
+            })
+        }
+    }
+
+    const SYN: &str =
+        "mukuchi の開発。固有名詞: Tauri, Qwen3-ASR, MLX, pnpm, process-compose, minimalcorp";
+    const SYN_ECHO: &str =
+        "mukuchiの開発。固有名詞:Tauri、Qwen3-ASR、MLX、pnpm、process-compose、minimalcorp";
+
+    /// (結果, ヒントなしで認識し直したか)
+    fn run_final(asr: &FakeAsr, context: Option<&str>) -> (Result<String>, bool) {
+        let r = tauri::async_runtime::block_on(transcribe_final(
+            asr,
+            1,
+            vec![0; 4],
+            Locale::Ja,
+            context.map(Into::into),
+        ));
+        let calls = asr.calls.lock().unwrap();
+        let retried = calls.len() == 2 && calls[1].is_none();
+        assert!(calls.len() <= 2);
+        (r, retried)
+    }
+
+    #[test]
+    fn final_retries_without_hint_when_echo_is_suspected() {
+        // 書き写し → ヒントなしの結果
+        let asr = FakeAsr::new(SYN_ECHO, Ok("うん。"));
+        let (r, retried) = run_final(&asr, Some(SYN));
+        assert_eq!(r.unwrap(), "うん。");
+        assert!(retried);
+        // 書き写しで、ヒントなしは無音の定型 → 空
+        let asr = FakeAsr::new(SYN_ECHO, Ok("はい。"));
+        assert_eq!(run_final(&asr, Some(SYN)).0.unwrap(), "");
+        // ヒントの語を話した (長さが近い) → ヒントあり
+        let asr = FakeAsr::new("pnpm。", Ok("P.N.P.M."));
+        let (r, retried) = run_final(&asr, Some(SYN));
+        assert_eq!(r.unwrap(), "pnpm。");
+        assert!(retried);
+        // 認識し直しに失敗 → 書き写しの可能性が高いので空
+        let asr = FakeAsr::new(SYN_ECHO, Err("down"));
+        assert_eq!(run_final(&asr, Some(SYN)).0.unwrap(), "");
+    }
+
+    #[test]
+    fn final_does_not_retry_without_suspicion() {
+        let asr = FakeAsr::new("タウリとMLX。", Ok("unused"));
+        let (r, retried) = run_final(&asr, Some(SYN));
+        assert_eq!(r.unwrap(), "タウリとMLX。");
+        assert!(!retried);
+        assert_eq!(asr.calls.lock().unwrap().len(), 1);
+        // ヒントが無ければ判定しない (ヒントなしの1回だけ)
+        let asr = FakeAsr::new("unused", Ok(SYN_ECHO));
+        assert_eq!(run_final(&asr, None).0.unwrap(), SYN_ECHO);
+        assert_eq!(*asr.calls.lock().unwrap(), vec![None]);
+    }
 
     /// 起動してすぐ落ちる ASR サーバー (python の代わりの sh スクリプト。sh が要るため unix のみ)
     #[cfg(unix)]

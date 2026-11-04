@@ -1,6 +1,6 @@
 /*
  * panel のアンカー (get_panel_anchor / panel-anchor)。描画内容をアンカーの辺・角に寄せ、展開がアンカー側から広がることを確認する。
- * 展開・収縮の途中でアンカーの辺が動かないこと・set_panel_size の値は panel-collapse.spec.ts で確かめる。
+ * 展開・収縮での set_panel_size の値は panel-collapse.spec.ts で確かめる (途中でアンカーの辺が動かないことは目で見て確かめる)。
  */
 import type { Page } from "@playwright/test";
 import { expect, SCREENSHOT_ONLY, settleAnimations, test } from "./fixtures";
@@ -65,7 +65,7 @@ test("panel anchor: 描画内容をアンカーの辺・角に寄せ、展開は
     };
 
     const pill = await check();
-    // 展開中のアンカーの辺・角の動き (毎フレーム) は panel-collapse.spec.ts で確かめる。ここは展開後の配置
+    // 展開中のアンカーの辺・角の動きは目で見て確かめる。ここは展開後の配置
     await mock(page, SPEAK);
     await expect(page.getByTestId("panel-card")).toHaveCSS("width", "360px");
     await settleAnimations(page);

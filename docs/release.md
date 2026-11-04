@@ -9,17 +9,19 @@ Windows の NSIS インストーラー `mukuchi_x64-setup.exe` (コード署名�
 1. 資格情報を確認 (無ければビルド前に日本語のエラーで止まる)
 2. `tauri build --bundles app --no-sign` で .app。dmgbuild で .dmg のテンプレート (見た目だけ。.app なし) を作る (下記「.dmg の見た目」)
 3. `codesign --options runtime --timestamp --entitlements apps/desktop/src-tauri/Entitlements.plist` で .app に署名 (`--deep` なし。同梱 uv `Contents/Helpers/uv` は開発元の署名のまま)
-4. .app を zip にして `notarytool submit --wait` → `stapler staple`
+4. .app を zip にして `notarytool submit --wait` → `stapler staple` (`stapler validate` はここでは行わず手順 7 に任せる。staple 自体が validate も行い、Apple への問い合わせの回数を減らすため)
 5. staple 済みの .app を updater 用の tar.gz にする (下記「アップデートの配布物」)
 6. テンプレートに staple 済みの .app を `hdiutil`・`ditto` で入れて UDZO の .dmg にし、署名 → 公証 → staple
 7. `apps/desktop/scripts/verify-macos.sh` (`make verify`)
+
+`stapler staple` (手順 4・6) と verify の `stapler validate` は、出力に `NSURLErrorDomain` を含む失敗 (Apple の CloudKit への通信断。例: `Code=-1005 "The network connection was lost."` → `Error 68`) だけを 10 秒・30 秒あけて最大 3 回やり直す (`apps/desktop/scripts/lib/stapler-retry.sh`。待ち時間は `MUKUCHI_STAPLER_RETRY_DELAYS`)。それ以外の失敗 (票が無い等) は 1 回で元の終了コードで失敗し、3 回とも通信断でも失敗のまま。再試行は `retry_network: 通信が切れた …` と stderr に出る。`spctl` は再試行しない。根拠: Apple DTS は原因をたいていクライアント側のネットワークとし、自動化ではやり直すよう勧めている ([forums 824494](https://developer.apple.com/forums/thread/824494)・[forums 728864](https://developer.apple.com/forums/thread/728864))。CloudKit の通信断 ([`CKError.Code.serverResponseLost`](https://developer.apple.com/documentation/cloudkit/ckerror/code/serverresponselost)) は冪等な操作なら再試行してよい
 
 生成物 (`apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/` の下):
 
 - `dmg/mukuchi_<version>_aarch64.dmg`
 - `updater/mukuchi_aarch64.app.tar.gz` (署名 (.sig)・`latest.json` は作らない。CI の publish-desktop が作る)
 
-手順 2 だけを `apps/desktop/scripts/build-macos.sh --build-only` (資格情報を見ない)、3〜6 だけを `--sign-only` (Apple のツールと標準ライブラリだけの python3 のみ。pnpm・cargo・uv の依存・本体を実行しない。7 は行わない) で実行できる。`make build` は両方を続けて行う。CI はこれを別 job に分け、第三者の依存が動くビルドを secret のない場所で行う。
+手順 2 だけを `apps/desktop/scripts/build-macos.sh --build-only` (資格情報を見ない)、3〜6 だけを `--sign-only` (Apple のツールと標準ライブラリだけの python3 のみ。ほかはリポジトリ内の `apps/desktop/scripts/lib/stapler-retry.sh` を読むだけ。pnpm・cargo・uv の依存・本体を実行しない。7 は行わない) で実行できる。`make build` は両方を続けて行う。CI はこれを別 job に分け、第三者の依存が動くビルドを secret のない場所で行う。
 
 `make build-local` は手順 2・3 を ad-hoc 署名で行う (公証しない)。`make dmg-local` はそれに加えて .dmg を作る (署名・公証しない。ウィンドウの見た目の確認用)。`make verify` は ad-hoc の場合 Gatekeeper・公証・.dmg の署名の項目を SKIP と表示する。
 
@@ -314,7 +316,7 @@ Windows の job (`Rust Windows (fmt, clippy, test)`・`Frontend Windows (lint, b
 
 | 対象 | 確認 |
 |---|---|
-| .app | `codesign --verify --deep --strict`、Hardened Runtime、secure timestamp、entitlements がマイクのみ、Info.plist (バンドルID・`LSMinimumSystemVersion` 13.0・マイクの説明文)、`/nix/store` へのリンクなし、`mukuchi --print-uv-path` が `Contents/Helpers/uv`、`spctl -a -vv -t exec` が `Notarized Developer ID`、`stapler validate` |
+| .app | `codesign --verify --deep --strict`、Hardened Runtime、secure timestamp、entitlements がマイクのみ、Info.plist (バンドルID・`LSMinimumSystemVersion` 13.0・マイクの説明文)、`/nix/store` へのリンクなし、`mukuchi --print-uv-path` が `Contents/Helpers/uv`、`spctl -a -vv -t exec` が `Notarized Developer ID`、`stapler validate` (通信断のみ再試行。以下同じ) |
 | 同梱 uv | 開発元の Developer ID 署名 (Team ID 固定)・Hardened Runtime・timestamp。MacOS/・Helpers/ 以外に Mach-O がない |
 | updater の tar.gz | `check-updater-archive.py` (最上位が `mukuchi.app/`・`._*`/xattr なし・中身が .app と同じ)、`--strip-components 1` で展開した .app の `codesign --verify --deep --strict`・CDHash が .app と同じ・`stapler validate` |
 | .dmg | `codesign --verify --strict`、`spctl -a -vv -t open --context context:primary-signature`、`stapler validate`、中の .app が同じ CDHash で staple 済み、見た目 (`apps/desktop/scripts/check-dmg-layout.py`) |

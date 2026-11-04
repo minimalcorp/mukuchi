@@ -155,6 +155,8 @@ lint: ## 全アプリの lint・型検査 (JS/TS・sst.config.ts・cargo fmt/cli
 test: ## 全アプリのテスト (Playwright・cargo test・pytest・リリース用スクリプト)
 	pnpm run test
 	node --test scripts/*.test.mjs
+	@# 署名 job は devShell 外の macOS の /bin/bash 3.2 で stapler-retry.sh を読むため、3.2 でも確かめる (CI の web job は ubuntu の bash 5)
+	MUKUCHI_TEST_BASH=/bin/bash node --test scripts/stapler-retry.test.mjs
 	cargo test --manifest-path $(DESKTOP)/src-tauri/Cargo.toml --locked
 	cd $(DESKTOP)/asr-server && uv run --frozen pytest -q
 

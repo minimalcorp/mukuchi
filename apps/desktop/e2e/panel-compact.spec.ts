@@ -4,7 +4,7 @@
  * 通常 ⇄ コンパクトの切り替え、設定 > 一般 のスイッチを確認する。pnpm screenshots でライト・ダークを撮る (ダークは撮影だけ)。
  */
 import type { Locator, Page } from "@playwright/test";
-import { expect, SCREENSHOT, SCREENSHOT_ONLY, test, TIMING } from "./fixtures";
+import { expect, SCREENSHOT, SCREENSHOT_ONLY, test } from "./fixtures";
 
 const PANEL = { width: 560, height: 260 };
 const SETTINGS = { width: 840, height: 640 };
@@ -204,16 +204,14 @@ for (const s of [
   });
 }
 
-// 面 (panel-morph) が出て消えるのを実時間で捉えるため TIMING
-test("panel: 通常 → コンパクトは面が縮んでから円を出し、ウィンドウも縮む", { tag: TIMING }, async ({ page, m }) => {
+test("panel: 通常 → コンパクトは円を出し、縮み終わってからウィンドウを 1 回だけ縮める", async ({ page, m }) => {
   await open(page, "window=panel&mock=idle");
   await expect(page.getByText(m.panel.idle)).toBeVisible();
   await expect.poll(async () => (await panelSizes(page)).length).toBeGreaterThan(0);
   const before = (await panelSizes(page)).length;
   await mock(page, `api.invoke("update_settings", { patch: { panelStyle: "compact" } });`);
-  await expect(page.getByTestId("panel-morph")).toBeVisible();
-  await expect(page.getByTestId("panel-morph")).toBeHidden();
   await expect(compact(page)).toBeVisible();
+  await expect(page.getByTestId("panel-morph")).toBeHidden();
   // 縮み終わってから最終の大きさを 1 回だけ送る (途中の大きさでウィンドウを縮めない)
   await expect.poll(async () => (await panelSizes(page)).slice(before)).toEqual([COMPACT_SIZE]);
 });

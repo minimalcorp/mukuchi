@@ -72,6 +72,8 @@ step() { echo "==> $*"; }
 # devShell は DEVELOPER_DIR/SDKROOT を nixpkgs の SDK に向け、PATH の xcrun も xcbuild 版にする。
 # notarytool・stapler はホストの Xcode (または Command Line Tools) にしかないため外して呼ぶ
 hostxcrun() { env -u DEVELOPER_DIR -u SDKROOT /usr/bin/xcrun "$@"; }
+# shellcheck source=lib/stapler-retry.sh
+. "$root/scripts/lib/stapler-retry.sh"
 
 # ---- 資格情報の確認 (release のみ) --------------------------------------------------------------
 
@@ -305,10 +307,13 @@ notarize() {
   fi
 }
 
+# staple は Apple (CloudKit) への問い合わせが通信断で落ちることがあるため、その時だけやり直す (lib/stapler-retry.sh)。
+# stapler validate はここでは行わない: staple 自体が "staple and validate" を行い、同じ対象を verify-macos.sh でも
+# validate するため (問い合わせの回数を減らして通信断に当たる機会を減らす)。
+# fd 3 は make の jobserver 等を受け継いでいることがあるため、告知用にこの呼び出しだけ stderr へ向ける
 staple() {
   step "staple $(basename "$1")"
-  hostxcrun stapler staple "$1"
-  hostxcrun stapler validate "$1"
+  retry_network hostxcrun stapler staple "$1" 3>&2
 }
 
 # 1回目: .app を公証して staple する。dmg だけを公証すると中の .app には票 (ticket) が付かず、

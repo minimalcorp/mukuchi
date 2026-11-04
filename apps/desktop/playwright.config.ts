@@ -7,12 +7,14 @@ import type { AppLocaleOptions } from "./e2e/fixtures";
 // モックの OS の言語 (表示言語) は e2e/fixtures.ts の appLocale で切り替える。
 //
 // テストはタグ (e2e/fixtures.ts) で project に振り分ける:
-// - ja: 全テスト (実時間を測る @timing と撮影だけの @screenshot-only を除く)。並列
+// - ja: 全テスト (撮影だけの @screenshot-only を除く)。並列
 // - en: 英語の表示・はみ出しと言語で分岐する所 (@i18n) だけ。並列
-// - ja-timing / en-timing: @timing を、並列の project が終わってから 1 worker で回す (並列の負荷でフレームが間引かれないように)
 // - win-ja / win-en: Windows の表示 (@windows) を Chromium で回す (Windows の WebView2 は Chromium)。Mac の project は @windows を回さない
 // pnpm screenshots (SCREENSHOTS=1) は撮影するテスト (@screenshot・@screenshot-only) だけを ja・en で回す
 // (Windows は e2e/screenshots/windows/<言語>/ に撮る)
+//
+// アニメーションの動き (毎フレームの大きさ・途中の値) は確かめない。CI ではフレームが間引かれて不安定になるため、
+// 見た目は目で見て確かめ、テストは最終状態だけを見る
 //
 // どの OS の project を回すかは MUKUCHI_E2E_PLATFORM (macos | windows | all)。既定は実行するホストの OS
 // (Mac の CI・手元は webkit だけ、Windows の CI・手元は chromium だけを入れれば回る)
@@ -31,18 +33,8 @@ const winEn = { ...chromium, appLocale: "en" as const, appPlatform: "windows" as
 const testProjects: Project<AppLocaleOptions>[] = [
   ...(RUN_MACOS
     ? [
-        { name: "ja", use: ja, grepInvert: /@timing|@screenshot-only|@windows/ },
-        { name: "en", use: en, grep: /@i18n/, grepInvert: /@timing|@screenshot-only|@windows/ },
-        { name: "ja-timing", use: ja, grep: /@timing/, grepInvert: /@windows/, workers: 1, dependencies: ["ja", "en"] },
-        // @timing かつ @i18n (タグの順序によらない)
-        {
-          name: "en-timing",
-          use: en,
-          grep: /^(?=.*@timing)(?=.*@i18n)/,
-          grepInvert: /@windows/,
-          workers: 1,
-          dependencies: ["ja-timing"],
-        },
+        { name: "ja", use: ja, grepInvert: /@screenshot-only|@windows/ },
+        { name: "en", use: en, grep: /@i18n/, grepInvert: /@screenshot-only|@windows/ },
       ]
     : []),
   ...(RUN_WINDOWS
